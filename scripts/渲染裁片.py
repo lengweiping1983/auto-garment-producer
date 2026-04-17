@@ -99,7 +99,36 @@ def tile_image(tile: Image.Image, size: tuple[int, int], offset_x: int = 0, offs
     return out
 
 
-def transform_texture(texture: Image.Image, plan: dict) -> Image.Image:
+def auto_rotation_for_direction(texture: Image.Image, texture_direction: str, piece: dict) -> float:
+    """根据裁片方向和纹理方向计算自动旋转角度。
+
+    longitudinal = 纹理沿裁片长度方向
+    transverse   = 纹理沿裁片宽度方向
+    """
+    if not texture_direction:
+        return 0
+    piece_aspect = piece["width"] / max(1, piece["height"])
+    tex_aspect = texture.width / max(1, texture.height)
+
+    # 纹理方向性不明显的（接近正方形），不需要自动旋转
+    if 0.7 <= tex_aspect <= 1.4:
+        return 0
+
+    is_tex_horizontal = tex_aspect > 1
+    is_piece_horizontal = piece_aspect > 1
+
+    if texture_direction == "longitudinal":
+        # 纹理应沿裁片长度方向
+        if is_piece_horizontal != is_tex_horizontal:
+            return 90
+    elif texture_direction == "transverse":
+        # 纹理应沿裁片宽度方向（与长度垂直）
+        if is_piece_horizontal == is_tex_horizontal:
+            return 90
+    return 0
+
+
+def transform_texture(texture: Image.Image, plan: dict, piece: dict | None = None) -> Image.Image:
     """对面纹理应用缩放、旋转、镜像变换。"""
     out = texture.convert("RGBA")
     if plan.get("mirror_x"):
@@ -110,6 +139,9 @@ def transform_texture(texture: Image.Image, plan: dict) -> Image.Image:
     if abs(scale - 1) > 0.001:
         out = out.resize((max(1, round(out.width * scale)), max(1, round(out.height * scale))), Image.Resampling.LANCZOS)
     rotation = float(plan.get("rotation", 0) or 0)
+    # 应用 texture_direction 自动旋转
+    if piece:
+        rotation += auto_rotation_for_direction(out, plan.get("texture_direction", ""), piece)
     if abs(rotation % 360) > 0.001:
         out = out.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
     return out
@@ -186,7 +218,7 @@ def render_solid_layer(piece: dict, layer: dict, solids: dict) -> Image.Image:
 def render_texture_layer(piece: dict, layer: dict, texture_info: dict) -> Image.Image:
     """渲染纹理图层。"""
     texture = Image.open(texture_info["path"]).convert("RGBA")
-    texture = transform_texture(texture, layer)
+    texture = transform_texture(texture, layer, piece)
     content = tile_image(texture, (piece["width"], piece["height"]), int(layer.get("offset_x", 0) or 0), int(layer.get("offset_y", 0) or 0))
     return apply_opacity(content, float(layer.get("opacity", 1) or 1))
 
@@ -332,6 +364,7 @@ def write_manifest(texture_set: dict, fill_plan: dict, rendered: list[dict], pre
                 "solid_id": item["plan"].get("solid_id"),
                 "scale": item["plan"].get("scale", 1),
                 "rotation": item["plan"].get("rotation", 0),
+                "texture_direction": item["plan"].get("texture_direction", ""),
                 "base": item["plan"].get("base"),
                 "overlay": item["plan"].get("overlay"),
                 "trim": item["plan"].get("trim"),

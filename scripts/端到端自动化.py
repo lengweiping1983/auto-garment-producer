@@ -2,7 +2,7 @@
 """
 端到端自动化：
 
-1. 生成或接收 Neo AI 2×2 面料看板。
+1. 生成或接收 Neo AI 3×3 面料看板。
 2. 裁剪为已批准的设计资产。
 3. 构建面料组合.json。
 4. 从纸样 mask 提取服装裁片。
@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageColor, ImageEnhance
+from PIL import Image, ImageColor, ImageEnhance, ImageFilter, ImageStat
 
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
@@ -95,19 +95,118 @@ def mirror_tile(image: Image.Image) -> Image.Image:
     return out
 
 
-def make_motif_transparent(panel: Image.Image, threshold: int = 238) -> Image.Image:
-    """将看板右下角的 hero 区域处理为透明背景图案。"""
-    img = panel.convert("RGBA")
+def detect_grid_gaps(board: Image.Image, div_x1: int, div_x2: int, div_y1: int, div_y2: int, strip_width: int = 40) -> int:
+    """检测 3×3 网格的两条水平分隔带和两条垂直分隔带，返回统一的安全边距。"""
+    gray = board.convert("L")
+    width, height = gray.size
+    gap_insets = []
+
+    # 两条水平分隔带检测
+    for mid_y in (div_y1, div_y2):
+        y0 = max(0, mid_y - strip_width)
+        y1 = min(height, mid_y + strip_width)
+        h_strip = gray.crop((0, y0, width, y1))
+        h_pixels = list(h_strip.getdata())
+        strip_w = h_strip.width
+        row_diffs = []
+        for y in range(h_strip.height):
+            row = [h_pixels[y * strip_w + x] for x in range(strip_w)]
+            diffs = [abs(row[i] - row[i - 1]) for i in range(1, len(row))]
+            row_diffs.append(sum(diffs) / max(1, len(diffs)))
+        if sum(1 for d in row_diffs if d > 18) > h_strip.height * 0.25:
+            gap_insets.append(20)
+
+    # 两条垂直分隔带检测
+    for mid_x in (div_x1, div_x2):
+        x0 = max(0, mid_x - strip_width)
+        x1 = min(width, mid_x + strip_width)
+        v_strip = gray.crop((x0, 0, x1, height))
+        v_pixels = list(v_strip.getdata())
+        strip_h = v_strip.height
+        col_diffs = []
+        for x in range(v_strip.width):
+            col = [v_pixels[y * v_strip.width + x] for y in range(strip_h)]
+            diffs = [abs(col[i] - col[i - 1]) for i in range(1, len(col))]
+            col_diffs.append(sum(diffs) / max(1, len(diffs)))
+        if sum(1 for d in col_diffs if d > 18) > v_strip.width * 0.25:
+            gap_insets.append(20)
+
+    return max(gap_insets) if gap_insets else 0
+
+
+def clean_motif_bottom(panel: Image.Image, text_threshold: float = 0.08) -> Image.Image:
+    """检测并裁剪 motif 底部可能的文字条带。"""
+    gray = panel.convert("L")
+    width, height = gray.size
+    bottom_h = max(30, height // 4)
+    bottom_region = gray.crop((0, height - bottom_h, width, height))
+    pixels = list(bottom_region.getdata())
+    row_diffs = []
+    for y in range(bottom_h):
+        row = [pixels[y * width + x] for x in range(width)]
+        diffs = [abs(row[i] - row[i - 1]) for i in range(1, len(row))]
+        row_diffs.append(sum(diffs) / max(1, len(diffs)))
+    # 寻找底部区域内的高差异连续行
+    high_diff_rows = 0
+    in_text = False
+    for y, d in enumerate(row_diffs):
+        if d > 12:
+            if not in_text:
+                in_text = True
+        elif d <= 6:
+            if in_text:
+                in_text = False
+    # 统计高差异行数
+    high_diff_rows = sum(1 for d in row_diffs if d > 12)
+    if high_diff_rows > bottom_h * text_threshold:
+        # 找到文字条带的起始位置
+        text_start = 0
+        for y, d in enumerate(row_diffs):
+            if d > 12:
+                text_start = y
+                break
+        # 裁剪掉底部文字区域
+        crop_h = max(1, height - bottom_h + text_start)
+        print(f"[motif清理] 裁剪掉底部文字区域，高度从 {height} 减至 {crop_h}")
+        return panel.crop((0, 0, width, crop_h))
+    return panel
+
+
+def make_motif_transparent(panel: Image.Image, threshold: int = 235) -> Image.Image:
+    """增强版透明背景去除：亮度+饱和度+边缘密度联合判断。
+    threshold 默认为 235，以兼容暖象牙白背景（如 #f3f1df ~ 243,241,223）。"""
+    # 先裁剪底部可能的文字条带
+    img = clean_motif_bottom(panel)
+    img = img.convert("RGBA")
     pixels = img.load()
-    for y in range(img.height):
-        for x in range(img.width):
+    width, height = img.size
+
+    for y in range(height):
+        for x in range(width):
             r, g, b, a = pixels[x, y]
-            bright = r >= threshold and g >= threshold and b >= threshold
-            low_chroma = max(r, g, b) - min(r, g, b) < 24
+            # 使用相对亮度和色度判断，兼容暖白/冷白/微蓝背景
+            total = r + g + b
+            bright = total >= 705  # 平均 235，覆盖暖象牙白
+            low_chroma = max(r, g, b) - min(r, g, b) < 45
             if bright and low_chroma:
                 pixels[x, y] = (r, g, b, 0)
             elif bright:
-                pixels[x, y] = (r, g, b, max(0, min(a, 160)))
+                pixels[x, y] = (r, g, b, max(0, min(a, 140)))
+
+    # 二次清理：检测并去除孤立的高对比度文字像素（小面积高边缘区域）
+    gray = img.convert("L").filter(ImageFilter.FIND_EDGES)
+    edge_pixels = list(gray.getdata())
+    alpha = img.getchannel("A")
+    alpha_pixels = list(alpha.getdata())
+    for idx, edge_val in enumerate(edge_pixels):
+        if edge_val > 120 and alpha_pixels[idx] > 0:
+            # 高边缘 + 不透明 = 可能是文字笔画
+            y, x = divmod(idx, width)
+            # 检查周围像素亮度，如果周围是白色背景则设为透明
+            r, g, b, a = pixels[x, y]
+            if r >= 230 and g >= 230 and b >= 230:
+                pixels[x, y] = (r, g, b, 0)
+
     alpha = img.getchannel("A")
     bbox = alpha.getbbox()
     if bbox:
@@ -125,34 +224,128 @@ def quiet_solid_from_image(image: Image.Image, fallback: str = "#78965c") -> str
     return "#{:02x}{:02x}{:02x}".format(*mixed)
 
 
+def clean_internal_text_strip(image: Image.Image, min_strip_height: int = 5, diff_threshold: float = 12.0) -> Image.Image:
+    """检测并去除图像内部任意位置的水平文字条带（高对比度水平区域）。
+    适用于 3×3 看板裁剪后每个面板内部可能含有的文字标签。
+    """
+    gray = image.convert("L")
+    width, height = gray.size
+    pixels = list(gray.getdata())
+
+    row_diffs = []
+    for y in range(height):
+        row = [pixels[y * width + x] for x in range(width)]
+        diffs = [abs(row[i] - row[i - 1]) for i in range(1, len(row))]
+        row_diffs.append(sum(diffs) / max(1, len(diffs)))
+
+    # 找连续的高差异行（文字特征）
+    text_regions = []
+    in_text = False
+    start = 0
+    for y, diff in enumerate(row_diffs):
+        if diff > diff_threshold and not in_text:
+            in_text = True
+            start = y
+        elif diff <= diff_threshold * 0.35 and in_text:
+            in_text = False
+            if y - start >= min_strip_height:
+                text_regions.append((start, y))
+    if in_text and height - start >= min_strip_height:
+        text_regions.append((start, height))
+
+    if not text_regions:
+        return image
+
+    # 评估每个区域是否最可能是文字标签
+    best_region = None
+    best_score = 0
+    for start_y, end_y in text_regions:
+        region_h = end_y - start_y
+        region_pixels = [pixels[y * width + x] for y in range(start_y, end_y) for x in range(width)]
+        mean_brightness = sum(region_pixels) / len(region_pixels)
+        avg_diff = sum(row_diffs[start_y:end_y]) / max(1, region_h)
+        # 文字区域通常是白底黑字，亮度较高（>180）且差异大，高度适中
+        score = avg_diff * (mean_brightness / 255.0) * (1.0 if 6 <= region_h <= 140 else 0.2)
+        if score > best_score:
+            best_score = score
+            best_region = (start_y, end_y)
+
+    if not best_region or best_score < 80:
+        return image
+
+    start_y, end_y = best_region
+    print(f"[文字清理] 裁剪掉文字条带 y={start_y}-{end_y}（高度{end_y - start_y}，分数{best_score:.1f}）")
+
+    # 合并上下部分（条带可能在图像中间）
+    top = image.crop((0, 0, width, start_y + 1))
+    bottom = image.crop((0, end_y - 1, width, height))
+
+    if top.height > 10 and bottom.height > 10:
+        merged = Image.new(image.mode, (width, top.height + bottom.height))
+        merged.paste(top, (0, 0))
+        merged.paste(bottom, (0, top.height))
+        return merged
+    elif top.height > 10:
+        return top
+    elif bottom.height > 10:
+        return bottom
+    return image
+
+
 def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_tiles: bool) -> Path:
-    """将 2×2 面料看板裁剪为四种资产，并生成面料组合.json。"""
+    """将 3×3 面料看板裁剪为九种资产，并生成面料组合.json。
+    支持智能分隔带检测，自动扩大安全边距，并清理面板内部文字。"""
     assets_dir = out_dir / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
     board = Image.open(board_path).convert("RGBA")
     width, height = board.size
-    mid_x, mid_y = width // 2, height // 2
+    div_x1, div_x2 = width // 3, 2 * width // 3
+    div_y1, div_y2 = height // 3, 2 * height // 3
+
+    # 智能检测网格分隔带文字，动态调整边距
+    extra_gap = detect_grid_gaps(board, div_x1, div_x2, div_y1, div_y2)
+    effective_inset = inset + extra_gap
+    # 确保不越界
+    max_inset = min(div_x1, width - div_x2, div_y1, height - div_y2) - 64
+    effective_inset = min(effective_inset, max_inset)
+    if effective_inset > inset:
+        print(f"[智能裁剪] 检测到分隔带文字，边距从 {inset} 扩大到 {effective_inset}")
+
     boxes = {
-        "main": (inset, inset, mid_x - inset, mid_y - inset),
-        "secondary": (mid_x + inset, inset, width - inset, mid_y - inset),
-        "accent": (inset, mid_y + inset, mid_x - inset, height - inset),
-        "hero_motif": (mid_x + inset, mid_y + inset, width - inset, height - inset),
+        # Row 1: Base textures
+        "main": (effective_inset, effective_inset, div_x1 - effective_inset, div_y1 - effective_inset),
+        "secondary": (div_x1 + effective_inset, effective_inset, div_x2 - effective_inset, div_y1 - effective_inset),
+        "dark_base": (div_x2 + effective_inset, effective_inset, width - effective_inset, div_y1 - effective_inset),
+        # Row 2: Mid-scale accents
+        "accent_light": (effective_inset, div_y1 + effective_inset, div_x1 - effective_inset, div_y2 - effective_inset),
+        "accent_mid": (div_x1 + effective_inset, div_y1 + effective_inset, div_x2 - effective_inset, div_y2 - effective_inset),
+        "solid_quiet": (div_x2 + effective_inset, div_y1 + effective_inset, width - effective_inset, div_y2 - effective_inset),
+        # Row 3: Placement motifs
+        "hero_motif_1": (effective_inset, div_y2 + effective_inset, div_x1 - effective_inset, height - effective_inset),
+        "hero_motif_2": (div_x1 + effective_inset, div_y2 + effective_inset, div_x2 - effective_inset, height - effective_inset),
+        "trim_motif": (div_x2 + effective_inset, div_y2 + effective_inset, width - effective_inset, height - effective_inset),
     }
+
     paths = {}
     for asset_id, box in boxes.items():
         crop = board.crop(box)
-        if asset_id == "hero_motif":
+        # Row 3: motifs → transparent RGBA
+        if asset_id in ("hero_motif_1", "hero_motif_2", "trim_motif"):
             crop = make_motif_transparent(crop)
             path = assets_dir / f"{asset_id}.png"
             crop.save(path)
         else:
+            # Row 1 & 2: textures → clean + tile repair + RGB
+            crop = clean_internal_text_strip(crop)
             if repair_tiles:
                 crop = mirror_tile(crop)
             path = assets_dir / f"{asset_id}.png"
             crop.convert("RGB").save(path)
         paths[asset_id] = path
 
-    solid = quiet_solid_from_image(Image.open(paths["secondary"]))
+    quiet_solid = quiet_solid_from_image(Image.open(paths["solid_quiet"]))
+    moss_color = quiet_solid_from_image(Image.open(paths["secondary"]))
+
     texture_set = {
         "texture_set_id": f"{out_dir.name}_neo_collection_texture_set",
         "locked": False,
@@ -163,7 +356,7 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "path": str(paths["main"].resolve()),
                 "role": "main",
                 "approved": True,
-                "prompt": "从 Neo AI 2×2 面料看板裁剪：主底纹",
+                "prompt": "从 Neo AI 3×3 面料看板裁剪：主底纹",
                 "model": "neo-ai",
                 "seed": "",
                 "qc": {"approved": True},
@@ -173,17 +366,47 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "path": str(paths["secondary"].resolve()),
                 "role": "secondary",
                 "approved": True,
-                "prompt": "从 Neo AI 2×2 面料看板裁剪：辅纹理",
+                "prompt": "从 Neo AI 3×3 面料看板裁剪：辅纹理",
                 "model": "neo-ai",
                 "seed": "",
                 "qc": {"approved": True},
             },
             {
-                "texture_id": "accent",
-                "path": str(paths["accent"].resolve()),
-                "role": "accent",
+                "texture_id": "dark_base",
+                "path": str(paths["dark_base"].resolve()),
+                "role": "dark_base",
                 "approved": True,
-                "prompt": "从 Neo AI 2×2 面料看板裁剪：点缀纹理",
+                "prompt": "从 Neo AI 3×3 面料看板裁剪：深色底纹",
+                "model": "neo-ai",
+                "seed": "",
+                "qc": {"approved": True},
+            },
+            {
+                "texture_id": "accent_light",
+                "path": str(paths["accent_light"].resolve()),
+                "role": "accent_light",
+                "approved": True,
+                "prompt": "从 Neo AI 3×3 面料看板裁剪：浅色点缀纹理",
+                "model": "neo-ai",
+                "seed": "",
+                "qc": {"approved": True},
+            },
+            {
+                "texture_id": "accent_mid",
+                "path": str(paths["accent_mid"].resolve()),
+                "role": "accent_mid",
+                "approved": True,
+                "prompt": "从 Neo AI 3×3 面料看板裁剪：中调点缀纹理",
+                "model": "neo-ai",
+                "seed": "",
+                "qc": {"approved": True},
+            },
+            {
+                "texture_id": "solid_quiet",
+                "path": str(paths["solid_quiet"].resolve()),
+                "role": "solid_quiet",
+                "approved": True,
+                "prompt": "从 Neo AI 3×3 面料看板裁剪：安静纯色面板",
                 "model": "neo-ai",
                 "seed": "",
                 "qc": {"approved": True},
@@ -191,18 +414,42 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
         ],
         "motifs": [
             {
-                "motif_id": "hero_motif",
-                "path": str(paths["hero_motif"].resolve()),
+                "motif_id": "hero_motif_1",
+                "texture_id": "hero_motif_1",
+                "path": str(paths["hero_motif_1"].resolve()),
                 "role": "hero",
                 "approved": True,
-                "prompt": "从 Neo AI 2×2 面料看板裁剪：卖点定位图案",
+                "prompt": "从 Neo AI 3×3 面料看板裁剪：卖点定位图案 1",
                 "model": "neo-ai",
                 "seed": "",
                 "qc": {"approved": True},
-            }
+            },
+            {
+                "motif_id": "hero_motif_2",
+                "texture_id": "hero_motif_2",
+                "path": str(paths["hero_motif_2"].resolve()),
+                "role": "hero",
+                "approved": True,
+                "prompt": "从 Neo AI 3×3 面料看板裁剪：卖点定位图案 2",
+                "model": "neo-ai",
+                "seed": "",
+                "qc": {"approved": True},
+            },
+            {
+                "motif_id": "trim_motif",
+                "texture_id": "trim_motif",
+                "path": str(paths["trim_motif"].resolve()),
+                "role": "trim",
+                "approved": True,
+                "prompt": "从 Neo AI 3×3 面料看板裁剪：饰边定位图案",
+                "model": "neo-ai",
+                "seed": "",
+                "qc": {"approved": True},
+            },
         ],
         "solids": [
-            {"solid_id": "quiet_moss", "color": solid, "approved": True},
+            {"solid_id": "quiet_solid", "color": quiet_solid, "approved": True},
+            {"solid_id": "quiet_moss", "color": moss_color, "approved": True},
             {"solid_id": "warm_ivory", "color": "#f3f1df", "approved": True},
         ],
     }
@@ -213,7 +460,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="生成 Neo AI 面料看板并自动渲染服装裁片。")
     parser.add_argument("--pattern", required=True, help="透明纸样 mask PNG/WebP")
     parser.add_argument("--out", required=True, help="输出目录")
-    parser.add_argument("--collection-board", default="", help="已有的 Neo AI 2×2 面料看板。若省略，则调用 Neo AI 生成。")
+    parser.add_argument("--collection-board", default="", help="已有的 Neo AI 3×3 面料看板。若省略，则调用 Neo AI 生成。")
     parser.add_argument("--prompt-file", default="", help="Neo AI 看板生成的提示词文件")
     parser.add_argument("--negative-prompt-file", default="", help="Neo AI 看板生成的反向提示词文件")
     parser.add_argument("--token", default="", help="Neodomain 访问令牌。优先使用 NEODOMAIN_ACCESS_TOKEN 环境变量。")
@@ -221,9 +468,11 @@ def main() -> int:
     parser.add_argument("--neo-size", default="2K", choices=["1K", "2K", "4K"])
     parser.add_argument("--num-images", default="1", choices=["1", "4"])
     parser.add_argument("--seed", type=int)
-    parser.add_argument("--crop-inset", type=int, default=24, help="从每个象限裁剪的像素数，用于去除网格间隙。")
+    parser.add_argument("--crop-inset", type=int, default=60, help="从每个象限裁剪的像素数，用于去除网格间隙和文字标签。默认 60。")
     parser.add_argument("--no-tile-repair", action="store_true", help="不将纹理裁剪镜像修复为无缝图块。")
     parser.add_argument("--brief", default="", help="可选的商业设计简报 JSON 路径")
+    parser.add_argument("--ai-plan", default="", help="子 Agent 生成的 AI 填充计划 JSON 路径。若提供，优先使用 AI 审美决策。")
+    parser.add_argument("--construct-ai-request", action="store_true", help="在部位映射后构造子 Agent 审美请求并退出，等待外部子 Agent 生成 ai_piece_fill_plan.json。")
     args = parser.parse_args()
 
     out_dir = Path(args.out)
@@ -267,6 +516,25 @@ def main() -> int:
     ]
     run_step(qc_cmd)
 
+    # 构造子 Agent 审美请求（如果启用）
+    if args.construct_ai_request:
+        request_cmd = [
+            sys.executable,
+            str(SKILL_DIR / "scripts" / "构造审美请求.py"),
+            "--pieces", str(pieces_path),
+            "--garment-map", str(out_dir / "garment_map.json"),
+            "--texture-set", str(texture_set_path),
+            "--out", str(out_dir),
+        ]
+        if args.brief:
+            request_cmd.extend(["--brief", args.brief])
+        run_step(request_cmd)
+        print("\n[提示] 子 Agent 审美请求已构造。请启动子 Agent 阅读以下文件并输出 ai_piece_fill_plan.json：")
+        print(f"  提示词文件: {out_dir / 'ai_fill_plan_prompt.txt'}")
+        print(f"  预期输出: {out_dir / 'ai_piece_fill_plan.json'}")
+        print("  完成后重新运行本脚本并传入 --ai-plan 参数。\n")
+        return 0
+
     plan_cmd = [
         sys.executable,
         str(SKILL_DIR / "scripts" / "创建填充计划.py"),
@@ -281,6 +549,14 @@ def main() -> int:
     ]
     if args.brief:
         plan_cmd.extend(["--brief", args.brief])
+    if args.ai_plan:
+        ai_plan_path = Path(args.ai_plan)
+        if not ai_plan_path.is_absolute():
+            ai_plan_path = out_dir / ai_plan_path
+        if ai_plan_path.exists():
+            plan_cmd.extend(["--ai-plan", str(ai_plan_path)])
+        else:
+            print(f"[警告] AI 计划不存在: {ai_plan_path}，将使用后端规则生成。")
     run_step(plan_cmd)
 
     rendered_dir = out_dir / "rendered"

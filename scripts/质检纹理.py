@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageStat
+from PIL import Image, ImageChops, ImageFilter, ImageStat
 
 
 def load_json(path: str | Path) -> dict:
@@ -33,6 +33,31 @@ def variation_score(img: Image.Image) -> float:
     return max(0.0, min(1.0, sum(std) / 3 / 72.0))
 
 
+def text_residual_score(img: Image.Image) -> float:
+    """检测纹理中是否含有文字残留。返回 0-1 分数，越高表示文字越明显。
+    通过检测高对比度水平线条簇来识别文字特征。
+    """
+    gray = img.convert("L").resize((256, 256), Image.Resampling.LANCZOS)
+    width, height = gray.size
+    pixels = list(gray.getdata())
+
+    # 水平投影：每行相邻像素的平均差异
+    row_variations = []
+    for y in range(height):
+        row = [pixels[y * width + x] for x in range(width)]
+        diffs = [abs(row[i] - row[i - 1]) for i in range(1, len(row))]
+        row_variations.append(sum(diffs) / max(1, len(diffs)))
+
+    # 检测边缘密度（文字通常有高边缘密度）
+    edges = gray.filter(ImageFilter.FIND_EDGES)
+    edge_mean = ImageStat.Stat(edges).mean[0]
+
+    # 综合分数：高变化行比例 + 边缘密度
+    high_variation_ratio = sum(1 for v in row_variations if v > 25) / max(1, height)
+    edge_score = min(1.0, edge_mean / 48.0)
+    return min(1.0, high_variation_ratio * 0.6 + edge_score * 0.4)
+
+
 def validate_texture(texture: dict, base_dir: Path) -> dict:
     """验证单个面料资产。"""
     issues = []
@@ -56,12 +81,17 @@ def validate_texture(texture: dict, base_dir: Path) -> dict:
             "approved": False,
             "issues": [{"type": "open_failed", "message": f"无法打开: {exc}"}],
         }
+    text_score = text_residual_score(img)
     if width < 512 or height < 512:
         issues.append({"type": "too_small", "message": f"尺寸过小: {width}x{height}"})
     if tileable < 0.55:
         issues.append({"type": "low_tileable_score", "message": f"可平铺分数过低: {tileable:.3f}"})
-    if variation < 0.06:
+    # 纯色面板允许低变化度
+    role = texture.get("role", "")
+    if variation < 0.06 and "solid" not in role.lower():
         issues.append({"type": "low_variation", "message": f"变化度过低: {variation:.3f}"})
+    if text_score > 0.50:
+        issues.append({"type": "text_residual_detected", "message": f"检测到文字残留特征: {text_score:.3f}，看板可能含有文字标签"})
     if not texture.get("approved", False):
         issues.append({"type": "not_user_approved", "message": "texture.approved 不为 true"})
     approved = not issues
@@ -72,6 +102,7 @@ def validate_texture(texture: dict, base_dir: Path) -> dict:
         "approved": approved,
         "tileable_score": round(tileable, 3),
         "variation_score": round(variation, 3),
+        "text_residual_score": round(text_score, 3),
         "issues": issues,
     }
 

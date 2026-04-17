@@ -24,6 +24,20 @@ def direction_degrees(piece: dict) -> int:
     return 0
 
 
+def texture_direction(garment_role: str, zone: str, aspect: float) -> str:
+    """推断裁片的纹理方向：transverse（横向）或 longitudinal（纵向）。"""
+    if garment_role in ("front_hero", "back_body", "secondary_body"):
+        return "transverse"
+    if garment_role in ("sleeve_pair", "sleeve_or_side_panel", "side_or_long_panel"):
+        return "longitudinal"
+    if zone == "trim" or garment_role in ("trim_strip", "collar_or_upper_trim", "hem_or_lower_trim"):
+        # 饰边沿长边方向
+        return "longitudinal" if aspect >= 1.0 else "transverse"
+    if zone == "secondary":
+        return "longitudinal" if aspect >= 1.2 else "transverse"
+    return "transverse"
+
+
 def infer_roles(pieces_payload: dict) -> list[dict]:
     """基于几何特征推断每个裁片的服装部位角色。"""
     pieces = pieces_payload.get("pieces", [])
@@ -85,6 +99,7 @@ def infer_roles(pieces_payload: dict) -> list[dict]:
             "symmetry_group": "",
             "same_shape_group": "",
             "direction_degrees": direction_degrees(piece),
+            "texture_direction": texture_direction(role, zone, aspect),
             "confidence": round(confidence, 2),
             "reason": "；".join(reason),
         }
