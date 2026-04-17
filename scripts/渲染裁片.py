@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+"""
+使用已批准的面料、图案和纯色填充服装裁片，输出透明 PNG、预览图与清单。
+"""
+import argparse
+import json
+import math
+from pathlib import Path
+
+from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageOps
+
+
+def load_json(path: str | Path) -> dict:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def approved_textures(texture_set: dict, base_dir: Path) -> dict:
+    """加载已批准的面料资产。"""
+    textures = {}
+    for item in texture_set.get("textures", []):
+        if not item.get("approved", False):
+            continue
+        path = Path(item.get("path", ""))
+        if not path.is_absolute():
+            path = base_dir / path
+        if not path.exists():
+            continue
+        texture_id = item.get("texture_id") or item.get("role")
+        textures[texture_id] = {**item, "path": str(path.resolve())}
+        role = item.get("role")
+        if role and role not in textures:
+            textures[role] = textures[texture_id]
+    return textures
+
+
+def approved_solids(texture_set: dict) -> dict:
+    """加载已批准的纯色。"""
+    solids = {}
+    for item in texture_set.get("solids", []):
+        if item.get("approved", True):
+            solids[item.get("solid_id", "solid")] = item
+    return solids
+
+
+def approved_motifs(texture_set: dict, base_dir: Path) -> dict:
+    """加载已批准的图案资产。"""
+    motifs = {}
+    for item in texture_set.get("motifs", []):
+        if not item.get("approved", False):
+            continue
+        path = Path(item.get("path", ""))
+        if not path.is_absolute():
+            path = base_dir / path
+        if not path.exists():
+            continue
+        motif_id = item.get("motif_id") or item.get("role")
+        motifs[motif_id] = {**item, "path": str(path.resolve())}
+        role = item.get("role")
+        if role and role not in motifs:
+            motifs[role] = motifs[motif_id]
+    return motifs
+
+
+def choose_texture_id(piece: dict, index: int, textures: dict) -> str:
+    """根据裁片特征自动选择面料编号。"""
+    role = piece.get("piece_role", "")
+    aspect = piece["width"] / max(1, piece["height"])
+    if role == "main" or index == 0:
+        return "main" if "main" in textures else next(iter(textures))
+    if role == "strip" or aspect >= 3 or aspect <= 0.3:
+        return "dark" if "dark" in textures else "accent" if "accent" in textures else next(iter(textures))
+    if piece["area"] > 900000:
+        return "secondary" if "secondary" in textures else "main" if "main" in textures else next(iter(textures))
+    return "accent" if "accent" in textures else "secondary" if "secondary" in textures else next(iter(textures))
+
+
+def make_default_fill_plan(pieces_payload: dict, texture_set: dict, textures: dict, solids: dict) -> dict:
+    """当未提供填充计划时，根据启发式规则自动生成。"""
+    entries = []
+    solid_id = next(iter(solids), "")
+    for index, piece in enumerate(pieces_payload.get("pieces", [])):
+        aspect = piece["width"] / max(1, piece["height"])
+        if (piece.get("piece_role") == "strip" or aspect >= 3 or aspect <= 0.3) and solid_id:
+            entries.append({"piece_id": piece["piece_id"], "fill_type": "solid", "solid_id": solid_id, "reason": "细条或窄裁片使用已批准纯色"})
+        else:
+            texture_id = choose_texture_id(piece, index, textures)
+            entries.append({"piece_id": piece["piece_id"], "fill_type": "texture", "texture_id": texture_id, "scale": 1.0, "rotation": 0, "offset_x": 0, "offset_y": 0, "mirror_x": False, "mirror_y": False, "reason": "按裁片尺寸与角色自动分配"})
+    return {"plan_id": "auto_piece_fill_plan", "texture_set_id": texture_set.get("texture_set_id", ""), "locked": False, "pieces": entries}
+
+
+def tile_image(tile: Image.Image, size: tuple[int, int], offset_x: int = 0, offset_y: int = 0) -> Image.Image:
+    """将纹理图块平铺到指定尺寸画布。"""
+    out = Image.new("RGBA", size, (0, 0, 0, 0))
+    start_x = -tile.width + (offset_x % max(1, tile.width))
+    start_y = -tile.height + (offset_y % max(1, tile.height))
+    for y in range(start_y, size[1], tile.height):
+        for x in range(start_x, size[0], tile.width):
+            out.alpha_composite(tile, (x, y))
+    return out
+
+
+def transform_texture(texture: Image.Image, plan: dict) -> Image.Image:
+    """对面纹理应用缩放、旋转、镜像变换。"""
+    out = texture.convert("RGBA")
+    if plan.get("mirror_x"):
+        out = ImageOps.mirror(out)
+    if plan.get("mirror_y"):
+        out = ImageOps.flip(out)
+    scale = max(0.05, float(plan.get("scale", 1) or 1))
+    if abs(scale - 1) > 0.001:
+        out = out.resize((max(1, round(out.width * scale)), max(1, round(out.height * scale))), Image.Resampling.LANCZOS)
+    rotation = float(plan.get("rotation", 0) or 0)
+    if abs(rotation % 360) > 0.001:
+        out = out.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
+    return out
+
+
+def apply_opacity(image: Image.Image, opacity: float) -> Image.Image:
+    """调整图像不透明度。"""
+    out = image.convert("RGBA")
+    opacity = max(0.0, min(1.0, float(opacity)))
+    if opacity >= 0.999:
+        return out
+    alpha = out.getchannel("A").point(lambda value: round(value * opacity))
+    out.putalpha(alpha)
+    return out
+
+
+def apply_mask(content: Image.Image, mask_path: str | Path) -> Image.Image:
+    """应用裁片遮罩作为 Alpha 通道。"""
+    with Image.open(mask_path).convert("L") as mask:
+        if content.size != mask.size:
+            content = content.resize(mask.size, Image.Resampling.LANCZOS)
+        out = content.convert("RGBA")
+        out.putalpha(mask)
+        return out
+
+
+def anchor_position(anchor: str, canvas_size: tuple[int, int], item_size: tuple[int, int], offset_x: int, offset_y: int) -> tuple[int, int]:
+    """根据锚点计算图案放置位置。"""
+    width, height = canvas_size
+    item_w, item_h = item_size
+    positions = {
+        "center": ((width - item_w) // 2, (height - item_h) // 2),
+        "top": ((width - item_w) // 2, 0),
+        "bottom": ((width - item_w) // 2, height - item_h),
+        "left": (0, (height - item_h) // 2),
+        "right": (width - item_w, (height - item_h) // 2),
+        "top_left": (0, 0),
+        "top_right": (width - item_w, 0),
+        "bottom_left": (0, height - item_h),
+        "bottom_right": (width - item_w, height - item_h),
+    }
+    x, y = positions.get(anchor, positions["center"])
+    return x + offset_x, y + offset_y
+
+
+def render_texture_piece(piece: dict, plan: dict, texture_info: dict) -> Image.Image:
+    """渲染单层纹理裁片。"""
+    texture = Image.open(texture_info["path"]).convert("RGBA")
+    texture = transform_texture(texture, plan)
+    content = tile_image(texture, (piece["width"], piece["height"]), int(plan.get("offset_x", 0) or 0), int(plan.get("offset_y", 0) or 0))
+    return apply_mask(content, piece["mask_path"])
+
+
+def render_solid_piece(piece: dict, plan: dict, solids: dict) -> Image.Image:
+    """渲染单层纯色裁片。"""
+    solid = solids.get(plan.get("solid_id")) or next(iter(solids.values()), {"color": "#6f9a4d"})
+    try:
+        color = ImageColor.getrgb(solid.get("color", "#6f9a4d")) + (255,)
+    except Exception:
+        color = (107, 143, 69, 255)
+    return apply_mask(Image.new("RGBA", (piece["width"], piece["height"]), color), piece["mask_path"])
+
+
+def render_solid_layer(piece: dict, layer: dict, solids: dict) -> Image.Image:
+    """渲染纯色图层。"""
+    solid = solids.get(layer.get("solid_id")) or next(iter(solids.values()), {"color": "#6f9a4d"})
+    try:
+        color = ImageColor.getrgb(solid.get("color", "#6f9a4d")) + (255,)
+    except Exception:
+        color = (107, 143, 69, 255)
+    return apply_opacity(Image.new("RGBA", (piece["width"], piece["height"]), color), float(layer.get("opacity", 1) or 1))
+
+
+def render_texture_layer(piece: dict, layer: dict, texture_info: dict) -> Image.Image:
+    """渲染纹理图层。"""
+    texture = Image.open(texture_info["path"]).convert("RGBA")
+    texture = transform_texture(texture, layer)
+    content = tile_image(texture, (piece["width"], piece["height"]), int(layer.get("offset_x", 0) or 0), int(layer.get("offset_y", 0) or 0))
+    return apply_opacity(content, float(layer.get("opacity", 1) or 1))
+
+
+def render_motif_layer(piece: dict, layer: dict, motif_info: dict) -> Image.Image:
+    """渲染图案图层。"""
+    motif = Image.open(motif_info["path"]).convert("RGBA")
+    if layer.get("mirror_x"):
+        motif = ImageOps.mirror(motif)
+    if layer.get("mirror_y"):
+        motif = ImageOps.flip(motif)
+    scale = max(0.05, float(layer.get("scale", 1) or 1))
+    target_max_w = max(1, round(piece["width"] * scale))
+    target_max_h = max(1, round(piece["height"] * scale))
+    ratio = min(target_max_w / max(1, motif.width), target_max_h / max(1, motif.height))
+    motif = motif.resize((max(1, round(motif.width * ratio)), max(1, round(motif.height * ratio))), Image.Resampling.LANCZOS)
+    rotation = float(layer.get("rotation", 0) or 0)
+    if abs(rotation % 360) > 0.001:
+        motif = motif.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
+    motif = apply_opacity(motif, float(layer.get("opacity", 1) or 1))
+    content = Image.new("RGBA", (piece["width"], piece["height"]), (0, 0, 0, 0))
+    pos = anchor_position(layer.get("anchor", "center"), content.size, motif.size, int(layer.get("offset_x", 0) or 0), int(layer.get("offset_y", 0) or 0))
+    content.alpha_composite(motif, pos)
+    return content
+
+
+def layer_to_image(piece: dict, layer: dict, textures: dict, solids: dict, motifs: dict) -> Image.Image:
+    """将单层定义渲染为图像。"""
+    fill_type = layer.get("fill_type", "texture")
+    if fill_type == "solid":
+        return render_solid_layer(piece, layer, solids)
+    if fill_type == "motif":
+        motif_id = layer.get("motif_id")
+        motif_info = motifs.get(motif_id)
+        if not motif_info:
+            raise RuntimeError(f"裁片 {piece['piece_id']} 的图案 {motif_id!r} 未批准或缺失。")
+        return render_motif_layer(piece, layer, motif_info)
+    texture_id = layer.get("texture_id")
+    texture_info = textures.get(texture_id)
+    if not texture_info:
+        raise RuntimeError(f"裁片 {piece['piece_id']} 的面料 {texture_id!r} 未批准或缺失。")
+    return render_texture_layer(piece, layer, texture_info)
+
+
+def render_layered_piece(piece: dict, plan: dict, textures: dict, solids: dict, motifs: dict) -> Image.Image:
+    """渲染可能包含多层的裁片。"""
+    layers = [plan.get("base"), plan.get("overlay"), plan.get("trim")]
+    layers = [layer for layer in layers if isinstance(layer, dict)]
+    if not layers:
+        # 向后兼容旧版单层计划
+        if plan.get("fill_type") == "solid":
+            return render_solid_piece(piece, plan, solids)
+        texture_id = plan.get("texture_id")
+        texture_info = textures.get(texture_id)
+        if not texture_info:
+            raise RuntimeError(f"裁片 {piece['piece_id']} 的面料 {texture_id!r} 未批准或缺失。")
+        return render_texture_piece(piece, plan, texture_info)
+    content = Image.new("RGBA", (piece["width"], piece["height"]), (0, 0, 0, 0))
+    for layer in layers:
+        layer_image = layer_to_image(piece, layer, textures, solids, motifs)
+        content.alpha_composite(layer_image)
+    return apply_mask(content, piece["mask_path"])
+
+
+def render_all(pieces_payload: dict, texture_set: dict, fill_plan: dict, out_dir: Path, texture_set_path: Path) -> list[dict]:
+    """渲染所有裁片。"""
+    textures = approved_textures(texture_set, texture_set_path.parent)
+    solids = approved_solids(texture_set)
+    motifs = approved_motifs(texture_set, texture_set_path.parent)
+    if not textures:
+        raise RuntimeError("没有已批准的面料。请在面料组合.json 中设置 approved=true 后再渲染。")
+    entries = {item.get("piece_id"): item for item in fill_plan.get("pieces", [])}
+    pieces_dir = out_dir / "pieces"
+    pieces_dir.mkdir(parents=True, exist_ok=True)
+    rendered = []
+    for piece in pieces_payload.get("pieces", []):
+        plan = entries.get(piece["piece_id"])
+        if not plan:
+            raise RuntimeError(f"裁片 {piece['piece_id']} 缺少填充计划")
+        image = render_layered_piece(piece, plan, textures, solids, motifs)
+        output_path = pieces_dir / f"{piece['piece_id']}.png"
+        image.save(output_path)
+        rendered.append({"piece_id": piece["piece_id"], "output_path": str(output_path.resolve()), "plan": plan})
+    return rendered
+
+
+def compose_preview(pieces_payload: dict, rendered: list[dict], out_path: Path) -> Path:
+    """合成完整预览图。"""
+    canvas = pieces_payload.get("canvas") or {}
+    width = int(canvas.get("width") or max(piece["source_x"] + piece["width"] for piece in pieces_payload["pieces"]))
+    height = int(canvas.get("height") or max(piece["source_y"] + piece["height"] for piece in pieces_payload["pieces"]))
+    preview = Image.new("RGBA", (width, height), (255, 255, 255, 0))
+    by_id = {item["piece_id"]: item for item in rendered}
+    for piece in pieces_payload.get("pieces", []):
+        item = by_id[piece["piece_id"]]
+        with Image.open(item["output_path"]).convert("RGBA") as img:
+            preview.alpha_composite(img, (piece["source_x"], piece["source_y"]))
+    preview.save(out_path)
+    white = Image.new("RGBA", preview.size, (255, 255, 255, 255))
+    white.alpha_composite(preview)
+    white.convert("RGB").save(out_path.with_name("preview_white.jpg"), quality=95)
+    return out_path
+
+
+def write_contact_sheet(rendered: list[dict], out_path: Path) -> Path:
+    """生成裁片联络单（缩略图合集）。"""
+    thumbs = []
+    for item in rendered:
+        with Image.open(item["output_path"]).convert("RGBA") as img:
+            bg = Image.new("RGBA", img.size, (245, 245, 245, 255))
+            bg.alpha_composite(img)
+            bg.thumbnail((300, 300), Image.Resampling.LANCZOS)
+            thumbs.append((Path(item["output_path"]).name, bg.convert("RGB")))
+    cols, cell_w, cell_h = 3, 360, 360
+    rows = math.ceil(len(thumbs) / cols)
+    sheet = Image.new("RGB", (cols * cell_w, rows * cell_h), "white")
+    draw = ImageDraw.Draw(sheet)
+    try:
+        font = ImageFont.truetype("Arial.ttf", 20)
+    except Exception:
+        font = ImageFont.load_default()
+    for index, (name, img) in enumerate(thumbs):
+        x = (index % cols) * cell_w + (cell_w - img.width) // 2
+        y = (index // cols) * cell_h + 25
+        sheet.paste(img, (x, y))
+        draw.text(((index % cols) * cell_w + 24, (index // cols) * cell_h + cell_h - 42), name, fill=(30, 30, 30), font=font)
+    sheet.save(out_path, quality=95)
+    return out_path
+
+
+def write_manifest(texture_set: dict, fill_plan: dict, rendered: list[dict], preview_path: Path, out_path: Path) -> Path:
+    """写入填充清单。"""
+    manifest = {
+        "texture_set_id": texture_set.get("texture_set_id", ""),
+        "fill_plan_id": fill_plan.get("plan_id", ""),
+        "preview_path": str(preview_path.resolve()),
+        "pieces": [
+            {
+                "piece_id": item["piece_id"],
+                "output_path": item["output_path"],
+                "fill_type": item["plan"].get("fill_type"),
+                "texture_id": item["plan"].get("texture_id"),
+                "solid_id": item["plan"].get("solid_id"),
+                "scale": item["plan"].get("scale", 1),
+                "rotation": item["plan"].get("rotation", 0),
+                "base": item["plan"].get("base"),
+                "overlay": item["plan"].get("overlay"),
+                "trim": item["plan"].get("trim"),
+                "garment_role": item["plan"].get("garment_role"),
+                "reason": item["plan"].get("reason", ""),
+            }
+            for item in rendered
+        ],
+    }
+    out_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return out_path
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="使用已批准的面料填充服装裁片，输出透明 PNG。")
+    parser.add_argument("--pieces", required=True, help="裁片清单 JSON 路径")
+    parser.add_argument("--texture-set", required=True, help="面料组合 JSON 路径")
+    parser.add_argument("--fill-plan", default="", help="裁片填充计划 JSON 路径（可选）")
+    parser.add_argument("--out", required=True, help="输出目录")
+    args = parser.parse_args()
+
+    pieces_payload = load_json(args.pieces)
+    texture_set_path = Path(args.texture_set)
+    texture_set = load_json(texture_set_path)
+    textures = approved_textures(texture_set, texture_set_path.parent)
+    solids = approved_solids(texture_set)
+    fill_plan = load_json(args.fill_plan) if args.fill_plan else make_default_fill_plan(pieces_payload, texture_set, textures, solids)
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not args.fill_plan:
+        (out_dir / "piece_fill_plan.json").write_text(json.dumps(fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    rendered = render_all(pieces_payload, texture_set, fill_plan, out_dir, texture_set_path)
+    preview = compose_preview(pieces_payload, rendered, out_dir / "preview.png")
+    sheet = write_contact_sheet(rendered, out_dir / "piece_contact_sheet.jpg")
+    manifest = write_manifest(texture_set, fill_plan, rendered, preview, out_dir / "texture_fill_manifest.json")
+    print(json.dumps(
+        {"裁片数量": len(rendered), "预览图": str(preview.resolve()), "联络单": str(sheet.resolve()), "清单": str(manifest.resolve())},
+        ensure_ascii=False,
+    ))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
