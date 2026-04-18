@@ -713,6 +713,7 @@ def main() -> int:
     parser.add_argument("--construct-ai-request", action="store_true", help="在部位映射后构造子 Agent 审美请求并退出，等待外部子 Agent 生成 ai_piece_fill_plan.json。")
     parser.add_argument("--selected-collection", default="", help="子Agent已选择的 selected_variants.json 路径。若提供，直接生成最终看板 prompt 并跳过选择请求构造。")
     parser.add_argument("--auto-retry", type=int, default=0, help="自动重试次数（0=不重试）。时尚QC发现 high severity issues 或商业复审未通过时，自动构造返工请求并重新渲染。")
+    parser.add_argument("--retry-agent-cmd", default="", help="子 Agent 自调用命令。当 auto-retry 需要修订计划但 rev 文件不存在时，脚本会尝试 subprocess 调用此命令自动生成修订计划。示例: \"kimi chat -p\" 或 \"claude -p\" 或 \"python3 /path/to/agent_runner.py\"")
     parser.add_argument("--ai-map", default="", help="AI子Agent输出的 ai_garment_map.json 路径。若提供，部位映射优先使用AI识别结果。")
     parser.add_argument("--commercial-review", action="store_true", help="启用整体商业感复审。时尚质检后调用构造商业复审请求.py，生成 ai_commercial_review_prompt.txt 供子Agent审查。")
     args = parser.parse_args()
@@ -1061,7 +1062,65 @@ def main() -> int:
                     else:
                         commercial_approved = False
             else:
-                print(f"[自动重试] 等待子Agent生成修订计划: {revised_plan_path}")
+                # 尝试通过外部命令自调用子 Agent
+                if args.retry_agent_cmd:
+                    import shlex
+                    import subprocess
+                    prompt_path = out_dir / "rework_prompt.txt"
+                    if prompt_path.exists():
+                        cmd_str = args.retry_agent_cmd
+                        print(f"[自动重试] 尝试调用子 Agent: {cmd_str}")
+                        try:
+                            # 读取 rework prompt 作为 stdin 输入
+                            prompt_text = prompt_path.read_text(encoding="utf-8")
+                            # 构建输出文件路径，写入环境变量供子 Agent 使用
+                            env = os.environ.copy()
+                            env["AGENT_OUTPUT_PATH"] = str(revised_plan_path.resolve())
+                            env["AGENT_TASK"] = "revise_fill_plan"
+                            env["AGENT_PROMPT_PATH"] = str(prompt_path.resolve())
+                            # 支持两种模式：命令中引用 $AGENT_OUTPUT_PATH，或纯命令+stdin
+                            cmd_parts = shlex.split(cmd_str)
+                            proc = subprocess.run(
+                                cmd_parts,
+                                input=prompt_text,
+                                capture_output=True,
+                                text=True,
+                                env=env,
+                                timeout=300,
+                            )
+                            if proc.returncode == 0 and proc.stdout.strip():
+                                # 尝试把 stdout 解析为 JSON 写入修订计划
+                                try:
+                                    json.loads(proc.stdout)
+                                    revised_plan_path.write_text(proc.stdout, encoding="utf-8")
+                                    print(f"[自动重试] 子 Agent 成功生成修订计划: {revised_plan_path}")
+                                    # 继续循环（不 break），下一轮会检测到文件存在
+                                    continue
+                                except json.JSONDecodeError:
+                                    # stdout 不是纯 JSON，可能是自然语言+JSON 混合
+                                    # 尝试提取 JSON 块
+                                    stdout = proc.stdout
+                                    start = stdout.find("{")
+                                    end = stdout.rfind("}")
+                                    if start != -1 and end != -1 and end > start:
+                                        try:
+                                            json.loads(stdout[start:end+1])
+                                            revised_plan_path.write_text(stdout[start:end+1], encoding="utf-8")
+                                            print(f"[自动重试] 子 Agent 成功生成修订计划（提取 JSON）: {revised_plan_path}")
+                                            continue
+                                        except json.JSONDecodeError:
+                                            pass
+                                    print(f"[自动重试] 子 Agent 输出无法解析为 JSON，stdout 前 200 字:\n{proc.stdout[:200]}")
+                            else:
+                                print(f"[自动重试] 子 Agent 调用失败 (rc={proc.returncode})")
+                                if proc.stderr:
+                                    print(f"  stderr: {proc.stderr[:200]}")
+                        except subprocess.TimeoutExpired:
+                            print("[自动重试] 子 Agent 调用超时（300s）")
+                        except Exception as exc:
+                            print(f"[自动重试] 子 Agent 调用异常: {exc}")
+                # fallback：提示用户手动
+                print(f"[自动重试] 等待外部子Agent生成修订计划: {revised_plan_path}")
                 print("  请启动子Agent，传入 rework_prompt.txt，输出 ai_piece_fill_plan_rev1.json")
                 if args.commercial_review:
                     print(f"  同时更新商业复审: {out_dir / 'ai_commercial_review.json'}")
