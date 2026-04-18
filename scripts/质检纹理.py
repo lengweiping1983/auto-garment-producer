@@ -39,7 +39,7 @@ def text_residual_score(img: Image.Image) -> float:
     """
     gray = img.convert("L").resize((256, 256), Image.Resampling.LANCZOS)
     width, height = gray.size
-    pixels = list(gray.getdata())
+    pixels = list(gray.get_flattened_data())
 
     # 水平投影：每行相邻像素的平均差异
     row_variations = []

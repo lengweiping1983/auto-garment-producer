@@ -53,11 +53,11 @@ def latest_collection_board(output_dir: Path) -> Path:
     return candidates[-1]
 
 
-def _build_collection_prompt_from_visual_elements(out_dir: Path) -> str:
+def _build_collection_prompt_from_visual_elements(out_dir: Path, visual_elements_path: Path = None) -> str:
     """基于子Agent视觉分析结果构造 3×3 面料看板综合 prompt。
     读取 texture_prompts.json 和 visual_elements.json，生成适合 Neo AI 的 prompt 文本。"""
     texture_prompts_path = out_dir / "texture_prompts.json"
-    visual_path = out_dir / "visual_elements.json"
+    visual_path = visual_elements_path or (out_dir / "visual_elements.json")
     if not texture_prompts_path.exists() or not visual_path.exists():
         return ""
 
@@ -159,7 +159,7 @@ def detect_grid_gaps(board: Image.Image, div_x1: int, div_x2: int, div_y1: int, 
         y0 = max(0, mid_y - strip_width)
         y1 = min(height, mid_y + strip_width)
         h_strip = gray.crop((0, y0, width, y1))
-        h_pixels = list(h_strip.getdata())
+        h_pixels = list(h_strip.get_flattened_data())
         strip_w = h_strip.width
         row_diffs = []
         for y in range(h_strip.height):
@@ -174,7 +174,7 @@ def detect_grid_gaps(board: Image.Image, div_x1: int, div_x2: int, div_y1: int, 
         x0 = max(0, mid_x - strip_width)
         x1 = min(width, mid_x + strip_width)
         v_strip = gray.crop((x0, 0, x1, height))
-        v_pixels = list(v_strip.getdata())
+        v_pixels = list(v_strip.get_flattened_data())
         strip_h = v_strip.height
         col_diffs = []
         for x in range(v_strip.width):
@@ -193,7 +193,7 @@ def clean_motif_bottom(panel: Image.Image, text_threshold: float = 0.08) -> Imag
     width, height = gray.size
     bottom_h = max(30, height // 4)
     bottom_region = gray.crop((0, height - bottom_h, width, height))
-    pixels = list(bottom_region.getdata())
+    pixels = list(bottom_region.get_flattened_data())
     row_diffs = []
     for y in range(bottom_h):
         row = [pixels[y * width + x] for x in range(width)]
@@ -248,9 +248,9 @@ def make_motif_transparent(panel: Image.Image, threshold: int = 235) -> Image.Im
 
     # 二次清理：检测并去除孤立的高对比度文字像素（小面积高边缘区域）
     gray = img.convert("L").filter(ImageFilter.FIND_EDGES)
-    edge_pixels = list(gray.getdata())
+    edge_pixels = list(gray.get_flattened_data())
     alpha = img.getchannel("A")
-    alpha_pixels = list(alpha.getdata())
+    alpha_pixels = list(alpha.get_flattened_data())
     for idx, edge_val in enumerate(edge_pixels):
         if edge_val > 120 and alpha_pixels[idx] > 0:
             # 高边缘 + 不透明 = 可能是文字笔画
@@ -283,7 +283,7 @@ def clean_internal_text_strip(image: Image.Image, min_strip_height: int = 5, dif
     """
     gray = image.convert("L")
     width, height = gray.size
-    pixels = list(gray.getdata())
+    pixels = list(gray.get_flattened_data())
 
     row_diffs = []
     for y in range(height):
@@ -572,7 +572,8 @@ def main() -> int:
         run_step(brief_cmd)
         # 如果用户未显式提供 prompt-file，尝试从 texture_prompts.json 构造综合 prompt
         if not args.prompt_file:
-            generated_prompt = _build_collection_prompt_from_visual_elements(out_dir)
+            ve_path = Path(args.visual_elements) if args.visual_elements else None
+            generated_prompt = _build_collection_prompt_from_visual_elements(out_dir, ve_path)
             if generated_prompt:
                 prompt_path = out_dir / "generated_collection_prompt.txt"
                 prompt_path.write_text(generated_prompt, encoding="utf-8")
