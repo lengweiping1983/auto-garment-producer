@@ -1254,8 +1254,7 @@ def main() -> int:
     parser.add_argument("--template-size", default="base", help="模板尺寸变体。默认 base。如 m/l/xl。")
     parser.add_argument("--template-file", default="", help="用户自定义模板 JSON 文件路径。优先于内置模板。")
     parser.add_argument("--no-template", action="store_true", help="禁用模板匹配，强制走 AI/几何推断路径。")
-    parser.add_argument("--commercial-review", action="store_true", default=True, help="启用整体商业感复审（默认开启）。时尚质检后调用构造商业复审请求.py，生成 ai_commercial_review_prompt.txt 供子Agent审查。")
-    parser.add_argument("--no-commercial-review", action="store_true", help="禁用整体商业感复审。生产环境建议保持默认开启。")
+    parser.add_argument("--commercial-review", action=argparse.BooleanOptionalAction, default=True, help="启用整体商业感复审（默认开启）。传 --no-commercial-review 显式关闭。")
     parser.add_argument("--mode", default="standard", choices=["fast", "standard", "production", "legacy"], help="运行模式。fast=跳过看板选择AI和商业复审（草稿预览），standard=默认完整流程，production=含资产审批gate和强制返工，legacy=旧分步脚本兼容模式。")
     parser.add_argument("--reuse-cache", action="store_true", help="启用缓存复用。若输入未变化，跳过对应阶段的AI调用和程序计算。")
     parser.add_argument("--production-plan", default="", help="已完成的 ai_production_plan.json 路径。若提供且缓存允许，跳过生产规划AI调用，直接应用该计划。")
@@ -1265,9 +1264,7 @@ def main() -> int:
     parser.add_argument("--dual-prompts", default="", help="dual_collection_prompts.json 路径。若提供，跳过设计简报中的双提示词生成，直接使用该文件。")
     parser.add_argument("--max-retries", type=int, default=2, help="双源均失败时的最大重试次数")
     args = parser.parse_args()
-    # 处理 --no-commercial-review 覆盖默认值
-    if args.no_commercial_review:
-        args.commercial_review = False
+    # fast 模式自动关闭商业复审和看板选择
     # fast 模式自动关闭商业复审和看板选择
     if args.mode == "fast":
         args.commercial_review = False
