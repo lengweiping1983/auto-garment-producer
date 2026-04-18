@@ -63,6 +63,65 @@ def write_json(path: Path, payload: dict) -> Path:
     return path
 
 
+def generate_prompt_variants(base_prompt: str, count: int = 3) -> list[str]:
+    """基于一个基础提示词生成多个措辞变体。
+
+    策略：
+    1. 主变体 = 原始提示词
+    2. 变体A = 调整密度描述（low noise → very subtle texture 等）
+    3. 变体B = 调整媒介/质感描述（watercolor → hand-painted gouache 等）
+    """
+    if not base_prompt:
+        return [""] * count
+    variants = [base_prompt]
+
+    # 密度/空间替换词表
+    density_swaps = [
+        ("low noise", "very subtle texture"),
+        ("lots of negative space", "generous breathing room"),
+        ("tiny scattered", "small clustered"),
+        ("medium density", "light airy pattern"),
+        ("abundant negative space", "plenty of quiet ground"),
+    ]
+
+    # 媒介/质感替换词表
+    texture_swaps = [
+        ("watercolor", "hand-painted gouache"),
+        ("seamless tileable", "continuous repeat"),
+        ("soft fading edges", "gentle blurred boundaries"),
+        ("paper grain", "canvas texture"),
+    ]
+
+    # 变体A：密度调整
+    v1 = base_prompt
+    for old, new in density_swaps:
+        if old.lower() in v1.lower():
+            v1 = v1.replace(old, new)
+            break
+    if v1 != base_prompt:
+        variants.append(v1)
+
+    # 变体B：质感调整
+    v2 = base_prompt
+    for old, new in texture_swaps:
+        if old.lower() in v2.lower():
+            v2 = v2.replace(old, new)
+            break
+    if v2 != base_prompt and v2 not in variants:
+        variants.append(v2)
+
+    # 如果变体不足，用更保守的改写补充
+    while len(variants) < count:
+        # 简单改写：调整形容词强度
+        extra = base_prompt.replace("very ", "extremely ").replace("delicate ", "fine ")
+        if extra not in variants:
+            variants.append(extra)
+        else:
+            variants.append(base_prompt)
+
+    return variants[:count]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="从主题图创建商业成衣设计简报与提示词合约。")
     parser.add_argument("--theme", default="", help="主题/参考图像路径（与 --visual-elements 二选一）")
@@ -198,22 +257,57 @@ def _generate_outputs(
         "style_details": style_details or {},
     }
 
-    def _make_prompt(texture_id: str, purpose: str, prompt_text: str) -> dict:
-        return {
+    def _make_prompt(texture_id: str, purpose: str, prompt_text: str, panel: str = "", role: str = "") -> dict:
+        item = {
             "texture_id": texture_id,
             "purpose": purpose,
             "prompt": prompt_text,
             "negative_prompt": "animals, characters, faces, people, text, labels, captions, titles, typography, words, letters, logo, watermark, house, full landscape, poster, sticker, harsh black outline, dense confetti, neon colors, muddy colors",
         }
+        if panel:
+            item["panel"] = panel
+        if role:
+            item["role"] = role
+        return item
+
+    # 构建 9 面板提示词（3×3 看板全动态）
+    # 优先使用 generated_prompts（LLM 路径），否则 fallback 到基于 motifs 的模板
+    gp = generated_prompts or {}
+    motif_str = ", ".join(motifs[:3]) if motifs else "theme elements"
+    medium = style_details.get("medium", "watercolor") if style_details else "watercolor"
+    mood = style_details.get("mood", "quiet and elegant") if style_details else "quiet and elegant"
+
+    # Row 1 — Base textures
+    main_prompt = gp.get("main", f"seamless tileable commercial textile texture, pale ground with very faint pattern inspired by {motif_str}, extremely low noise, abundant negative space, {medium} paper grain, no text")
+    secondary_prompt = gp.get("secondary", f"seamless tileable coordinating textile texture, soft light ground with delicate pattern inspired by {motif_str}, medium density but airy, same {medium} brush style, no text")
+    dark_prompt = gp.get("dark", f"seamless tileable quiet dark trim texture, deep ground with tiny subtle texture, very low noise, dark-quiet and minimal, {medium} grain, no text")
+
+    # Row 2 — Mid-scale accent textures（全部走 gp.get，无硬编码）
+    accent_prompt = gp.get("accent", gp.get("accent_light", f"seamless tileable small-scale accent pattern, tiny scattered elements inspired by {motif_str}, very small scale repeating, charming but controlled density, no text"))
+    accent_mid_prompt = gp.get("accent_mid", f"seamless tileable soft geometric or organic lattice on pale ground, same {mood} palette, {medium} hand-painted, low noise, seamless tileable texture for secondary panels, no text")
+    solid_quiet_prompt = gp.get("solid_quiet", f"quiet warm solid with only subtle {medium} paper grain, no pattern, calm and minimal, seamless tileable solid texture for quiet trim or lining, {mood}, no text")
+
+    # Row 3 — Placement motifs (plain backgrounds for background removal)（全部走 gp.get，无硬编码）
+    hero_motif_1_prompt = gp.get("hero_motif", gp.get("hero_motif_1", f"a single elegant main subject centered, plain light background, soft fading edges, balanced negative space, {medium} hand-painted, designed as placement print element, no text"))
+    hero_motif_2_prompt = gp.get("hero_motif_2", f"a secondary accent subject, centered, plain light background, refined {medium} brushwork, designed as placement accent motif, {mood}, no text")
+    trim_motif_prompt = gp.get("trim_motif", f"a small delicate decorative accent, minimal composition, plain warm background, designed as trim detail placement element, {medium} style, no text")
 
     texture_prompts = {
         "style_id": style_id,
         "generation_owner": "external_ai_image_model",
         "prompts": [
-            _make_prompt("main", "可穿大身裁片", generated_prompts.get("main", f"seamless tileable commercial textile texture, low noise, lots of negative space, inspired by {', '.join(motifs[:2])}") if generated_prompts else _make_prompt("main", "可穿大身裁片", f"seamless tileable commercial textile texture, low noise, inspired by {', '.join(motifs[:2])}")),
-            _make_prompt("secondary", "协调大副裁片", generated_prompts.get("secondary", f"seamless tileable coordinating textile texture, subtle pattern, low contrast, inspired by {', '.join(motifs[:3])}") if generated_prompts else _make_prompt("secondary", "协调大副裁片", f"seamless tileable coordinating textile texture, subtle pattern, low contrast, inspired by {', '.join(motifs[:3])}")),
-            _make_prompt("accent", "小面板与受控点缀", generated_prompts.get("accent", f"seamless tileable small-scale accent pattern, clear but not busy, inspired by {', '.join(motifs[:3])}") if generated_prompts else _make_prompt("accent", "小面板与受控点缀", f"seamless tileable small-scale accent pattern, clear but not busy, inspired by {', '.join(motifs[:3])}")),
-            _make_prompt("dark", "饰边、袖口、窄条、打底片", generated_prompts.get("dark", f"seamless tileable quiet dark trim texture, very low noise, deep controlled colors") if generated_prompts else _make_prompt("dark", "饰边、袖口、窄条、打底片", f"seamless tileable quiet dark trim texture, very low noise, deep controlled colors")),
+            # Row 1 — Base textures for large garment panels
+            _make_prompt("main", "可穿大身裁片", main_prompt, panel="row1_left", role="base_texture"),
+            _make_prompt("secondary", "协调大副裁片", secondary_prompt, panel="row1_center", role="base_texture"),
+            _make_prompt("dark_base", "深色饰边/打底片", dark_prompt, panel="row1_right", role="base_texture"),
+            # Row 2 — Mid-scale accent textures
+            _make_prompt("accent_light", "小面板与受控点缀", accent_prompt, panel="row2_left", role="accent_texture"),
+            _make_prompt("accent_mid", "中格几何/有机格子", accent_mid_prompt, panel="row2_center", role="accent_texture"),
+            _make_prompt("solid_quiet", "安静纯色/衬里", solid_quiet_prompt, panel="row2_right", role="solid_texture"),
+            # Row 3 — Placement motifs and hero elements
+            _make_prompt("hero_motif_1", "主卖点定位图案", hero_motif_1_prompt, panel="row3_left", role="placement_motif"),
+            _make_prompt("hero_motif_2", "次卖点定位图案", hero_motif_2_prompt, panel="row3_center", role="placement_motif"),
+            _make_prompt("trim_motif", "小型装饰点缀", trim_motif_prompt, panel="row3_right", role="placement_motif"),
         ],
     }
 
@@ -236,9 +330,13 @@ def _generate_outputs(
         "required_assets": [
             {"asset_id": "main", "asset_type": "texture", "output_requirement": "无缝可平铺正方形 PNG，至少 1024×1024", "prompt_ref": "texture_prompts.json#main"},
             {"asset_id": "secondary", "asset_type": "texture", "output_requirement": "无缝可平铺正方形 PNG，至少 1024×1024", "prompt_ref": "texture_prompts.json#secondary"},
-            {"asset_id": "accent", "asset_type": "texture", "output_requirement": "无缝可平铺正方形 PNG，至少 1024×1024", "prompt_ref": "texture_prompts.json#accent"},
-            {"asset_id": "dark", "asset_type": "texture", "output_requirement": "无缝可平铺正方形 PNG，至少 1024×1024", "prompt_ref": "texture_prompts.json#dark"},
-            {"asset_id": "hero_motif", "asset_type": "motif", "output_requirement": "透明 PNG 定位图案，至少 1024px 宽", "prompt_ref": "motif_prompts.json#hero_motif"},
+            {"asset_id": "dark_base", "asset_type": "texture", "output_requirement": "无缝可平铺正方形 PNG，至少 1024×1024", "prompt_ref": "texture_prompts.json#dark_base"},
+            {"asset_id": "accent_light", "asset_type": "texture", "output_requirement": "无缝可平铺正方形 PNG，至少 1024×1024", "prompt_ref": "texture_prompts.json#accent_light"},
+            {"asset_id": "accent_mid", "asset_type": "texture", "output_requirement": "无缝可平铺正方形 PNG，至少 1024×1024", "prompt_ref": "texture_prompts.json#accent_mid"},
+            {"asset_id": "solid_quiet", "asset_type": "texture", "output_requirement": "无缝可平铺正方形 PNG，至少 1024×1024", "prompt_ref": "texture_prompts.json#solid_quiet"},
+            {"asset_id": "hero_motif_1", "asset_type": "motif", "output_requirement": "透明 PNG 定位图案，至少 1024px 宽", "prompt_ref": "texture_prompts.json#hero_motif_1"},
+            {"asset_id": "hero_motif_2", "asset_type": "motif", "output_requirement": "透明 PNG 定位图案，至少 1024px 宽", "prompt_ref": "texture_prompts.json#hero_motif_2"},
+            {"asset_id": "trim_motif", "asset_type": "motif", "output_requirement": "透明 PNG 定位图案，至少 1024px 宽", "prompt_ref": "texture_prompts.json#trim_motif"},
         ],
         "notes": [
             "Codex 仅提供提示词与成衣美术指导。",
@@ -247,11 +345,23 @@ def _generate_outputs(
         ],
     }
 
+    # 生成每面板的 3 候选变体
+    candidates = {"panels": []}
+    for p in texture_prompts.get("prompts", []):
+        variants = generate_prompt_variants(p.get("prompt", ""), count=3)
+        candidates["panels"].append({
+            "panel_id": p.get("texture_id", ""),
+            "position": p.get("panel", ""),
+            "role": p.get("role", ""),
+            "variants": variants,
+        })
+
     outputs = {
         "商业设计简报": str(write_json(out_dir / "commercial_design_brief.json", brief).resolve()),
         "风格档案": str(write_json(out_dir / "style_profile.json", style_profile).resolve()),
         "纹理提示词": str(write_json(out_dir / "texture_prompts.json", texture_prompts).resolve()),
         "图案提示词": str(write_json(out_dir / "motif_prompts.json", motif_prompts).resolve()),
+        "候选提示词": str(write_json(out_dir / "collection_prompt_candidates.json", candidates).resolve()),
         "资产生成清单": str(write_json(out_dir / "asset_generation_manifest.json", asset_generation_manifest).resolve()),
     }
     return outputs

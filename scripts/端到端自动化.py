@@ -55,7 +55,8 @@ def latest_collection_board(output_dir: Path) -> Path:
 
 def _build_collection_prompt_from_visual_elements(out_dir: Path, visual_elements_path: Path = None) -> str:
     """基于子Agent视觉分析结果构造 3×3 面料看板综合 prompt。
-    读取 texture_prompts.json 和 visual_elements.json，生成适合 Neo AI 的 prompt 文本。"""
+    读取 texture_prompts.json 和 visual_elements.json，生成适合 Neo AI 的 prompt 文本。
+    9 个面板全部从 texture_prompts.json 动态读取，无硬编码。"""
     texture_prompts_path = out_dir / "texture_prompts.json"
     visual_path = visual_elements_path or (out_dir / "visual_elements.json")
     if not texture_prompts_path.exists() or not visual_path.exists():
@@ -67,35 +68,33 @@ def _build_collection_prompt_from_visual_elements(out_dir: Path, visual_elements
     except Exception:
         return ""
 
+    # 按 texture_id 索引所有面板提示词
     prompts = {}
     for p in tp.get("prompts", []):
         prompts[p.get("texture_id", "")] = p.get("prompt", "")
 
     style = ve.get("style", {})
-    palette = ve.get("palette", {})
-    primary = palette.get("primary", [])
-    accent = palette.get("accent", [])
-    dark = palette.get("dark", [])
 
+    # 9 面板全部从 prompts 字典读取，fallback 为兜底模板（确保任何情况下都有内容）
     lines = [
         "Create a 3x3 commercial textile collection board, nine coordinated fabric panels arranged in a clean equal grid with thin white gutters between all panels, all inside one square image. Absolutely no text, no labels, no captions, no titles, no words, no letters, no typography, no descriptions anywhere in the image.",
         "",
         f"Overall art direction: {style.get('overall_impression', 'Elegant commercial textile collection')}. {style.get('mood', 'Quiet and wearable')}. {style.get('medium', 'Watercolor')}. Low contrast, highly wearable, refined hand-painted brush language, graceful breathing space, not busy, cohesive as one fashion print suite.",
         "",
         "Row 1 — Base textures for large garment panels (seamless tileable):",
-        f"Top-left: {prompts.get('main', 'pale base with faint pattern, very low noise, lots of negative space')}",
-        f"Top-center: {prompts.get('secondary', 'coordinated medium-density pattern on light ground')}",
-        f"Top-right: {prompts.get('dark', 'deep dark ground with very subtle texture, quiet and minimal')}",
+        f"Top-left: {prompts.get('main', 'pale base with faint pattern, very low noise, lots of negative space, no text')}",
+        f"Top-center: {prompts.get('secondary', 'coordinated medium-density pattern on light ground, same palette, no text')}",
+        f"Top-right: {prompts.get('dark_base', 'deep dark ground with very subtle texture, quiet and minimal, no text')}",
         "",
         "Row 2 — Mid-scale accent textures (seamless tileable):",
-        f"Middle-left: {prompts.get('accent', 'tiny scattered small-scale pattern on light ground, charming but controlled')}",
-        "Middle-center: soft geometric or organic lattice on pale ground, same palette, seamless tileable texture for secondary panels.",
-        "Middle-right: quiet warm solid with only subtle paper grain, no pattern, calm and minimal, seamless tileable solid texture for quiet trim or lining.",
+        f"Middle-left: {prompts.get('accent_light', 'tiny scattered small-scale pattern on light ground, charming but controlled, no text')}",
+        f"Middle-center: {prompts.get('accent_mid', 'soft geometric or organic lattice on pale ground, same palette, seamless tileable texture for secondary panels, no text')}",
+        f"Middle-right: {prompts.get('solid_quiet', 'quiet warm solid with only subtle paper grain, no pattern, calm and minimal, seamless tileable solid texture for quiet trim or lining, no text')}",
         "",
         "Row 3 — Placement motifs and hero elements (plain backgrounds for background removal):",
-        "Bottom-left: a single elegant main subject centered in a delicate decorative frame, plain light background, soft fading edges, balanced negative space, designed as a placement print element.",
-        "Bottom-center: a secondary accent subject, centered, plain light background, refined brushwork, designed as a placement accent motif.",
-        "Bottom-right: a small delicate decorative accent, minimal composition, plain warm background, designed as a trim detail placement element.",
+        f"Bottom-left: {prompts.get('hero_motif_1', 'a single elegant main subject centered in a delicate decorative frame, plain light background, soft fading edges, balanced negative space, designed as a placement print element, no text')}",
+        f"Bottom-center: {prompts.get('hero_motif_2', 'a secondary accent subject, centered, plain light background, refined brushwork, designed as a placement accent motif, no text')}",
+        f"Bottom-right: {prompts.get('trim_motif', 'a small delicate decorative accent, minimal composition, plain warm background, designed as a trim detail placement element, no text')}",
         "",
         "All nine panels must look like one coordinated textile collection by the same fashion print designer, identical palette, identical paper texture, identical hand-painted brush style, identical commercial apparel mood.",
         "",
@@ -528,6 +527,7 @@ def main() -> int:
     parser.add_argument("--brief", default="", help="可选的商业设计简报 JSON 路径")
     parser.add_argument("--ai-plan", default="", help="子 Agent 生成的 AI 填充计划 JSON 路径。若提供，优先使用 AI 审美决策。")
     parser.add_argument("--construct-ai-request", action="store_true", help="在部位映射后构造子 Agent 审美请求并退出，等待外部子 Agent 生成 ai_piece_fill_plan.json。")
+    parser.add_argument("--selected-collection", default="", help="子Agent已选择的 selected_variants.json 路径。若提供，直接生成最终看板 prompt 并跳过选择请求构造。")
     args = parser.parse_args()
 
     out_dir = Path(args.out)
@@ -570,7 +570,47 @@ def main() -> int:
             "--out", str(out_dir),
         ]
         run_step(brief_cmd)
-        # 如果用户未显式提供 prompt-file，尝试从 texture_prompts.json 构造综合 prompt
+        # 构造看板候选选择请求（9 面板 × 3 候选 → 子Agent选择最优组合）
+        if not args.selected_collection:
+            # 模式A：生成选择任务，等待子Agent
+            selection_cmd = [
+                sys.executable,
+                str(SKILL_DIR / "scripts" / "构造看板选择请求.py"),
+                "--candidates", str(out_dir / "collection_prompt_candidates.json"),
+                "--brief", str(out_dir / "commercial_design_brief.json"),
+                "--style-profile", str(out_dir / "style_profile.json"),
+                "--out", str(out_dir),
+            ]
+            run_step(selection_cmd)
+            print("\n[提示] 3×3 看板候选选择请求已构造。请启动子Agent完成选择：")
+            print(f"  提示词文件: {out_dir / 'ai_collection_selection_prompt.txt'}")
+            print(f"  预期输出: {out_dir / 'selected_variants.json'}")
+            print("  完成后重新运行本脚本并传入 --selected-collection 参数。\n")
+            return 0
+        else:
+            # 模式B：子Agent已选择，生成最终看板 prompt
+            selected_path = Path(args.selected_collection)
+            if not selected_path.is_absolute():
+                selected_path = out_dir / selected_path
+            if selected_path.exists():
+                selection_cmd = [
+                    sys.executable,
+                    str(SKILL_DIR / "scripts" / "构造看板选择请求.py"),
+                    "--candidates", str(out_dir / "collection_prompt_candidates.json"),
+                    "--brief", str(out_dir / "commercial_design_brief.json"),
+                    "--style-profile", str(out_dir / "style_profile.json"),
+                    "--out", str(out_dir),
+                    "--selected", str(selected_path),
+                ]
+                run_step(selection_cmd)
+                final_prompt_path = out_dir / "selected_collection_prompt.txt"
+                if final_prompt_path.exists():
+                    args.prompt_file = str(final_prompt_path)
+                    print(f"[视觉提取] 已基于子Agent选择生成最终看板提示词: {final_prompt_path}")
+            else:
+                print(f"[警告] 选择结果不存在: {selected_path}，回退到直接构造 prompt")
+
+        # 如果用户未显式提供 prompt-file 且未走选择流程，尝试直接构造综合 prompt
         if not args.prompt_file:
             ve_path = Path(args.visual_elements) if args.visual_elements else None
             generated_prompt = _build_collection_prompt_from_visual_elements(out_dir, ve_path)
