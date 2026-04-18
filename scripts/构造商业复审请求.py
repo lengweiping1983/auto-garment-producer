@@ -23,6 +23,9 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from image_utils import ensure_thumbnail
+
 
 def load_json(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -128,15 +131,16 @@ def main() -> int:
     brief = load_json(args.brief)
     qc_report = load_json(args.qc_report) if args.qc_report else None
 
-    # 模式A：生成复审请求
+    # 模式A：生成复审请求（使用缩略图避免 413）
     if not args.selected:
-        prompt = build_review_prompt(args.preview, fill_plan, brief, qc_report)
+        preview_thumb = ensure_thumbnail(args.preview, max_size=256)
+        prompt = build_review_prompt(str(preview_thumb), fill_plan, brief, qc_report)
         prompt_path = out_dir / "ai_commercial_review_prompt.txt"
         prompt_path.write_text(prompt, encoding="utf-8")
 
         request_summary = {
             "request_id": "commercial_review_v1",
-            "preview_path": str(Path(args.preview).resolve()),
+            "preview_path": str(preview_thumb.resolve()),
             "fill_plan_path": str(Path(args.fill_plan).resolve()),
             "brief_path": str(Path(args.brief).resolve()),
             "prompt_path": str(prompt_path.resolve()),

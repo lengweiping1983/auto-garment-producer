@@ -30,6 +30,13 @@ except Exception:
     def sanitize_prompt(text, domain="generic"):
         return text
 
+try:
+    from image_utils import ensure_thumbnail
+except Exception:
+    # fallback：如果 image_utils 不可用，直接返回原图
+    def ensure_thumbnail(image_path, max_size=1024):
+        return Path(image_path).resolve()
+
 
 def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, season: str) -> str:
     """构造面向子 Agent 的视觉分析 prompt。"""
@@ -176,7 +183,8 @@ def main() -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    prompt = build_vision_prompt(theme_path, args.user_prompt, args.garment_type, args.season)
+    theme_thumb = ensure_thumbnail(theme_path, max_size=512)
+    prompt = build_vision_prompt(theme_thumb, args.user_prompt, args.garment_type, args.season)
     prompt_path = out_dir / "ai_vision_prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
     
@@ -185,7 +193,7 @@ def main() -> int:
 
     request_summary = {
         "request_id": "ai_vision_extraction_v1",
-        "theme_image": str(theme_path.resolve()),
+        "theme_image": str(theme_thumb.resolve()),
         "prompt_path": str(prompt_path.resolve()),
         "expected_output": str((out_dir / "visual_elements.json").resolve()),
         "garment_type": args.garment_type,
@@ -198,7 +206,7 @@ def main() -> int:
     print(json.dumps({
         "视觉分析请求摘要": str(request_path.resolve()),
         "子Agent提示词": str(prompt_path.resolve()),
-        "主题图路径": str(theme_path.resolve()),
+        "主题图路径": str(theme_thumb.resolve()),
         "预期输出": request_summary["expected_output"],
     }, ensure_ascii=False, indent=2))
     return 0

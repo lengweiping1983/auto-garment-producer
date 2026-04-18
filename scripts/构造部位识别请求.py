@@ -134,10 +134,8 @@ def build_identification_prompt(pieces: list[dict], garment_type: str, overview_
                     "grain_direction": "vertical",
                     "confidence": 0.85,
                     "reason": "最大裁片，位于左侧，判断为前片",
-                    "alternatives": ["back_body"]
                 }
             ],
-            "notes": ["如果有不确定的裁片，在此说明"]
         }, ensure_ascii=False, indent=2),
         "",
         "要求：",

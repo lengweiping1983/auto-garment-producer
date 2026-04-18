@@ -13,6 +13,9 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from image_utils import ensure_thumbnail
+
 
 def load_json(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -122,40 +125,31 @@ def build_production_plan_prompt(
     lines.extend([
         "",
         "===== Step 1: 部位识别 =====",
-        "请为每个裁片标注以下字段：",
-        "  - garment_role: 服装部位角色。可选值（中英均可）：",
-        "      front_body / back_body / sleeve_left / sleeve_right /",
-        "      collar_or_upper_trim / hem_or_lower_trim / trim_strip /",
-        "      side_or_long_panel / front_hero / yoke / pocket / lining /",
-        "      small_detail / unknown",
-        "  - zone: body / secondary / trim / detail",
-        "  - symmetry_group: 左右对称组的统一标识（如 'sg_front'）。左右对称的裁片必须相同。",
-        "  - same_shape_group: 形状相同但位置不同的裁片组（如 'ssg_sleeve'）。",
-        "  - texture_direction: longitudinal（纵向/经向）/ transverse（横向/纬向）",
-        "  - confidence: 0-1 的确信度",
-        "  - needs_ai_review: true/false —— 若 confidence < 0.6 或部位模糊，标为 true",
+        "请为每个裁片标注：garment_role, zone, symmetry_group, same_shape_group, texture_direction, confidence, needs_ai_review",
+        "可选 garment_role: front_body / back_body / sleeve_left / sleeve_right / collar_or_upper_trim / hem_or_lower_trim / trim_strip / side_or_long_panel / front_hero / yoke / pocket / lining / small_detail / unknown",
+        "zone: body / secondary / trim / detail",
         "",
-        "===== 裁片几何信息（程序推断，仅供参考，请以图像为准）=====",
+        "===== 裁片几何信息（JSON 摘要，程序推断仅供参考，请以 piece_overview.png 为准）=====",
     ])
 
-    # 使用 geometry_hints + pieces 数据
+    # 压缩裁片信息：用 JSON 摘要代替逐条展开，只保留关键字段
     hint_by_id = {h["piece_id"]: h for h in geometry_hints.get("pieces", [])}
+    compact_pieces = []
     for p in sorted(pieces, key=lambda x: x.get("area", 0), reverse=True):
         pid = p["piece_id"]
         h = hint_by_id.get(pid, {})
-        aspect = p.get("width", 1) / max(1, p.get("height", 1))
         orient = h.get("pattern_orientation", 0)
         orient_str = ""
         if orient == 180:
-            orient_str = f", 方向=倒置(领口在下, pattern_orientation=180°, conf={h.get('orientation_confidence',0)})"
+            orient_str = f", 倒置(conf={h.get('orientation_confidence',0)})"
         elif orient != 0:
-            orient_str = f", 方向={orient}°"
-        lines.append(
-            f"  {pid}: 面积={p.get('area',0)} ({h.get('area_ratio','?')} of max), "
-            f"尺寸={p.get('width',0)}×{p.get('height',0)}, 长宽比={round(aspect,2)}, "
-            f"中心=({round(h.get('centroid',[0,0])[0],0)},{round(h.get('centroid',[0,0])[1],0)}), "
-            f"程序推测={h.get('geometry_role_hint','unknown')}{orient_str}"
+            orient_str = f", {orient}°"
+        compact_pieces.append(
+            f"{pid}: 面积={p.get('area',0)}, "
+            f"尺寸={p.get('width',0)}×{p.get('height',0)}, "
+            f"推测={h.get('geometry_role_hint','unknown')}{orient_str}"
         )
+    lines.append("  " + "; ".join(compact_pieces))
 
     lines.extend([
         "",
@@ -175,33 +169,39 @@ def build_production_plan_prompt(
     ])
 
     is_merged_set = any("source" in t for t in texture_set.get("textures", []))
+    # 面料资产列表：压缩为 ID + role，省略 prompt（AI 会查看缩略图）
+    asset_lines = []
     for tex in texture_set.get("textures", []):
         if tex.get("approved", False) or tex.get("candidate", False):
-            source_tag = f" [源{tex.get('source','').upper()}]" if is_merged_set else ""
-            lines.append(f"  [texture] {tex.get('texture_id')}: {tex.get('role','')}{source_tag} — {tex.get('prompt','')}")
+            source_tag = f"[{tex.get('source','')}]" if is_merged_set else ""
+            asset_lines.append(f"{tex.get('texture_id')}:{tex.get('role','')}{source_tag}")
     for motif in texture_set.get("motifs", []):
         if motif.get("approved", False) or motif.get("candidate", False):
-            source_tag = f" [源{motif.get('source','').upper()}]" if is_merged_set else ""
-            lines.append(f"  [motif]   {motif.get('motif_id')}: {motif.get('role','')}{source_tag} — {motif.get('prompt','')}")
+            source_tag = f"[{motif.get('source','')}]" if is_merged_set else ""
+            asset_lines.append(f"{motif.get('motif_id')}:{motif.get('role','')}{source_tag}")
     for solid in texture_set.get("solids", []):
-        source_tag = f" [源{solid.get('source','').upper()}]" if is_merged_set else ""
-        lines.append(f"  [solid]   {solid.get('solid_id')}: {solid.get('color','')}{source_tag}")
+        source_tag = f"[{solid.get('source','')}]" if is_merged_set else ""
+        asset_lines.append(f"{solid.get('solid_id')}:{solid.get('color','')}{source_tag}")
+    if asset_lines:
+        lines.append("  " + ", ".join(asset_lines))
+    else:
+        lines.append("  （无可用资产）")
 
     lines.extend([
         "",
-        "--- 填充规则（硬性约束，不可违反）---",
-        "  1. symmetry_group / same_shape_group 内所有裁片的 base 层必须完全相同（fill_type, texture_id, scale, rotation, offset, mirror）。",
-        "  2. 仅允许 1 个 hero（overlay.motif）。trim 禁用 motif overlay。",
-        "  3. trim 区域（zone=trim）的 base 应为 quiet solid 或 subtle dark texture，不使用复杂图案。",
-        "  4. 每个裁片必须提供 reason（中文，解释为什么这样填）。",
-        "  5. 纹理方向由你根据面料图案方向和裁片形状自主决定，不要硬套规则。",
-        "  6. 可声明 'intentional_asymmetry': true 保留有意不对称设计。",
+        "--- 填充规则 ---",
+        "  1. 同 symmetry_group / same_shape_group 的 base 层必须完全相同。",
+        "  2. 仅允许 1 个 hero overlay（motif），trim 禁用 motif。",
+        "  3. trim 区域 base 用 quiet solid 或 subtle dark texture。",
+        "  4. 每个裁片提供 reason（中文解释）。",
+        "  5. 纹理方向自主决定，不要硬套规则。",
+        "  6. 可声明 intentional_asymmetry: true 保留有意不对称。",
         "",
         "--- 审美原则 ---",
-        "  - 商业畅销款打样：可穿性优先，大身低噪，hero 醒目但不突兀。",
-        "  - 避免将叙事插画直接切割到裁片中。",
-        "  - 优秀设计 = 1个卖点 + 安静支持性纹理 + 克制的饰边。",
-        "  - 大身裁片低对比度，在零售距离下依然可穿。",
+        "  - 可穿性优先，大身低噪，hero 醒目但不突兀。",
+        "  - 避免叙事插画被切割到裁片中。",
+        "  - 优秀设计 = 1个卖点 + 安静支持纹理 + 克制饰边。",
+        "  - 大身裁片低对比度，零售距离可穿。",
         "",
     ])
 
@@ -271,8 +271,7 @@ def build_production_plan_prompt(
             "schemes": [
                 {
                     "scheme_id": "scheme_01",
-                    "name": "保守量产方案",
-                    "description": "全部使用源A资产，低噪安全，适合量产",
+                    "strategy_note": "描述策略",
                     "garment_map": {
                         "pieces": [
                             {
@@ -318,27 +317,15 @@ def build_production_plan_prompt(
                         ],
                         "art_direction": {
                             "strategy": "单一卖点定位，低噪身片，协调副片，安静饰边",
-                            "hero_piece_ids": ["piece_001"],
-                            "notes": [],
-                            "self_assessment": {
-                                "overall_score": 8.5,
-                                "wearability": 9,
-                                "cohesion": 8,
-                                "hero_clarity": 9,
-                                "trim_quality": 8,
-                                "season_fit": 8,
-                                "customer_match": 8,
-                                "production_safety": 9,
-                                "color_balance": 8,
-                                "negative_space": 9,
-                                "narrative_control": 9
-                            }
+                            "hero_piece_ids": ["piece_001"]
                         }
                     }
                 }
             ],
             "risk_notes": []
         }, ensure_ascii=False, indent=2))
+        lines.append("")
+        lines.append("注：art_direction 可额外包含 notes[] 和可选的 self_assessment（overall_score/wearability/cohesion/hero_clarity/trim_quality/season_fit/customer_match/production_safety/color_balance/negative_space/narrative_control）。")
     else:
         lines.append(json.dumps({
             "garment_map": {
@@ -386,25 +373,13 @@ def build_production_plan_prompt(
                 ],
                 "art_direction": {
                     "strategy": "单一卖点定位，低噪身片，协调副片，安静饰边",
-                    "hero_piece_ids": ["piece_001"],
-                    "notes": [],
-                    "self_assessment": {
-                        "overall_score": 8.5,
-                        "wearability": 9,
-                        "cohesion": 8,
-                        "hero_clarity": 9,
-                        "trim_quality": 8,
-                        "season_fit": 8,
-                        "customer_match": 8,
-                        "production_safety": 9,
-                        "color_balance": 8,
-                        "negative_space": 9,
-                        "narrative_control": 9
-                    }
+                    "hero_piece_ids": ["piece_001"]
                 }
             },
             "risk_notes": []
         }, ensure_ascii=False, indent=2))
+        lines.append("")
+        lines.append("注：art_direction 可额外包含 notes[] 和可选的 self_assessment（overall_score/wearability/cohesion/hero_clarity/trim_quality/season_fit/customer_match/production_safety/color_balance/negative_space/narrative_control）。")
 
     lines.extend([
         "",
@@ -486,7 +461,7 @@ def main() -> int:
                 overview_path = str(cp.resolve())
                 break
 
-    # 收集面料资产缩略图路径
+    # 收集面料资产缩略图路径（生成真正的缩略图，避免发送 1.5MB+ 全尺寸图）
     texture_thumbnails = []
     base_dir = Path(args.texture_set).parent
     for tex in texture_set.get("textures", []) + texture_set.get("motifs", []):
@@ -494,7 +469,8 @@ def main() -> int:
         if p:
             tp = Path(p) if Path(p).is_absolute() else base_dir / p
             if tp.exists():
-                texture_thumbnails.append(str(tp.resolve()))
+                thumb = ensure_thumbnail(tp, max_size=256)
+                texture_thumbnails.append(str(thumb.resolve()))
 
     prompt_text = build_production_plan_prompt(
         pieces_payload, texture_set, brief, geometry_hints,

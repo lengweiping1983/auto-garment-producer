@@ -1,6 +1,7 @@
 # Python bytecode and caches
 output/
 __pycache__/
+.thumbnails/
 *.py[cod]
 *$py.class
 

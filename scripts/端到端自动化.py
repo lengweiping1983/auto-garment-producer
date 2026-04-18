@@ -613,9 +613,20 @@ def make_motif_transparent(panel: Image.Image, threshold: int = 235) -> Image.Im
                 fade = max(0, int(a * (dist / 8)))
                 pixels[x_pos, y_pos] = (r, g, b, fade)
 
-    # ---- 阶段 3：alpha 边缘羽化 ----
-    # 对 alpha 通道进行高斯模糊，消除残留的硬边光晕
-    # 这样即使背景去除不彻底，边缘也会被柔化到不可见
+    # ---- 阶段 3：形态学收缩（切除渐变晕染残留）----
+    # 水彩/手绘 motif 常有渐变过渡带，阈值法无法彻底去除。
+    # 用 MinFilter 模拟 erode：让前景向内收缩 3-5px，切除边缘渐变残留。
+    alpha = img.getchannel("A")
+    # 自适应收缩半径：大图 5px，小图 3px
+    erode_radius = max(3, min(5, round(min(width, height) / 80)))
+    if erode_radius >= 2:
+        # MinFilter 模拟 erode：alpha 区域向内收缩
+        alpha = alpha.filter(ImageFilter.MinFilter(size=erode_radius * 2 + 1))
+        img.putalpha(alpha)
+
+    # ---- 阶段 4：alpha 边缘羽化 ----
+    # 对 alpha 通道进行高斯模糊，消除 erode 后的硬边
+    # 这样收缩后的新边缘会柔和自然
     img = _feather_alpha(img)
 
     alpha = img.getchannel("A")

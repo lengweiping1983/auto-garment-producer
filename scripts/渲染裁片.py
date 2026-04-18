@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 
-from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 
 def load_json(path: str | Path) -> dict:
@@ -326,8 +326,6 @@ def render_texture_layer(piece: dict, layer: dict, texture_info: dict) -> Image.
 
 def render_motif_layer(piece: dict, layer: dict, motif_info: dict, underlay: Image.Image = None) -> Image.Image:
     """渲染图案图层（含智能放置、防切割、边缘羽化与底纹融合）。"""
-    from PIL import ImageFilter
-
     motif = Image.open(motif_info["path"]).convert("RGBA")
     if layer.get("mirror_x"):
         motif = ImageOps.mirror(motif)
@@ -364,18 +362,27 @@ def render_motif_layer(piece: dict, layer: dict, motif_info: dict, underlay: Ima
     if underlay is not None:
         # 提取 motif 对应区域的底纹
         underlay_crop = underlay.crop((mx, my, mx + mw, my + mh))
-        # 创建羽化遮罩：中心 255（全 motif），边缘线性衰减到 0（全底纹）
-        blend_w = max(8, min(20, round(min(mw, mh) / 6)))
-        blend_mask = Image.new("L", (mw, mh), 0)
-        inner = blend_w
-        ImageDraw.Draw(blend_mask).rounded_rectangle(
-            [(inner, inner), (mw - inner, mh - inner)],
-            radius=inner,
-            fill=255,
-        )
-        # 对遮罩羽化，让过渡自然
-        blend_mask = blend_mask.filter(ImageFilter.GaussianBlur(radius=blend_w))
-        # 在 blend_mask 控制下混合 motif 和底纹
+        # 使用 motif 自身 alpha 作为混合基础，调整透明度让底纹透出
+        motif_alpha = motif.getchannel("A")
+        # 策略：
+        # 1. 整体降低 alpha 15-25%，让底纹轻微透出（像印在面料上）
+        # 2. 边缘区域进一步降低 alpha，形成自然过渡
+        # 3. 这样即使 motif 有背景残留，也会被底纹稀释
+        blend_mask = motif_alpha.copy()
+        # 整体透明度降低：主体保留 75-85% 不透明度
+        blend_mask = blend_mask.point(lambda a: int(a * 0.82))
+        # 边缘进一步羽化：从边缘向内 12-24px 区域线性降低 alpha
+        edge_feather = max(8, min(24, round(min(mw, mh) / 10)))
+        if edge_feather >= 4:
+            # 创建边缘衰减遮罩：中心 255，边缘 0
+            edge_mask = Image.new("L", (mw, mh), 255)
+            edge_draw = ImageDraw.Draw(edge_mask)
+            edge_draw.rectangle([0, 0, mw - 1, mh - 1], outline=0)
+            # 距离变换近似：用高斯模糊扩散边缘
+            edge_mask = edge_mask.filter(ImageFilter.GaussianBlur(radius=edge_feather))
+            # 将 edge_mask 和 blend_mask 相乘：边缘区域进一步降低
+            blend_mask = ImageChops.multiply(blend_mask, edge_mask)
+        # 在调整后的 alpha 控制下混合 motif 和底纹
         blended = Image.composite(motif, underlay_crop, blend_mask)
         content.paste(blended, (mx, my))
     else:

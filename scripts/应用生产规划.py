@@ -144,6 +144,21 @@ def apply_multi_production_plan(plan_path: Path, out_dir: Path) -> list[dict]:
         gm_path, fp_path = apply_production_plan(plan_path, out_dir)
         return [{"scheme_id": "scheme_01", "suffix": "", "garment_map": str(gm_path), "fill_plan": str(fp_path)}]
 
+    # 预加载标准模式的 garment_map 作为 fallback（多方案 AI 通常不输出 garment_map）
+    fallback_garment_map = None
+    for fallback_path in [out_dir / "garment_map.json", out_dir / "ai_production_plan.json"]:
+        if fallback_path.exists():
+            try:
+                data = load_json(fallback_path)
+                if "garment_map" in data:
+                    fallback_garment_map = data["garment_map"]
+                elif "pieces" in data:
+                    fallback_garment_map = data
+                if fallback_garment_map and fallback_garment_map.get("pieces"):
+                    break
+            except Exception:
+                pass
+
     results = []
     for idx, scheme in enumerate(schemes, 1):
         scheme_id = scheme.get("scheme_id", f"scheme_{idx:02d}")
@@ -151,6 +166,11 @@ def apply_multi_production_plan(plan_path: Path, out_dir: Path) -> list[dict]:
 
         # 提取并写入 garment_map
         garment_map = scheme.get("garment_map", {})
+        # 如果 AI 未输出 garment_map pieces，复用标准模式的 garment_map
+        if not garment_map.get("pieces") and fallback_garment_map:
+            garment_map = dict(fallback_garment_map)
+            garment_map["map_id"] = f"ai_garment_map_{scheme_id}"
+            garment_map["method"] = "ai_multi_production_plan_extraction"
         if "map_id" not in garment_map:
             garment_map["map_id"] = f"ai_garment_map_{scheme_id}"
         if "method" not in garment_map:
