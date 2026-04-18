@@ -9,6 +9,7 @@
 无论哪种模式，最终都会经过后端强制校验修正。
 """
 import argparse
+import copy
 import json
 import math
 from pathlib import Path
@@ -502,6 +503,118 @@ def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: d
         "pieces": entries,
     }
     return art_direction, fill_plan
+
+
+def apply_symmetry_relations(entries: list[dict], garment_map: dict, pieces_payload: dict | None = None) -> list[dict]:
+    """应用对称关系优化：slave 裁片复制 master 裁片的填充参数。
+
+    逻辑：
+    1. 优先使用 garment_map 中已有的硬编码 symmetry_relations
+    2. 如果没有硬编码，调用 symmetry_analyzer 基于 mask 形状自动分析
+    3. 自动选择面积更大的裁片作为 master
+    4. slave 的 base/overlay/trim 完全复制 master 的
+    5. slave 的纹理层面 mirror_x/mirror_y 置 false（镜像在 PNG 层面做）
+    6. 在 slave entry 中标记 symmetry_source 和 symmetry_transform
+    """
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent))
+    try:
+        from symmetry_analyzer import find_symmetry_relations
+    except Exception:
+        find_symmetry_relations = None
+
+    gm_pieces = {p["piece_id"]: p for p in garment_map.get("pieces", [])}
+    entries_by_id = {e["piece_id"]: e for e in entries}
+
+    # 构建 slave→master 映射
+    slave_map = {}
+
+    # 1. 先收集硬编码的 symmetry_relations
+    for piece_id, gm in gm_pieces.items():
+        for rel in gm.get("symmetry_relations", []):
+            target_pid = rel.get("target_piece_id")
+            if target_pid and target_pid in entries_by_id:
+                slave_map[target_pid] = {
+                    "source": piece_id,
+                    "transform": {"mirror_x": rel.get("mirror_x", False), "mirror_y": rel.get("mirror_y", False)},
+                }
+
+    # 2. 如果没有硬编码，且提供了 pieces_payload，尝试自动分析
+    if not slave_map and pieces_payload and find_symmetry_relations:
+        try:
+            auto_relations = find_symmetry_relations(pieces_payload, garment_map)
+            auto_applied = 0
+            auto_skipped = 0
+            for master_pid, slaves in auto_relations.items():
+                master_gm = gm_pieces.get(master_pid, {})
+                master_role = master_gm.get("garment_role", "")
+                # 大身裁片（front/back/secondary）默认不自动应用，需人工在 base.json 配置
+                auto_symmetry_roles = {
+                    "sleeve_pair", "sleeve_or_side_panel",
+                    "collar_or_upper_trim", "hem_or_lower_trim",
+                    "trim_strip", "matched_panel", "small_detail",
+                }
+                can_auto_apply = master_role in auto_symmetry_roles
+                for rel in slaves:
+                    target_pid = rel["target_piece_id"]
+                    if target_pid not in entries_by_id:
+                        continue
+                    if can_auto_apply and rel.get("iou", 0) >= 0.99:
+                        slave_map[target_pid] = {
+                            "source": master_pid,
+                            "transform": {"mirror_x": rel.get("mirror_x", False), "mirror_y": rel.get("mirror_y", False)},
+                        }
+                        auto_applied += 1
+                    else:
+                        auto_skipped += 1
+                        tx = "mirror_x" if rel.get("mirror_x") else ""
+                        ty = "mirror_y" if rel.get("mirror_y") else ""
+                        tdesc = "/".join(filter(None, [tx, ty])) or "identity"
+                        print(f"[对称分析建议] {master_pid} -> {target_pid}: {tdesc} (IoU={rel.get('iou')}), "
+                              f"role={master_role} — {'已自动应用' if can_auto_apply else '大身裁片，未自动应用，如需请在 base.json 配置'}")
+            if auto_applied:
+                print(f"[对称分析] 自动应用 {auto_applied} 个 slave 裁片")
+            if auto_skipped:
+                print(f"[对称分析] {auto_skipped} 个关系未自动应用（大身裁片或 IoU<0.99），请查看上方建议")
+        except Exception as exc:
+            print(f"[对称分析] 自动分析失败，回退到独立渲染: {exc}")
+
+    if not slave_map:
+        return entries
+
+    new_entries = []
+    for entry in entries:
+        pid = entry["piece_id"]
+        if pid not in slave_map:
+            new_entries.append(entry)
+            continue
+
+        # 这是 slave piece，复制 master 参数
+        slave_info = slave_map[pid]
+        master_entry = entries_by_id.get(slave_info["source"])
+        if not master_entry:
+            new_entries.append(entry)
+            continue
+
+        slave = copy.deepcopy(master_entry)
+        slave["piece_id"] = pid
+        slave["symmetry_source"] = slave_info["source"]
+        slave["symmetry_transform"] = slave_info["transform"]
+        # 清除纹理层面的 mirror（镜像在 PNG 层面做）
+        for layer_key in ("base", "overlay", "trim"):
+            layer = slave.get(layer_key)
+            if layer and isinstance(layer, dict):
+                layer["mirror_x"] = False
+                layer["mirror_y"] = False
+        # 保留 slave 自身的 garment_role / zone / symmetry_group
+        gm_slave = gm_pieces.get(pid, {})
+        for key in ("garment_role", "zone", "symmetry_group", "same_shape_group"):
+            if key in gm_slave:
+                slave[key] = gm_slave[key]
+        new_entries.append(slave)
+
+    return new_entries
 
 
 def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: dict, motif_geometries: dict = None, brief: dict = None) -> tuple[list[dict], list[dict]]:
@@ -1004,6 +1117,9 @@ def main() -> int:
     if not ai_plan_used:
         art_direction, fill_plan = fallback_create_plan(pieces_payload, texture_set, garment_map, brief, motif_geometries)
         entries = fill_plan.get("pieces", [])
+
+    # 阶段 1.5：应用对称关系优化（slave 复制 master 参数，避免重复渲染）
+    entries = apply_symmetry_relations(entries, garment_map, pieces_payload)
 
     # 阶段 2：强制校验修正
     entries, fix_issues = enforce_validation(entries, pieces_payload, texture_set, motif_geometries, brief)

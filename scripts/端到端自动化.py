@@ -1356,12 +1356,27 @@ def render_size_variants_core(
             "pieces": [],
         }
         base_entries = {e.get("piece_id"): e for e in base_fill_plan.get("pieces", [])}
+
+        # aspect 反转保护：读取 aspect_warnings，对 aspect 翻转严重的裁片纠正 rotation
+        warnings = mapping.get("aspect_warnings", [])
+        warning_pieces = {w["target_id"]: w for w in warnings if abs(w.get("delta", 0)) > 0.3}
+
         for base_pid, target_pid in piece_map.items():
             entry = base_entries.get(base_pid)
             if not entry:
                 continue
             mapped_entry = dict(entry)
             mapped_entry["piece_id"] = target_pid
+            if target_pid in warning_pieces:
+                # aspect 翻转 ≈ 朝向反了，对 base.rotation 加 90°
+                base = mapped_entry.setdefault("base", {})
+                if isinstance(base, dict):
+                    base["rotation"] = (base.get("rotation", 0) + 90) % 360
+                mapped_entry.setdefault("issues", []).append({
+                    "type": "aspect_orientation_corrected",
+                    "delta": warning_pieces[target_pid]["delta"],
+                    "note": "auto +90° rotation for aspect inversion",
+                })
             mapped_fill_plan["pieces"].append(mapped_entry)
 
         if not mapped_fill_plan["pieces"]:

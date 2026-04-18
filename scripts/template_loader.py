@@ -130,6 +130,9 @@ def match_pieces_to_template(pieces: list[dict], template: dict) -> tuple[list[d
     matched = []
     total_conf = 0.0
 
+    # 预构建 rank→piece 映射，用于 symmetry_relations 中的 target_slot_index → target_piece_id
+    piece_by_rank = {rank: piece for rank, piece in enumerate(sorted_pieces, 1)}
+
     for rank, piece in enumerate(sorted_pieces, 1):
         slot = slot_by_rank.get(rank)
         if not slot:
@@ -159,6 +162,21 @@ def match_pieces_to_template(pieces: list[dict], template: dict) -> tuple[list[d
             "template_matched": True,
             "template_id": template.get("template_id", ""),
         }
+        # 透传 symmetry_relations：将 target_slot_index 映射为 target_piece_id
+        if slot.get("symmetry_relations"):
+            relations = []
+            for rel in slot["symmetry_relations"]:
+                target_slot = rel.get("target_slot_index")
+                if target_slot is not None:
+                    target_piece = piece_by_rank.get(target_slot + 1)
+                    if target_piece:
+                        relations.append({
+                            "target_piece_id": target_piece["piece_id"],
+                            "mirror_x": rel.get("mirror_x", False),
+                            "mirror_y": rel.get("mirror_y", False),
+                        })
+            if relations:
+                entry["symmetry_relations"] = relations
         # 透传 pieces 中的方向信息
         if "pattern_orientation" in piece:
             entry["pattern_orientation"] = piece["pattern_orientation"]

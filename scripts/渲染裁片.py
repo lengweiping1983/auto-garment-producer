@@ -430,8 +430,23 @@ def render_layered_piece(piece: dict, plan: dict, textures: dict, solids: dict, 
     return apply_mask(content, piece["mask_path"])
 
 
+def _align_image_size(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
+    """将图像对齐到目标尺寸，居中裁剪或填充透明背景。"""
+    if img.width == target_w and img.height == target_h:
+        return img
+    new = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
+    x = (target_w - img.width) // 2
+    y = (target_h - img.height) // 2
+    new.paste(img, (x, y))
+    return new
+
+
 def render_all(pieces_payload: dict, texture_set: dict, fill_plan: dict, out_dir: Path, texture_set_path: Path) -> list[dict]:
-    """渲染所有裁片。"""
+    """渲染所有裁片。
+
+    对称优化：对于配置了 symmetry_source 的 slave 裁片，复制 master 裁片的
+    渲染结果并通过 Pillow 做镜像/翻转变换，不再独立走纹理填充流程。
+    """
     textures = approved_textures(texture_set, texture_set_path.parent)
     solids = approved_solids(texture_set)
     motifs = approved_motifs(texture_set, texture_set_path.parent)
@@ -440,15 +455,68 @@ def render_all(pieces_payload: dict, texture_set: dict, fill_plan: dict, out_dir
     entries = {item.get("piece_id"): item for item in fill_plan.get("pieces", [])}
     pieces_dir = out_dir / "pieces"
     pieces_dir.mkdir(parents=True, exist_ok=True)
+
+    # 收集 slave→master 映射
+    slave_map = {}
+    for item in fill_plan.get("pieces", []):
+        src = item.get("symmetry_source")
+        if src:
+            slave_map[item["piece_id"]] = {
+                "source": src,
+                "transform": item.get("symmetry_transform", {}),
+            }
+
+    rendered_paths = {}
     rendered = []
+
+    # 阶段 1：渲染所有 master pieces（非 slave）
     for piece in pieces_payload.get("pieces", []):
-        plan = entries.get(piece["piece_id"])
+        pid = piece["piece_id"]
+        if pid in slave_map:
+            continue
+        plan = entries.get(pid)
         if not plan:
-            raise RuntimeError(f"裁片 {piece['piece_id']} 缺少填充计划")
+            raise RuntimeError(f"裁片 {pid} 缺少填充计划")
         image = render_layered_piece(piece, plan, textures, solids, motifs)
-        output_path = pieces_dir / f"{piece['piece_id']}.png"
+        output_path = pieces_dir / f"{pid}.png"
         image.save(output_path)
-        rendered.append({"piece_id": piece["piece_id"], "output_path": str(output_path.resolve()), "plan": plan})
+        rendered_paths[pid] = output_path
+        rendered.append({"piece_id": pid, "output_path": str(output_path.resolve()), "plan": plan})
+
+    # 阶段 2：slave pieces 复制 master PNG + Pillow 变换
+    for piece in pieces_payload.get("pieces", []):
+        pid = piece["piece_id"]
+        if pid not in slave_map:
+            continue
+        slave_info = slave_map[pid]
+        master_path = rendered_paths.get(slave_info["source"])
+        if not master_path:
+            raise RuntimeError(f"slave 裁片 {pid} 的 master {slave_info['source']} 未渲染")
+
+        with Image.open(master_path).convert("RGBA") as img:
+            transform = slave_info["transform"]
+            if transform.get("mirror_x"):
+                img = ImageOps.mirror(img)
+            if transform.get("mirror_y"):
+                img = ImageOps.flip(img)
+
+            # 尺寸对齐：slave 的 mask 尺寸理论上和 master 相同，但可能有 1-2px 偏差
+            target_w = piece.get("width", img.width)
+            target_h = piece.get("height", img.height)
+            if img.width != target_w or img.height != target_h:
+                if abs(img.width - target_w) > 5 or abs(img.height - target_h) > 5:
+                    print(f"[警告] 裁片 {pid} 与 master {slave_info['source']} 尺寸偏差过大 "
+                          f"({img.width}x{img.height} vs {target_w}x{target_h})，回退到独立渲染")
+                    plan = entries.get(pid)
+                    img = render_layered_piece(piece, plan, textures, solids, motifs)
+                else:
+                    img = _align_image_size(img, target_w, target_h)
+
+            output_path = pieces_dir / f"{pid}.png"
+            img.save(output_path)
+            rendered_paths[pid] = output_path
+            rendered.append({"piece_id": pid, "output_path": str(output_path.resolve()), "plan": entries.get(pid)})
+
     return rendered
 
 

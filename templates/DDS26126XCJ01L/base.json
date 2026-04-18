@@ -67,6 +67,9 @@
       "zone": "secondary",
       "symmetry_group": "sg_sleeve",
       "same_shape_group": "ssg_sleeve",
+      "symmetry_relations": [
+        { "target_slot_index": 4, "mirror_x": true, "mirror_y": false }
+      ],
       "texture_direction_hint": "longitudinal",
       "grain_direction": "vertical",
       "notes": "从通用模板继承: 左袖. 面积排名#4, 实际面积=1548663, 宽高比=1.472"
@@ -99,6 +102,9 @@
       "zone": "trim",
       "symmetry_group": "sg_collar",
       "same_shape_group": "ssg_collar",
+      "symmetry_relations": [
+        { "target_slot_index": 6, "mirror_x": true, "mirror_y": false }
+      ],
       "texture_direction_hint": "longitudinal",
       "grain_direction": "horizontal",
       "notes": "从通用模板继承: 领子左. 面积排名#6, 实际面积=525105, 宽高比=5.003"
