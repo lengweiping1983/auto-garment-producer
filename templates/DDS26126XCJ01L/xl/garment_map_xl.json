@@ -169,5 +169,5 @@
     }
   ],
   "asset_size_label": "xl",
-  "pieces_json": "/Users/lengweiping/.agents/skills/auto-garment-producer/templates/DDS26126XCJ01L/xl/pieces_xl.json"
+  "pieces_json": "pieces_xl.json"
 }

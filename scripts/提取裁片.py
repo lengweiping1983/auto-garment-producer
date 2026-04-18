@@ -243,7 +243,6 @@ def main() -> int:
     overview = build_overview(prepared, pieces, out_dir / "piece_overview.png")
 
     payload = {
-        "pattern_image": str(Path(args.pattern).resolve()),
         "prepared_pattern": str(prepared.resolve()),
         "overview_image": str(overview.resolve()),
         "canvas": {"width": img.width, "height": img.height, "unit": "px"},

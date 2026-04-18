@@ -9,6 +9,11 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageOps
 
+try:
+    from template_loader import normalize_piece_asset_paths
+except Exception:
+    normalize_piece_asset_paths = None
+
 
 def load_json(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -604,6 +609,8 @@ def main() -> int:
     args = parser.parse_args()
 
     pieces_payload = load_json(args.pieces)
+    if normalize_piece_asset_paths:
+        pieces_payload = normalize_piece_asset_paths(pieces_payload, args.pieces)
     texture_set_path = Path(args.texture_set)
     texture_set = load_json(texture_set_path)
     textures = approved_textures(texture_set, texture_set_path.parent)

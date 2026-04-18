@@ -33,6 +33,7 @@ from template_loader import (
     find_template_by_id,
     format_template_garment_map,
     match_pieces_to_template,
+    relative_json_metadata_path,
     resolve_template_assets,
 )
 from PIL import Image, ImageDraw, ImageFont
@@ -88,7 +89,7 @@ def _write_masks_with_suffix(components: list[dict], image_size: tuple[int, int]
             "height": bbox["height"],
             "area": component["area"],
             "aspect": round(bbox["width"] / max(1, bbox["height"]), 4),
-            "mask_path": str(mask_path.resolve()),
+            "mask_path": str(mask_path.relative_to(out_dir)),
         }
         piece_meta.update(orientation_info)
         pieces.append(piece_meta)
@@ -183,7 +184,7 @@ def build_template_garment_assets(template_id: str, size_label: str, force: bool
 
     garment_map = format_template_garment_map(matched, template)
     garment_map["asset_size_label"] = size_label
-    garment_map["pieces_json"] = str(pieces_path.resolve())
+    garment_map["pieces_json"] = relative_json_metadata_path(pieces_path, garment_map_path)
     _save_json(garment_map_path, garment_map)
     _draw_garment_map_overview(pieces_payload, garment_map, garment_map_overview_path)
     print(f"[生成] 模板部位映射: {garment_map_path}")
@@ -224,9 +225,8 @@ def extract_pieces(mask_path: Path, out_subdir: Path, size_label: str, min_area:
     )
 
     payload = {
-        "pattern_image": str(mask_path.resolve()),
-        "prepared_pattern": str(prepared.resolve()),
-        "overview_image": str(overview.resolve()),
+        "prepared_pattern": prepared.name,
+        "overview_image": overview.name,
         "canvas": {"width": img.width, "height": img.height, "unit": "px"},
         "pieces": pieces,
     }

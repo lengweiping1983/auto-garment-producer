@@ -9,6 +9,7 @@
 4. 验证匹配质量，返回 garment_map 列表
 """
 import json
+import os
 import re
 from pathlib import Path
 
@@ -29,6 +30,11 @@ def load_index() -> dict:
     return {"templates": [], "version": "1.0.0"}
 
 
+def _normalize_match_text(value: str) -> str:
+    """Normalize garment labels so variants like 'T 恤', 't shirt', and 't-shirt' match."""
+    return re.sub(r"[\s\-_'/]+", "", str(value).lower().strip())
+
+
 def _find_index_entry_by_id(template_id: str) -> dict | None:
     if not template_id:
         return None
@@ -39,75 +45,65 @@ def _find_index_entry_by_id(template_id: str) -> dict | None:
 
 
 def _find_index_entry_by_garment_type(garment_type: str) -> dict | None:
-    gt_lower = garment_type.lower().strip()
-    if not gt_lower:
+    gt_norm = _normalize_match_text(garment_type)
+    if not gt_norm:
         return None
     for entry in load_index().get("templates", []):
-        if entry.get("garment_type", "").lower().strip() == gt_lower:
+        if _normalize_match_text(entry.get("garment_type", "")) == gt_norm:
             return entry
-        if entry.get("template_name", "").lower().strip() == gt_lower:
+        if _normalize_match_text(entry.get("template_name", "")) == gt_norm:
             return entry
         for alias in entry.get("aliases", []):
-            if alias.lower().strip() == gt_lower:
+            if _normalize_match_text(alias) == gt_norm:
                 return entry
     return None
 
 
-def _find_index_entry_by_pattern_path(pattern_path: str | Path) -> dict | None:
-    candidate_id = _template_id_from_pattern_path(pattern_path)
-    if not candidate_id:
-        return None
-
-    matches = []
-    for entry in load_index().get("templates", []):
-        tid = entry.get("template_id", "")
-        tname = entry.get("template_name", "")
-        if tid == candidate_id or tname == candidate_id:
-            matches.append((entry, 100))
-        elif candidate_id in tid or candidate_id in tname:
-            matches.append((entry, 50))
-        elif tid in candidate_id or tname in candidate_id:
-            matches.append((entry, 25))
-    if not matches:
-        return None
-    matches.sort(key=lambda x: x[1], reverse=True)
-    return matches[0][0]
-
-
-def _template_id_from_pattern_path(pattern_path: str | Path) -> str:
-    p = Path(pattern_path)
-    candidate_id = p.stem
-    for suffix in ("-S_mask", "-M_mask", "-L_mask", "-XL_mask", "-XXL_mask",
-                   "_S_mask", "_M_mask", "_L_mask", "_XL_mask", "_XXL_mask",
-                   "_mask", "-mask"):
-        if candidate_id.endswith(suffix):
-            return candidate_id[: -len(suffix)]
-    return candidate_id
-
-
-def _size_from_pattern_path(pattern_path: str | Path) -> str:
-    stem = Path(pattern_path).stem.lower()
-    match = re.search(r"[-_]([sml]|xl|xxl)_?mask$", stem)
-    if match:
-        return match.group(1)
-    return ""
-
-
-def _resolve_asset_size(entry: dict, size_label: str = "base", pattern_path: str | Path = "") -> str:
-    sizes = {str(s).lower() for s in entry.get("sizes", [])}
+def _resolve_asset_size(entry: dict, size_label: str = "base") -> str:
     requested = (size_label or "").lower().strip()
     if requested and requested != "base":
         return requested
-    pattern_size = _size_from_pattern_path(pattern_path) if pattern_path else ""
-    if pattern_size and (not sizes or pattern_size in sizes):
-        return pattern_size
     return str(entry.get("default_size") or "s").lower()
+
+
+def resolve_asset_path(value: str | Path, base_dir: Path) -> Path:
+    """Resolve an asset reference relative to the pieces JSON directory."""
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return base_dir / path
+
+
+def resolve_json_metadata_path(value: str | Path, owner_json_path: str | Path) -> Path:
+    """Resolve a metadata path relative to the JSON file that owns it."""
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return Path(owner_json_path).resolve().parent / path
+
+
+def relative_json_metadata_path(target: str | Path, owner_json_path: str | Path) -> str:
+    """Serialize a metadata path relative to the JSON file that owns it."""
+    return os.path.relpath(Path(target).resolve(), Path(owner_json_path).resolve().parent)
+
+
+def normalize_piece_asset_paths(pieces_payload: dict, pieces_json_path: str | Path) -> dict:
+    """Expand relative prepared/overview/mask paths using the pieces JSON directory."""
+    base_dir = Path(pieces_json_path).resolve().parent
+    for key in ("prepared_pattern", "overview_image"):
+        value = pieces_payload.get(key, "")
+        if value:
+            pieces_payload[key] = str(resolve_asset_path(value, base_dir).resolve())
+    for piece in pieces_payload.get("pieces", []):
+        value = piece.get("mask_path", "")
+        if value:
+            piece["mask_path"] = str(resolve_asset_path(value, base_dir).resolve())
+    return pieces_payload
 
 
 def resolve_template_assets(
     template_id: str = "",
     size_label: str = "base",
-    pattern_path: str | Path = "",
     garment_type: str = "",
 ) -> dict | None:
     """解析可直接复用的内置模板资产。
@@ -117,15 +113,13 @@ def resolve_template_assets(
     由调用方回退到运行时提取流程。
     """
     entry = _find_index_entry_by_id(template_id)
-    if not entry and pattern_path:
-        entry = _find_index_entry_by_pattern_path(pattern_path)
     if not entry and garment_type:
         entry = _find_index_entry_by_garment_type(garment_type)
     if not entry:
         return None
 
     tid = entry.get("template_id", "")
-    resolved_size = _resolve_asset_size(entry, size_label, pattern_path)
+    resolved_size = _resolve_asset_size(entry, size_label)
     asset_dir = TEMPLATES_DIR / tid / resolved_size
     pieces_path = asset_dir / f"pieces_{resolved_size}.json"
     piece_overview_path = asset_dir / f"piece_overview_{resolved_size}.png"
@@ -147,6 +141,7 @@ def resolve_template_assets(
         pieces_payload = _load_json(pieces_path)
     except Exception:
         return None
+    pieces_payload = normalize_piece_asset_paths(pieces_payload, pieces_path)
 
     referenced = [
         pieces_payload.get("prepared_pattern", ""),
@@ -186,16 +181,16 @@ def find_template_by_id(template_id: str, size: str = "base") -> dict | None:
 def find_template_by_garment_type(garment_type: str) -> dict | None:
     """按 garment_type 或 aliases 模糊匹配模板。"""
     index = load_index()
-    gt_lower = garment_type.lower().strip()
+    gt_norm = _normalize_match_text(garment_type)
     for entry in index.get("templates", []):
-        if entry.get("garment_type", "").lower().strip() == gt_lower:
+        if _normalize_match_text(entry.get("garment_type", "")) == gt_norm:
             return find_template_by_id(entry["template_id"], entry.get("default_size", "base"))
         # 也匹配 template_name
-        if entry.get("template_name", "").lower().strip() == gt_lower:
+        if _normalize_match_text(entry.get("template_name", "")) == gt_norm:
             return find_template_by_id(entry["template_id"], entry.get("default_size", "base"))
         # 匹配 aliases（支持中文别名如"T恤"、"防晒服"等）
         for alias in entry.get("aliases", []):
-            if alias.lower().strip() == gt_lower:
+            if _normalize_match_text(alias) == gt_norm:
                 return find_template_by_id(entry["template_id"], entry.get("default_size", "base"))
     return None
 
@@ -343,45 +338,6 @@ def format_template_garment_map(entries: list[dict], template: dict) -> dict:
     }
 
 
-def find_template_by_pattern_path(pattern_path: str | Path) -> dict | None:
-    """根据 pattern 文件路径自动匹配已初始化的模板。
-
-    匹配策略：
-    1. 提取文件名中的货号/型号（如 BFSK26308XCJ01L）
-    2. 在 index.json 中查找 template_id 或 template_name 包含该货号的模板
-    3. 若只有一个匹配，直接返回；多个匹配时返回最精确的那个
-    """
-    p = Path(pattern_path)
-    stem = p.stem  # e.g. "BFSK26308XCJ01L-S_mask"
-    # 去掉常见后缀提取货号
-    candidate_id = stem
-    for suffix in ("-S_mask", "-M_mask", "-L_mask", "-XL_mask", "-XXL_mask",
-                   "_mask", "-mask"):
-        if candidate_id.endswith(suffix):
-            candidate_id = candidate_id[: -len(suffix)]
-            break
-
-    index = load_index()
-    matches = []
-    for entry in index.get("templates", []):
-        tid = entry.get("template_id", "")
-        tname = entry.get("template_name", "")
-        # 精确匹配或包含
-        if tid == candidate_id or tname == candidate_id:
-            matches.append((entry, 100))  # 精确匹配优先级最高
-        elif candidate_id in tid or candidate_id in tname:
-            matches.append((entry, 50))
-        elif tid in candidate_id or tname in candidate_id:
-            matches.append((entry, 25))
-
-    if not matches:
-        return None
-    # 按优先级排序，返回最高分的模板（默认尺寸）
-    matches.sort(key=lambda x: x[1], reverse=True)
-    best = matches[0][0]
-    return find_template_by_id(best["template_id"], best.get("default_size", "base"))
-
-
 def load_size_mappings(template_id: str) -> dict | None:
     """加载指定模板的多尺寸映射关系。"""
     path = TEMPLATES_DIR / template_id / "size_mappings.json"
@@ -395,4 +351,4 @@ def load_size_pieces(template_id: str, size_label: str) -> dict | None:
     path = TEMPLATES_DIR / template_id / size_label / f"pieces_{size_label}.json"
     if not path.exists():
         return None
-    return _load_json(path)
+    return normalize_piece_asset_paths(_load_json(path), path)

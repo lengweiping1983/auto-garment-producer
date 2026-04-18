@@ -169,5 +169,5 @@
     }
   ],
   "asset_size_label": "s",
-  "pieces_json": "/Users/lengweiping/.agents/skills/auto-garment-producer/templates/BFSK26308XCJ01L/s/pieces_s.json"
+  "pieces_json": "pieces_s.json"
 }

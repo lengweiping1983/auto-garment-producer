@@ -1,7 +1,6 @@
 {
-  "pattern_image": "/Users/lengweiping/Desktop/衣服/男士衬衫/男士衬衫/DDS26126XCJ01L/DDS26126XCJ01L-XXL_mask.png",
-  "prepared_pattern": "/Users/lengweiping/.agents/skills/auto-garment-producer/templates/DDS26126XCJ01L/xxl/prepared_pattern_xxl.png",
-  "overview_image": "/Users/lengweiping/.agents/skills/auto-garment-producer/templates/DDS26126XCJ01L/xxl/piece_overview_xxl.png",
+  "prepared_pattern": "prepared_pattern_xxl.png",
+  "overview_image": "piece_overview_xxl.png",
   "canvas": {
     "width": 6227,
     "height": 4575,
@@ -23,7 +22,7 @@
       "height": 3461,
       "area": 8106952,
       "aspect": 0.8148,
-      "mask_path": "/Users/lengweiping/.agents/skills/auto-garment-producer/templates/DDS26126XCJ01L/xxl/masks/piece_001_xxl_mask.png",
+      "mask_path": "masks/piece_001_xxl_mask.png",
       "pattern_orientation": 180,
       "confidence": 0.23,
       "orientation_reason": "下半部分有明显内凹（领口特征）"
@@ -43,7 +42,7 @@
       "height": 3319,
       "area": 4364365,
       "aspect": 0.4815,
-      "mask_path": "/Users/lengweiping/.agents/skills/auto-garment-producer/templates/DDS26126XCJ01L/xxl/masks/piece_002_xxl_mask.png",
+      "mask_path": "masks/piece_002_xxl_mask.png",
       "pattern_orientation": 0,
       "confidence": 0.36,
       "orientation_reason": "上半部分有明显内凹（领口特征）"
@@ -63,7 +62,7 @@
       "height": 3319,
       "area": 4362728,
       "aspect": 0.4815,
-      "mask_path": "/Users/lengweiping/.agents/skills/auto-garment-producer/templates/DDS26126XCJ01L/xxl/masks/piece_003_xxl_mask.png",
+      "mask_path": "masks/piece_003_xxl_mask.png",
       "pattern_orientation": 0,
       "confidence": 0.36,
       "orientation_reason": "上半部分有明显内凹（领口特征）"
@@ -83,7 +82,7 @@
       "height": 1260,
       "area": 1911436,
       "aspect": 1.6063,
-      "mask_path": "/Users/lengweiping/.agents/skills/auto-garment-producer/templates/DDS26126XCJ01L/xxl/masks/piece_004_xxl_mask.png",
+      "mask_path": "masks/piece_004_xxl_mask.png",
       "pattern_orientation": 0,
       "confidence": 0.54,
       "orientation_reason": "上半部分有明显内凹（领口特征）"
@@ -103,7 +102,7 @@
       "height": 1260,
       "area": 1911429,
       "aspect": 1.6071,
-      "mask_path": "/Users/lengweiping/.agents/skills/auto-garment-producer/templates/DDS26126XCJ01L/xxl/masks/piece_005_xxl_mask.png",
+      "mask_path": "masks/piece_005_xxl_mask.png",
       "pattern_orientation": 0,
       "confidence": 0.54,
       "orientation_reason": "上半部分有明显内凹（领口特征）"
@@ -123,7 +122,7 @@
       "height": 404,
       "area": 570283,
       "aspect": 5.1213,
-      "mask_path": "/Users/lengweiping/.agents/skills/auto-garment-producer/templates/DDS26126XCJ01L/xxl/masks/piece_006_xxl_mask.png",
+      "mask_path": "masks/piece_006_xxl_mask.png",
       "pattern_orientation": 180,
       "confidence": 0.38,
       "orientation_reason": "下半部分有明显内凹（领口特征）"
@@ -143,7 +142,7 @@
       "height": 405,
       "area": 570234,
       "aspect": 5.1086,
-      "mask_path": "/Users/lengweiping/.agents/skills/auto-garment-producer/templates/DDS26126XCJ01L/xxl/masks/piece_007_xxl_mask.png",
+      "mask_path": "masks/piece_007_xxl_mask.png",
       "pattern_orientation": 0,
       "confidence": 0.38,
       "orientation_reason": "上半部分有明显内凹（领口特征）"
@@ -163,7 +162,7 @@
       "height": 289,
       "area": 405779,
       "aspect": 7.4187,
-      "mask_path": "/Users/lengweiping/.agents/skills/auto-garment-producer/templates/DDS26126XCJ01L/xxl/masks/piece_008_xxl_mask.png",
+      "mask_path": "masks/piece_008_xxl_mask.png",
       "pattern_orientation": 0,
       "confidence": 0.48,
       "orientation_reason": "上半部分有明显内凹（领口特征）"
@@ -183,7 +182,7 @@
       "height": 289,
       "area": 405754,
       "aspect": 7.4187,
-      "mask_path": "/Users/lengweiping/.agents/skills/auto-garment-producer/templates/DDS26126XCJ01L/xxl/masks/piece_009_xxl_mask.png",
+      "mask_path": "masks/piece_009_xxl_mask.png",
       "pattern_orientation": 180,
       "confidence": 0.48,
       "orientation_reason": "下半部分有明显内凹（领口特征）"

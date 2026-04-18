@@ -15,13 +15,17 @@ try:
     from template_loader import (
         find_template_by_id,
         find_template_by_garment_type,
-        find_template_by_pattern_path,
         load_template_file,
         match_pieces_to_template,
         format_template_garment_map,
+        relative_json_metadata_path,
     )
     HAS_TEMPLATE_LOADER = True
 except Exception as _exc:
+    def relative_json_metadata_path(target: str | Path, owner_json_path: str | Path) -> str:
+        import os
+        return os.path.relpath(Path(target).resolve(), Path(owner_json_path).resolve().parent)
+
     HAS_TEMPLATE_LOADER = False
 
 
@@ -285,14 +289,7 @@ def main() -> int:
             template = find_template_by_id(args.template, args.template_size)
             if template:
                 print(f"[模板] 加载内置模板: {args.template}/{args.template_size}")
-        # 1c. 按 pattern 文件名自动发现已初始化模板
-        if not template:
-            pattern_path = pieces_payload.get("pattern_image", "")
-            if pattern_path:
-                template = find_template_by_pattern_path(pattern_path)
-                if template:
-                    print(f"[模板] 按 pattern 文件名自动匹配到模板: {template.get('template_id', '?')}")
-        # 1d. 内置模板（按 garment_type 自动匹配）
+        # 1c. 内置模板（按 garment_type 自动匹配）
         if not template and args.garment_type:
             template = find_template_by_garment_type(args.garment_type)
             if template:
@@ -304,6 +301,7 @@ def main() -> int:
             if matched and avg_conf >= 0.75:
                 payload = format_template_garment_map(matched, template)
                 map_path = out_dir / "garment_map.json"
+                payload["pieces_json"] = relative_json_metadata_path(args.pieces, map_path)
                 map_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
                 overview = draw_overview(pieces_payload, payload, out_dir / "garment_map_overview.jpg")
                 print(json.dumps(
@@ -378,6 +376,7 @@ def main() -> int:
         "pieces": roles,
     }
     map_path = out_dir / "garment_map.json"
+    payload["pieces_json"] = relative_json_metadata_path(args.pieces, map_path)
     map_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     overview = draw_overview(pieces_payload, payload, out_dir / "garment_map_overview.jpg")
     print(json.dumps(

@@ -25,19 +25,23 @@ from PIL import Image, ImageColor, ImageEnhance, ImageFilter, ImageStat
 
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
-NEO_AI_SCRIPT = Path("/Users/lengweiping/.agents/skills/neo-ai/scripts/generate_texture_collection_board.py")
+NEO_AI_SCRIPT = SKILL_DIR.parent / "neo-ai" / "scripts" / "generate_texture_collection_board.py"
 
 # 导入模板加载器（用于多尺寸自动渲染）
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 try:
     from template_loader import (
-        find_template_by_pattern_path,
         load_size_mappings,
         load_size_pieces,
+        normalize_piece_asset_paths,
+        relative_json_metadata_path,
         resolve_template_assets,
     )
     HAS_TEMPLATE_LOADER = True
 except Exception:
+    def relative_json_metadata_path(target: str | Path, owner_json_path: str | Path) -> str:
+        return os.path.relpath(Path(target).resolve(), Path(owner_json_path).resolve().parent)
+
     HAS_TEMPLATE_LOADER = False
 
 
@@ -178,8 +182,8 @@ def build_production_context(
         ctx["input_hash"]["theme_image"] = file_sha256(args.theme_image)
         ctx["paths"]["theme_image"] = str(Path(args.theme_image).resolve())
     if args.pattern:
-        ctx["input_hash"]["pattern_image"] = file_sha256(args.pattern)
-        ctx["paths"]["pattern_image"] = str(Path(args.pattern).resolve())
+        ctx["input_hash"]["pattern_asset"] = file_sha256(args.pattern)
+        ctx["paths"]["pattern_asset"] = str(Path(args.pattern).resolve())
     ctx["input_hash"]["garment_type"] = args.garment_type
     ctx["input_hash"]["user_prompt"] = getattr(args, "user_prompt", "")
     ctx["input_hash"]["mode"] = getattr(args, "mode", "")
@@ -220,16 +224,16 @@ def build_production_context(
             ctx["paths"][name] = str(p.resolve())
     resolved_pieces_path = pieces_path or (out_dir / "pieces.json")
     if resolved_pieces_path.exists():
-        ctx["paths"]["pieces_json"] = str(resolved_pieces_path.resolve())
+        ctx_path = out_dir / "production_context.json"
+        ctx["paths"]["pieces_json"] = relative_json_metadata_path(resolved_pieces_path, ctx_path)
         try:
             pieces_payload = json.loads(resolved_pieces_path.read_text(encoding="utf-8"))
+            if HAS_TEMPLATE_LOADER:
+                pieces_payload = normalize_piece_asset_paths(pieces_payload, resolved_pieces_path)
             if pieces_payload.get("overview_image"):
-                ctx["paths"]["piece_overview"] = pieces_payload["overview_image"]
+                ctx["paths"]["piece_overview"] = relative_json_metadata_path(pieces_payload["overview_image"], ctx_path)
             if pieces_payload.get("prepared_pattern"):
-                ctx["paths"]["prepared_pattern"] = pieces_payload["prepared_pattern"]
-            if not ctx["paths"].get("pattern_image") and pieces_payload.get("pattern_image"):
-                ctx["paths"]["pattern_image"] = pieces_payload["pattern_image"]
-                ctx["input_hash"]["pattern_image"] = file_sha256(pieces_payload["pattern_image"])
+                ctx["paths"]["prepared_pattern"] = relative_json_metadata_path(pieces_payload["prepared_pattern"], ctx_path)
         except Exception:
             pass
     if garment_map_path and garment_map_path.exists():
@@ -1046,11 +1050,9 @@ def resolve_reusable_template_assets_for_run(args) -> dict | None:
     if args.no_template or args.template_file or not HAS_TEMPLATE_LOADER:
         return None
     requested_template = bool(args.template)
-    requested_pattern = bool(args.pattern)
     assets = resolve_template_assets(
         template_id=args.template,
         size_label=args.template_size,
-        pattern_path=args.pattern,
         garment_type=args.garment_type,
     )
     if assets:
@@ -1058,26 +1060,18 @@ def resolve_reusable_template_assets_for_run(args) -> dict | None:
         args.template_size = assets["size_label"]
         if requested_template:
             assets["template_source"] = "template_arg"
-        elif requested_pattern:
-            assets["template_source"] = "pattern_match"
         else:
             assets["template_source"] = "garment_type_match"
-    return assets
+        return assets
 
 
-def pattern_hash_for_run(args, pieces_path: Path | None = None) -> str:
-    """Return a stable pattern hash for explicit masks or reusable template pieces."""
+def pieces_asset_hash_for_run(args, pieces_path: Path | None = None) -> str:
+    """Return a stable asset hash for explicit masks or reusable template pieces."""
     if getattr(args, "pattern", ""):
         return file_sha256(args.pattern)
     if pieces_path and pieces_path.exists():
-        try:
-            pieces_payload = load_json(pieces_path)
-            pattern_image = pieces_payload.get("pattern_image", "")
-            if pattern_image:
-                return file_sha256(pattern_image)
-        except Exception:
-            return ""
-    return ""
+        return file_sha256(pieces_path)
+    return f"{getattr(args, 'template', '')}:{getattr(args, 'template_size', '')}"
 
 
 def _run_render_pipeline(
@@ -1179,7 +1173,7 @@ def _run_render_pipeline(
         plan_loaded_from_cache = False
         if args.reuse_cache:
             plan_hash = {
-                "pattern_image": pattern_hash_for_run(args, pieces_path),
+                "pieces_asset": pieces_asset_hash_for_run(args, pieces_path),
                 "texture_set": file_sha256(texture_set_path),
                 "garment_type": args.garment_type,
                 "brief": file_sha256(args.brief) if args.brief else "",
@@ -1528,15 +1522,9 @@ def render_size_variants_core(
 
 def _render_size_variants(args, out_dir: Path, texture_set_path: Path, suffix: str = "") -> None:
     """基于-S渲染结果，纯程序生成其他尺寸的渲染输出（无AI）。"""
-    pattern_path = getattr(args, "pattern", "")
-    if not pattern_path:
+    template_id = getattr(args, "template", "")
+    if not template_id:
         return
-
-    template = find_template_by_pattern_path(pattern_path)
-    if not template:
-        return
-
-    template_id = template.get("template_id", "")
     mappings = load_size_mappings(template_id)
     if not mappings:
         return
@@ -1935,7 +1923,7 @@ def main() -> int:
             plan_loaded_from_cache = False
             if args.reuse_cache:
                 plan_hash = {
-                    "pattern_image": pattern_hash_for_run(args, pieces_path),
+                    "pieces_asset": pieces_asset_hash_for_run(args, pieces_path),
                     "texture_set": file_sha256(merged_ts_path),
                     "garment_type": args.garment_type,
                     "brief": file_sha256(args.brief) if args.brief else "",
@@ -2229,7 +2217,7 @@ def main() -> int:
         plan_loaded_from_cache = False
         if args.reuse_cache:
             plan_hash = {
-                "pattern_image": pattern_hash_for_run(args, pieces_path),
+                "pieces_asset": pieces_asset_hash_for_run(args, pieces_path),
                 "texture_set": file_sha256(texture_set_path),
                 "garment_type": args.garment_type,
                 "brief": file_sha256(args.brief) if args.brief else "",

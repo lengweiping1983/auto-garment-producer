@@ -10,11 +10,19 @@
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from image_utils import ensure_thumbnail
+try:
+    from template_loader import normalize_piece_asset_paths, relative_json_metadata_path
+except Exception:
+    normalize_piece_asset_paths = None
+    def relative_json_metadata_path(target: str | Path, owner_json_path: str | Path) -> str:
+        import os
+        return os.path.relpath(Path(target).resolve(), Path(owner_json_path).resolve().parent)
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 STYLE_REFERENCE_DIR = SKILL_DIR / "references" / "styles"
@@ -48,16 +56,16 @@ def _load_visual_motif_geometries(visual_elements: dict) -> dict:
 
 
 def infer_style_references(pieces_payload: dict, brief: dict) -> list[dict]:
-    """根据纸样来源或服装类型匹配款式参考图。"""
+    """根据模板资产或服装类型匹配款式参考图。"""
     haystack = " ".join(
         str(value)
         for value in (
-            pieces_payload.get("pattern_image", ""),
             pieces_payload.get("prepared_pattern", ""),
             pieces_payload.get("overview_image", ""),
             brief.get("garment_type", ""),
         )
     ).lower()
+    compact_haystack = re.sub(r"[\s\-_'/]+", "", haystack)
     refs = []
     for template_id, ref in STYLE_REFERENCE_BY_TEMPLATE.items():
         template_lower = template_id.lower()
@@ -65,7 +73,10 @@ def infer_style_references(pieces_payload: dict, brief: dict) -> list[dict]:
             template_id == "BFSK26308XCJ01L" and any(term in haystack for term in ("防晒", "sun protection"))
         ) or (
             template_id == "DDS26126XCJ01L"
-            and any(term in haystack for term in ("t恤", "t-shirt", "tee", "衬衫", "男士衬衫", "shirt"))
+            and (
+                any(term in haystack for term in ("衬衫", "男士衬衫", "shirt"))
+                or any(term in compact_haystack for term in ("t恤", "tshirt", "男士t恤", "tee"))
+            )
         ):
             path = ref["path"]
             if path.exists():
@@ -520,6 +531,8 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     pieces_payload = load_json(args.pieces)
+    if normalize_piece_asset_paths:
+        pieces_payload = normalize_piece_asset_paths(pieces_payload, args.pieces)
     texture_set = load_json(args.texture_set)
 
     brief = {}
@@ -613,9 +626,10 @@ def main() -> int:
     prompt_path = out_dir / "ai_production_plan_prompt.txt"
     prompt_path.write_text(prompt_text, encoding="utf-8")
 
+    request_path = out_dir / "ai_production_plan_request.json"
     request_summary = {
         "request_id": "ai_multi_production_plan_v1" if args.multi_scheme else "ai_production_plan_v1",
-        "pieces_json": str(Path(args.pieces).resolve()),
+        "pieces_json": relative_json_metadata_path(args.pieces, request_path),
         "texture_set": str(Path(args.texture_set).resolve()),
         "brief": str(Path(args.brief).resolve()) if args.brief else "",
         "geometry_hints": str(Path(args.geometry_hints).resolve()) if args.geometry_hints else "",
@@ -629,7 +643,6 @@ def main() -> int:
         "multi_scheme": args.multi_scheme,
         "max_schemes": args.max_schemes if args.multi_scheme else 1,
     }
-    request_path = out_dir / "ai_production_plan_request.json"
     request_path.write_text(json.dumps(request_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(json.dumps({
