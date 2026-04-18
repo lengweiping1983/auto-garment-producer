@@ -133,10 +133,63 @@ def apply_production_plan(plan_path: Path, out_dir: Path) -> tuple[Path, Path]:
     return garment_map_path, fill_plan_path
 
 
+def apply_multi_production_plan(plan_path: Path, out_dir: Path) -> list[dict]:
+    """拆解 ai_multi_production_plan.json 为多个独立 scheme 文件。
+    返回 scheme 元数据列表，用于下游遍历渲染。"""
+    plan = load_json(plan_path)
+    schemes = plan.get("schemes", [])
+
+    if not schemes:
+        # fallback：当作单方案处理
+        gm_path, fp_path = apply_production_plan(plan_path, out_dir)
+        return [{"scheme_id": "scheme_01", "suffix": "", "garment_map": str(gm_path), "fill_plan": str(fp_path)}]
+
+    results = []
+    for idx, scheme in enumerate(schemes, 1):
+        scheme_id = scheme.get("scheme_id", f"scheme_{idx:02d}")
+        suffix = f"_{scheme_id}"
+
+        # 提取并写入 garment_map
+        garment_map = scheme.get("garment_map", {})
+        if "map_id" not in garment_map:
+            garment_map["map_id"] = f"ai_garment_map_{scheme_id}"
+        if "method" not in garment_map:
+            garment_map["method"] = "ai_multi_production_plan_extraction"
+        gm_path = out_dir / f"garment_map{suffix}.json"
+        gm_path.write_text(json.dumps(garment_map, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 提取并写入 piece_fill_plan
+        fill_plan = scheme.get("piece_fill_plan", {})
+        if "plan_id" not in fill_plan:
+            fill_plan["plan_id"] = f"ai_piece_fill_plan_{scheme_id}"
+        if "locked" not in fill_plan:
+            fill_plan["locked"] = False
+        fp_path = out_dir / f"ai_piece_fill_plan{suffix}.json"
+        fp_path.write_text(json.dumps(fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        results.append({
+            "scheme_id": scheme_id,
+            "suffix": suffix,
+            "garment_map": str(gm_path.resolve()),
+            "fill_plan": str(fp_path.resolve()),
+        })
+
+    # 写入 schemes 元数据索引
+    meta_path = out_dir / "schemes_meta.json"
+    meta_path.write_text(json.dumps({"schemes": results}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print(f"[多方案拆解] 共 {len(results)} 套 scheme 已拆解:")
+    for r in results:
+        print(f"  {r['scheme_id']}: garment_map={r['garment_map']}, fill_plan={r['fill_plan']}")
+
+    return results
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="应用 AI 生产规划，拆解为 garment_map + fill_plan。")
-    parser.add_argument("--production-plan", required=True, help="ai_production_plan.json 路径")
+    parser = argparse.ArgumentParser(description="应用 AI 生产规划，拆解为 garment_map + fill_plan。支持多方案模式。")
+    parser.add_argument("--production-plan", required=True, help="ai_production_plan.json 或 ai_multi_production_plan.json 路径")
     parser.add_argument("--out", required=True, help="输出目录")
+    parser.add_argument("--multi-scheme", action="store_true", help="输入为 ai_multi_production_plan.json，拆解为多个独立 scheme 文件")
     args = parser.parse_args()
 
     plan_path = Path(args.production_plan)
@@ -147,13 +200,20 @@ def main() -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    garment_map_path, fill_plan_path = apply_production_plan(plan_path, out_dir)
-
-    print(json.dumps({
-        "garment_map": str(garment_map_path.resolve()),
-        "ai_piece_fill_plan": str(fill_plan_path.resolve()),
-        "status": "applied",
-    }, ensure_ascii=False, indent=2))
+    if args.multi_scheme:
+        schemes = apply_multi_production_plan(plan_path, out_dir)
+        print(json.dumps({
+            "schemes_meta": str((out_dir / "schemes_meta.json").resolve()),
+            "scheme_count": len(schemes),
+            "status": "applied_multi",
+        }, ensure_ascii=False, indent=2))
+    else:
+        garment_map_path, fill_plan_path = apply_production_plan(plan_path, out_dir)
+        print(json.dumps({
+            "garment_map": str(garment_map_path.resolve()),
+            "ai_piece_fill_plan": str(fill_plan_path.resolve()),
+            "status": "applied",
+        }, ensure_ascii=False, indent=2))
     return 0
 
 

@@ -30,10 +30,24 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-# Neo AI 脚本路径
-NEO_AI_SCRIPT = Path("/Users/lengweiping/.agents/skills/neo-ai/scripts/generate_texture_collection_board.py")
-# libtv 脚本目录
-LIBTV_SCRIPT_DIR = Path("/Users/lengweiping/.agents/skills/libtv-skills/skills/libtv-skill/scripts")
+# 从当前文件位置推导 skills 根目录（当前文件在 auto-garment-producer/scripts/ 下，上两级为 skills 根）
+_SKILLS_ROOT = Path(__file__).resolve().parents[2]
+
+# Neo AI 脚本路径：支持环境变量覆盖，默认从同级 skill 目录推导
+NEO_AI_SCRIPT = Path(
+    os.environ.get(
+        "NEO_AI_SCRIPT",
+        str(_SKILLS_ROOT / "neo-ai" / "scripts" / "generate_texture_collection_board.py"),
+    )
+)
+
+# libtv 脚本目录：支持环境变量覆盖，默认从同级 skill 目录推导
+LIBTV_SCRIPT_DIR = Path(
+    os.environ.get(
+        "LIBTV_SCRIPT_DIR",
+        str(_SKILLS_ROOT / "libtv-skills" / "skills" / "libtv-skill" / "scripts"),
+    )
+)
 
 
 class DualBoardGenerationError(Exception):

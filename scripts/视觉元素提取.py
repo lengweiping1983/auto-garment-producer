@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 try:
     from prompt_sanitizer import sanitize_prompt
 except Exception:
-    def sanitize_prompt(text):
+    def sanitize_prompt(text, domain="generic"):
         return text
 
 
@@ -71,7 +71,8 @@ def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, s
         "   - has_nap: true/false —— 是否有倒顺毛（灯芯绒、丝绒、植绒、毛呢、法兰绒、麂皮、羊羔绒等）",
         "   - nap_confidence: 0-1 —— 推断确信度",
         "   - 触发关键词（中文/英文）：灯芯绒、丝绒、植绒、毛呢、法兰绒、麂皮、羊羔绒、corduroy、velvet、fleece、suede、plush、boiled wool",
-        "   - **如果 has_nap=true，nap_direction 必填**（vertical/horizontal）。绝大多数绒毛面料为经向裁，默认填 vertical。",
+        "   - **如果 has_nap=true，nap_direction 必填，不允许留空**（vertical/horizontal）。绝大多数绒毛面料为经向裁，默认填 vertical。",
+        "   - ⚠️ 如果 has_nap=true 但 nap_direction 为空或未提供，输出将被视为无效，下游程序会强制 fallback 为 vertical。",
         "",
         "5. 自动生成面料提示词（Generated Prompts）",
         "   基于以上分析，为每种面料资产生成英文 AI 图像生成提示词：",

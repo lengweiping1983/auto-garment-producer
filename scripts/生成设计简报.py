@@ -15,10 +15,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 try:
     from prompt_sanitizer import sanitize_prompt, sanitize_prompts_in_dict
 except Exception:
-    # fallback: 如果导入失败，定义空函数
-    def sanitize_prompt(text):
+    # fallback: 如果导入失败，定义兼容空函数
+    def sanitize_prompt(text, domain="generic"):
         return text
-    def sanitize_prompts_in_dict(data, keys=("prompt",)):
+    def sanitize_prompts_in_dict(data, keys=("prompt",), domain="generic"):
         return data
 
 
@@ -132,7 +132,7 @@ def generate_prompt_variants(base_prompt: str, count: int = 3) -> list[str]:
             variants.append(base_prompt)
 
     # 过滤停用词和禁用词
-    variants = [sanitize_prompt(v) for v in variants]
+    variants = [sanitize_prompt(v, domain="fashion") for v in variants]
     return variants[:count]
 
 
@@ -243,6 +243,11 @@ def _generate_outputs(
     has_nap = fabric_hints.get("has_nap", False) if isinstance(fabric_hints, dict) else False
     nap_direction = fabric_hints.get("nap_direction", "") if isinstance(fabric_hints, dict) else ""
     nap_confidence = fabric_hints.get("nap_confidence", 0.0) if isinstance(fabric_hints, dict) else 0.0
+
+    # 强制兜底：has_nap=true 时 nap_direction 不能为空
+    if has_nap and not nap_direction:
+        nap_direction = "vertical"
+        print(f"[警告] visual_elements 中 has_nap=true 但 nap_direction 为空，已强制兜底为 'vertical'。请检查子 Agent 输出是否遵循 prompt 约束。")
 
     brief = {
         "brief_id": style_id,
@@ -372,7 +377,7 @@ def _generate_outputs(
         ("hero_motif_2", "次卖点定位图案", hero_motif_2_prompt, "row3_center", "placement_motif"),
         ("trim_motif", "小型装饰点缀", trim_motif_prompt, "row3_right", "placement_motif"),
     ]
-    prompts = [_make_prompt(tid, purpose, sanitize_prompt(_inject_palette_constraints(ptext, tid, palette)), panel=panel, role=role)
+    prompts = [_make_prompt(tid, purpose, sanitize_prompt(_inject_palette_constraints(ptext, tid, palette), domain="fashion"), panel=panel, role=role)
                for tid, purpose, ptext, panel, role in _prompts]
 
     texture_prompts = {
@@ -381,7 +386,7 @@ def _generate_outputs(
         "prompts": prompts,
     }
     # 过滤所有 prompt 中的停用词和禁用词
-    texture_prompts = sanitize_prompts_in_dict(texture_prompts)
+    texture_prompts = sanitize_prompts_in_dict(texture_prompts, domain="fashion")
 
     motif_prompts = {
         "style_id": style_id,
@@ -390,7 +395,7 @@ def _generate_outputs(
             {
                 "motif_id": "hero_motif",
                 "purpose": "单一卖点定位，置于一个 hero 裁片",
-                "prompt": sanitize_prompt(generated_prompts.get("hero_motif", f"elegant placement print motif, simplified {hero_selling_point}, balanced negative space, plain light background, soft fading edges, suitable for background removal, no text, no watermark")) if generated_prompts else sanitize_prompt(f"elegant placement print motif, simplified {hero_selling_point}, balanced negative space, plain light background, soft fading edges, suitable for background removal, no text, no watermark"),
+                "prompt": sanitize_prompt(generated_prompts.get("hero_motif", f"elegant placement print motif, simplified {hero_selling_point}, balanced negative space, plain light background, soft fading edges, suitable for background removal, no text, no watermark"), domain="fashion") if generated_prompts else sanitize_prompt(f"elegant placement print motif, simplified {hero_selling_point}, balanced negative space, plain light background, soft fading edges, suitable for background removal, no text, no watermark", domain="fashion"),
                 "negative_prompt": "complex background, full scene, poster, text, logo, watermark, faces, multiple subjects, frame",
             }
         ],
@@ -483,39 +488,75 @@ def _build_collection_prompt_from_prompts(prompts: list[dict], style: dict) -> s
     return "\n".join(lines)
 
 
-def _make_style_b_variant(prompt: str) -> str:
-    """基于 Set A 的 prompt 生成 Set B 的变体。
-    使用不同的替换词表，保持同一主题但改变表现手法。"""
-    swaps = [
-        ("watercolor", "hand-painted gouache"),
-        ("seamless tileable", "continuous repeat fabric"),
-        ("soft fading edges", "gentle blurred boundaries"),
-        ("low noise", "barely visible texture"),
-        ("abundant negative space", "generous breathing room"),
-        ("delicate", "refined"),
-        ("pale", "soft muted"),
-        ("quiet", "subdued"),
-        ("tiny scattered", "sparsely placed"),
-        ("medium density", "light airy density"),
-    ]
-    variant = prompt
-    for old, new in swaps:
-        if old.lower() in variant.lower():
-            variant = variant.replace(old, new)
-            break  # 每轮只替换一个词，避免过度改写
-    return variant
+# =============================================================================
+# A/B 双风格提示词生成（结构化重定向）
+# =============================================================================
+# A 套 = 商业稳妥款（Mass Production Safe）：低噪、高可穿、安全克制
+# B 套 = 视觉冲击款（Statement / Runway）：更大胆、更高对比、更强叙事
+# =============================================================================
+
+_MASS_PRODUCTION_INJECT = {
+    "main": "extremely low noise, abundant negative space, barely visible texture, highly wearable at retail distance, safe for mass production",
+    "secondary": "coordinated but very quiet, medium density but still airy, safe for large garment panels, no visual risk",
+    "dark_base": "deep ground with tiny subtle texture, very low noise, dark-quiet and minimal, understated elegance",
+    "accent_light": "tiny scattered elements, very small scale repeating, charming but controlled density, whisper-level presence",
+    "accent_mid": "soft organic lattice, low noise, seamless tileable texture for secondary panels, gentle structure",
+    "solid_quiet": "quiet warm solid with only subtle paper grain, no pattern, calm and minimal, pure background function",
+    "hero_motif_1": "single elegant main subject, balanced negative space, soft fading edges, refined and quiet, one clear selling point only",
+    "hero_motif_2": "secondary accent subject, refined brushwork, gentle presence, supporting role not competing",
+    "trim_motif": "small delicate decorative accent, minimal composition, designed as trim detail, quiet punctuation",
+}
+
+_STATEMENT_INJECT = {
+    "main": "visible artistic texture, confident brushstrokes, gallery-worthy surface, stronger visual presence while still wearable",
+    "secondary": "coordinating with more visible pattern, medium-high density, stronger visual rhythm, bolder expression",
+    "dark_base": "deep rich ground with expressive texture, moody and atmospheric, dramatic dark panels, statement depth",
+    "accent_light": "scattered elements with more presence, charming and lively, noticeable accent density, playful energy",
+    "accent_mid": "geometric or organic lattice with stronger rhythm, more visible structure, architectural confidence",
+    "solid_quiet": "warm solid with visible artisan paper grain texture, subtle but tactile, handcrafted character",
+    "hero_motif_1": "bold main subject with stronger presence, dramatic negative space, statement piece, hero-worthy impact",
+    "hero_motif_2": "expressive accent subject with dynamic brushwork, confident artistic gesture, memorable accent",
+    "trim_motif": "decorative accent with more visual weight, confident composition, eye-catching trim detail",
+}
 
 
-def _build_libtv_description_from_prompts(prompts: list[dict], style: dict) -> str:
-    """将 9 面板提示词转换为适合 libtv create_session 的中文自然语言描述。
-    描述中包含明确的 3x3 布局要求和各面板内容。"""
+def _apply_direction_style(prompts: list[dict], inject_map: dict[str, str]) -> list[dict]:
+    """为每个面板 prompt 追加风格导向注入，生成指定方向的变体。
+    注入追加在原有 prompt 末尾，保留主题元素和 palette 约束。"""
+    result = []
+    for p in prompts:
+        tid = p.get("texture_id", "")
+        original = p.get("prompt", "")
+        inject = inject_map.get(tid, "")
+        if inject:
+            # 去重：如果注入文本已存在则不重复追加
+            if inject.lower() not in original.lower():
+                new_prompt = f"{original}, {inject}"
+            else:
+                new_prompt = original
+        else:
+            new_prompt = original
+        result.append({
+            "texture_id": tid,
+            "purpose": p.get("purpose", ""),
+            "prompt": new_prompt,
+            "panel": p.get("panel", ""),
+            "role": p.get("role", ""),
+        })
+    return result
+
+
+def _build_libtv_description_from_prompts(prompts: list[dict], style: dict, direction_note: str = "") -> str:
+    """将 9 面板提示词转换为适合 libtv create_session 的中文自然语言描述。"""
     panel_map = {p.get("texture_id", ""): p.get("prompt", "") for p in prompts}
     medium = style.get("medium", "水彩")
     mood = style.get("mood", "优雅安静")
     impression = style.get("overall_impression", "商业畅销款打样")
 
+    direction_line = f"设计方向：{direction_note}。" if direction_note else ""
+
     lines = [
-        f"请帮我生成一张3x3商业面料看板图片。整体艺术方向：{impression}，{mood}，{medium}风格。低对比度、高可穿性、优雅的手绘笔触、充足的呼吸感，不拥挤，整体协调统一。",
+        f"请帮我生成一张3x3商业面料看板图片。整体艺术方向：{impression}，{mood}，{medium}风格。{direction_line}低对比度、高可穿性、优雅的手绘笔触、充足的呼吸感，不拥挤，整体协调统一。",
         "",
         "要求九宫格等分布局，白色细间隔，所有面板在一个正方形图片内。图片中绝对不要出现任何文字、标签、标题、字母、排版。",
         "",
@@ -550,47 +591,55 @@ def generate_dual_collection_prompts_programmatic(
     palette: dict,
     out_dir: Path,
 ) -> dict:
-    """程序化生成两套不同但风格一致的看板提示词。
+    """程序化生成两套风格分化但主题一致的看板提示词。
 
-    Set A（Style A）：给 Neo AI 的英文结构化 prompt。
-    Set B（Style B）：给 libtv 的中文自然语言描述，基于同一主题但使用不同表现手法。
+    Set A（Mass Production / 商业稳妥款）：
+    - 低噪、高可穿性、安全克制
+    - 适合量产大货，零售距离下安静可穿
+    - 卖点图案单一且克制
+
+    Set B（Statement / 视觉冲击款）：
+    - 更大胆的视觉表现、更强艺术张力
+    - 适合提案、秀场、限量款
+    - 图案密度和视觉重量更高，但仍保持成衣可用性
     """
     style = style_details or {}
 
-    # ---- Set A：直接使用现有的 9 面板提示词构建英文看板 prompt ----
-    prompt_a = _build_collection_prompt_from_prompts(prompts, style)
+    # ---- Set A：商业稳妥款 ----
+    prompts_a = _apply_direction_style(prompts, _MASS_PRODUCTION_INJECT)
+    prompt_a = _build_collection_prompt_from_prompts(prompts_a, style)
     negative_prompt_a = "animals, characters, faces, people, text, labels, captions, titles, typography, words, letters, logo, watermark, house, full landscape, poster, sticker, harsh black outline, dense confetti, neon colors, muddy colors"
-
-    # 将 Set A prompt 写入文件
     prompt_a_file = out_dir / "style_a_collection_prompt.txt"
     prompt_a_file.write_text(prompt_a, encoding="utf-8")
 
-    # ---- Set B：为每个面板生成变体，然后构建中文描述 ----
-    variant_prompts = []
-    for p in prompts:
-        original = p.get("prompt", "")
-        variant = _make_style_b_variant(original)
-        variant_prompts.append({
-            "texture_id": p.get("texture_id", ""),
-            "purpose": p.get("purpose", ""),
-            "prompt": variant,
-            "panel": p.get("panel", ""),
-            "role": p.get("role", ""),
-        })
+    # ---- Set B：视觉冲击款 ----
+    prompts_b = _apply_direction_style(prompts, _STATEMENT_INJECT)
+    prompt_b = _build_collection_prompt_from_prompts(prompts_b, style)
+    prompt_b_file = out_dir / "style_b_collection_prompt.txt"
+    prompt_b_file.write_text(prompt_b, encoding="utf-8")
 
-    description_b = _build_libtv_description_from_prompts(variant_prompts, style)
+    # libtv 描述（中文）
+    description_a = _build_libtv_description_from_prompts(prompts_a, style, direction_note="商业稳妥款，低噪高可穿，适合量产")
+    description_b = _build_libtv_description_from_prompts(prompts_b, style, direction_note="视觉冲击款，更大胆的艺术表现，适合提案或秀场")
 
     dual_prompts = {
         "dual_prompt_id": f"{style_id}_dual_v1",
+        "direction_notes": {
+            "set_a": "商业稳妥款（Mass Production Safe）：低噪、高可穿、安全克制，适合量产大货",
+            "set_b": "视觉冲击款（Statement / Runway）：更大胆、更高对比、更强叙事，适合提案或秀场",
+        },
         "style_a": {
             "source": "neo",
+            "direction": "mass_production",
             "prompt": prompt_a,
             "negative_prompt": negative_prompt_a,
             "prompt_file": str(prompt_a_file.resolve()),
         },
         "style_b": {
             "source": "libtv",
+            "direction": "statement",
             "description": description_b,
+            "prompt_file": str(prompt_b_file.resolve()),
             "note": "由后端 Agent 自主选模型和写 prompt，用户侧仅传需求描述",
         },
     }

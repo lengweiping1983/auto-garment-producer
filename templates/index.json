@@ -1,25 +1,29 @@
 {
   "templates": [
     {
-      "template_id": "children_outerwear_set",
-      "template_name": "儿童外套套装",
-      "template_name_en": "Children Outerwear Set",
-      "garment_type": "children outerwear set",
-      "description": "标准儿童外套套装，9片结构",
+      "template_id": "BFSK26308XCJ01L",
+      "template_name": "BFSK26308XCJ01L 防晒服",
+      "template_name_en": "BFSK26308XCJ01L Sun Protection Clothing",
+      "garment_type": "sun protection clothing",
+      "aliases": ["防晒服", "防晒衣", "sun protection clothing"],
+      "description": "BFSK26308XCJ01L 防晒服，9片结构：后片、前左片、前右片、左袖、右袖、领子左、领子右、门襟、下摆",
       "piece_count": 9,
       "sizes": [
-        "base",
+        "s",
         "m",
         "l",
-        "xl"
+        "xl",
+        "xxl"
       ],
-      "default_size": "base"
+      "default_size": "s"
     },
     {
-      "template_id": "BFSK26308XCJ01L",
-      "template_name": "BFSK26308XCJ01L",
-      "template_name_en": "BFSK26308XCJ01L",
-      "garment_type": "children outerwear set",
+      "template_id": "DDS26126XCJ01L",
+      "template_name": "DDS26126XCJ01L T恤",
+      "template_name_en": "DDS26126XCJ01L T-Shirt",
+      "garment_type": "t-shirt",
+      "aliases": ["t恤", "t-shirt", "T恤"],
+      "description": "DDS26126XCJ01L T恤，9片结构：后片、前左片、前右片、左袖、右袖、领子左、领子右、门襟、下摆",
       "piece_count": 9,
       "sizes": [
         "s",

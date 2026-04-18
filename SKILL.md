@@ -430,6 +430,70 @@ python3 /path/to/auto-garment-producer/scripts/端到端自动化.py \
 - `NEODOMAIN_ACCESS_TOKEN`：Neo AI 鉴权令牌
 - `LIBTV_ACCESS_KEY`：libtv 鉴权令牌
 
+### 多方案渲染模式（Multi-Scheme Rendering，推荐用于探索设计空间）
+
+让 AI 从可用资产中组合出多套不同的设计方案，每套独立渲染产出。支持**双源 18 资产组合**和**单源 9 资产内组合**两种场景。
+
+```bash
+# 前置步骤与双源模式相同（视觉提取 → 设计简报）
+# 步骤：双源并行看板生成 + 多方案渲染
+python3 /path/to/auto-garment-producer/scripts/端到端自动化.py \
+  --pattern /path/to/pattern.png \
+  --out /path/to/output \
+  --visual-elements /path/to/output/visual_elements.json \
+  --mode standard \
+  --dual-source \
+  --multi-scheme \
+  --max-schemes 4 \
+  --token "$NEODOMAIN_ACCESS_TOKEN" \
+  --libtv-key "$LIBTV_ACCESS_KEY" \
+  --commercial-review
+# → 第一次运行：生成看板、准备资产、构造多方案生产规划请求后退出，等待子 Agent
+# → 子 Agent 输出 ai_multi_production_plan.json（含 schemes 数组）
+# → 第二次运行（相同命令）：拆解 schemes，逐套独立渲染
+# → 输出 rendered_scheme_01/ ~ rendered_scheme_04/ 四套结果
+```
+
+**多方案模式关键行为**：
+- **灵活资产池**：
+  - **双源均成功**：A+B 合并为 `merged_texture_set.json`（18 个资产，ID 带 `_a` / `_b` 后缀），AI 从 18 个中自由组合。
+  - **仅单源成功**：该源的 9 个资产也会自动加后缀（如 `_a`）并包装为 `merged_texture_set.json`，AI 从这 9 个面板中通过不同的分配策略（谁做 base、谁做 overlay、scale/rotation/anchor 变化）组合出多套方案。**不浪费任何成功生成的资产。**
+- **AI 自由组合**：构造生产规划请求时，提示词根据可用资产数量自动适配：
+  - 双源时：提供 4 种跨源组合策略（全 A 保守量产、全 B 视觉冲击、混搭、反向混搭）。
+  - 单源时：提供 5 种单源内组合策略（经典主调、深色反转、图案聚焦、纹理层次、点缀跳跃）。
+- **独立渲染**：每套 scheme 拥有独立的 `garment_map` 和 `piece_fill_plan`，独立执行渲染 → 时尚质检 → 商业复审流水线。
+- **失败跳过**：单套 scheme 渲染失败不影响其他方案，调用方自动跳过并继续下一套。
+- **互为备份**：多套方案中任意一套成功即可交付，天然具有容错能力。
+
+**子 Agent 输出格式**（`ai_multi_production_plan.json`）：
+```json
+{
+  "schemes": [
+    {
+      "scheme_id": "scheme_01",
+      "strategy_note": "全部使用 A 源资产，保守量产方向",
+      "garment_map": { "map_id": "...", "parts": [...] },
+      "piece_fill_plan": { "plan_id": "...", "pieces": [...] }
+    },
+    {
+      "scheme_id": "scheme_02",
+      "strategy_note": "全部使用 B 源资产，视觉冲击方向",
+      "garment_map": { ... },
+      "piece_fill_plan": { ... }
+    }
+  ]
+}
+```
+
+**与双源模式的区别**：
+| 维度 | 双源模式 | 多方案模式 |
+|------|---------|-----------|
+| 资产池 | A 套 9 个 或 B 套 9 个（分别渲染） | 双源=18 个合并；单源=9 个内组合 |
+| 设计决策 | 每套独立做生产规划 | 一次生产规划输出多套方案 |
+| 输出数量 | 2 套（A/B 各一） | 默认 4 套（可配），失败跳过 |
+| 单源容错 | 仅一个源成功 → 只有 1 套 | 仅一个源成功 → 仍产出 4 套方案 |
+| 使用场景 | 对比两种平台风格 | 最大化设计探索，不浪费任何资产 |
+
 ### Fast 模式（快速草稿预览，2 次 AI）
 
 ```bash
@@ -455,6 +519,25 @@ python3 /path/to/auto-garment-producer/scripts/端到端自动化.py \
   --commercial-review --auto-retry 3
 ```
 
+### 生成整套（首次出全尺寸）
+
+```bash
+python3 /path/to/auto-garment-producer/scripts/端到端自动化.py \
+  --pattern /path/to/BFSK26308XCJ01L-S_mask.png \
+  --collection-board /path/to/collection_board_1.png \
+  --out /path/to/output \
+  --mode standard \
+  --full-set
+```
+
+### 已有 -S，只补其他尺寸（零 AI）
+
+```bash
+python3 /path/to/auto-garment-producer/scripts/生成整套尺寸.py \
+  --base-dir /path/to/output \
+  --pattern /path/to/BFSK26308XCJ01L-S_mask.png
+```
+
 ### 多尺寸模板（一次性初始化）
 
 同版型多尺寸（如 S/M/L/XL/XXL）只需初始化一次，后续自动复用：
@@ -471,7 +554,14 @@ python3 /path/to/auto-garment-producer/scripts/初始化多尺寸模板.py \
 初始化后：
 1. **人工检查角色**：打开 `templates/BFSK26308XCJ01L/base.json`，确认/修正各 slot 的 `garment_role`。
 2. **自动发现**：后续调用 `--pattern` 指向任意尺寸 mask 时，程序自动匹配该模板（按文件名货号匹配）。
-3. **自动输出全尺寸**：-S 版本 AI 渲染完成后，程序自动基于映射关系渲染 M/L/XL/XXL，输出文件名带尺寸后缀（`preview_m.png`、`piece_001_m.png` 等）。
+
+**生成控制（默认只出-S，整套才出全尺寸）**：
+
+| 场景 | 命令 | 说明 |
+|------|------|------|
+| 只生成 -S | 默认（不加 `--full-set`） | 仅输出 rendered/（-S 走 AI） |
+| 首次生成整套 | 加 `--full-set` | -S 走 AI，M/L/XL/XXL 纯程序映射 |
+| 已有 -S，补整套 | `生成整套尺寸.py` | 零 AI，直接基于已有 -S 结果生成其他尺寸 |
 
 **关键约束**：
 - 基准尺寸 `-S` 是唯一走 AI 流程的版本。
@@ -556,20 +646,30 @@ selected_collection_prompt.txt   ← 子Agent选择后的最终看板 prompt
 面料组合.json
 texture_set_A.json               ← 双源模式：Set A（Neo AI）裁剪后的面料组合
 texture_set_B.json               ← 双源模式：Set B（libtv）裁剪后的面料组合
+merged_texture_set.json          ← 多方案模式：A+B 合并后的面料组合（资产ID带 _a/_b 后缀）
 纹理质检报告.json
 texture_qc_report_A.json         ← 双源模式：Set A 质检报告
 texture_qc_report_B.json         ← 双源模式：Set B 质检报告
+texture_qc_report_merged.json    ← 多方案模式：合并资产质检报告
 裁片清单.json
 部位映射.json
 garment_map_A.json               ← 双源模式：Set A 部位映射备份
 garment_map_B.json               ← 双源模式：Set B 部位映射备份
+garment_map_scheme_01.json       ← 多方案模式：方案 01 部位映射
+garment_map_scheme_02.json       ← 多方案模式：方案 02 部位映射
 ai_fill_plan_prompt.txt          ← 子Agent审美请求提示词
 ai_fill_plan_request.json        ← 子Agent请求结构化摘要
 ai_piece_fill_plan.json          ← 子Agent输出的填充计划（由子Agent生成）
+ai_multi_production_plan.json    ← 多方案模式：子Agent输出的多方案生产规划（含 schemes 数组）
+schemes_meta.json                ← 多方案模式：方案元数据索引（scheme_id → garment_map / fill_plan 路径）
 piece_fill_plan_A.json           ← 双源模式：Set A 填充计划备份
 piece_fill_plan_B.json           ← 双源模式：Set B 填充计划备份
+piece_fill_plan_scheme_01.json   ← 多方案模式：方案 01 填充计划备份
+piece_fill_plan_scheme_02.json   ← 多方案模式：方案 02 填充计划备份
 艺术指导方案.json
 裁片填充计划.json
+ai_production_plan_prompt.txt    ← 生产规划请求提示词（单方案）
+ai_production_plan_request.json  ← 生产规划请求结构化摘要
 渲染结果/                ← -S 基准尺寸输出（单源模式）
   裁片/*.png
   preview_s.png
@@ -584,6 +684,12 @@ piece_fill_plan_B.json           ← 双源模式：Set B 填充计划备份
   裁片/*.png
   preview_s.png
   ...
+渲染结果_scheme_01/      ← 多方案模式：方案 01 渲染输出
+  裁片/*.png
+  preview_s.png
+  ...
+渲染结果_scheme_02/      ← 多方案模式：方案 02 渲染输出
+  ...
 渲染结果_m/              ← M 尺寸（纯程序映射）
   裁片/*.png
   preview_m.png
@@ -597,6 +703,8 @@ piece_fill_plan_B.json           ← 双源模式：Set B 填充计划备份
 成品质检报告.json
 fashion_qc_report_A.json         ← 双源模式：Set A 时尚质检报告
 fashion_qc_report_B.json         ← 双源模式：Set B 时尚质检报告
+fashion_qc_report_scheme_01.json ← 多方案模式：方案 01 时尚质检报告
+fashion_qc_report_scheme_02.json ← 多方案模式：方案 02 时尚质检报告
 ```
 
 ## 参考阅读

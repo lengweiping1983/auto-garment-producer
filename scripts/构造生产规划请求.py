@@ -37,6 +37,8 @@ def build_production_plan_prompt(
     visual_elements: dict | None,
     piece_overview_path: str,
     texture_thumbnail_paths: list[str],
+    multi_scheme: bool = False,
+    max_schemes: int = 4,
 ) -> str:
     """构造合并后的生产规划 prompt。"""
     pieces = pieces_payload.get("pieces", [])
@@ -172,14 +174,18 @@ def build_production_plan_prompt(
         "--- 可用面料资产 ---",
     ])
 
+    is_merged_set = any("source" in t for t in texture_set.get("textures", []))
     for tex in texture_set.get("textures", []):
         if tex.get("approved", False) or tex.get("candidate", False):
-            lines.append(f"  [texture] {tex.get('texture_id')}: {tex.get('role','')} — {tex.get('prompt','')}")
+            source_tag = f" [源{tex.get('source','').upper()}]" if is_merged_set else ""
+            lines.append(f"  [texture] {tex.get('texture_id')}: {tex.get('role','')}{source_tag} — {tex.get('prompt','')}")
     for motif in texture_set.get("motifs", []):
         if motif.get("approved", False) or motif.get("candidate", False):
-            lines.append(f"  [motif]   {motif.get('motif_id')}: {motif.get('role','')} — {motif.get('prompt','')}")
+            source_tag = f" [源{motif.get('source','').upper()}]" if is_merged_set else ""
+            lines.append(f"  [motif]   {motif.get('motif_id')}: {motif.get('role','')}{source_tag} — {motif.get('prompt','')}")
     for solid in texture_set.get("solids", []):
-        lines.append(f"  [solid]   {solid.get('solid_id')}: {solid.get('color','')}")
+        source_tag = f" [源{solid.get('source','').upper()}]" if is_merged_set else ""
+        lines.append(f"  [solid]   {solid.get('solid_id')}: {solid.get('color','')}{source_tag}")
 
     lines.extend([
         "",
@@ -211,11 +217,130 @@ def build_production_plan_prompt(
                 )
             lines.append("")
 
+    # 多方案模式：插入策略指导和输出格式改造
+    if multi_scheme:
+        # 检测可用资产源数量（通过后缀 _a / _b 精确匹配）
+        all_assets = texture_set.get("textures", []) + texture_set.get("motifs", []) + texture_set.get("solids", [])
+        def _asset_id(a):
+            return a.get("texture_id", a.get("motif_id", a.get("solid_id", "")))
+        has_a = any(_asset_id(a).endswith("_a") for a in all_assets)
+        has_b = any(_asset_id(a).endswith("_b") for a in all_assets)
+        source_count = sum([has_a, has_b])
+
+        if source_count >= 2:
+            strategy_lines = [
+                f"你需要生成 {max_schemes} 套不同的设计方案（schemes）。每套方案必须有明确的商业定位差异。",
+                "",
+                "当前拥有两套差异化资产（源A + 源B），请充分利用这 18 个资产的组合空间：",
+                "  - scheme_01 '保守量产方案'：全部使用 源A 资产（带 _a 后缀），低噪安全，适合大货量产。",
+                "  - scheme_02 '大胆秀场方案'：全部使用 源B 资产（带 _b 后缀），视觉冲击，适合提案或限量款。",
+                "  - scheme_03 '混搭对比方案'：主底纹/卖点图案用 源A，辅纹/点缀用 源B，形成材质对比。",
+                "  - scheme_04 '反向混搭方案'：主底纹用 源B（更大胆），卖点图案用 源A（更克制）。",
+                "",
+                "每套方案的 piece_fill_plan 中，base.texture_id / overlay.motif_id / trim 必须使用带 _a 或 _b 后缀的 id。",
+                "例如：main_a, main_b, hero_motif_1_a, hero_motif_1_b, quiet_solid_a 等。",
+            ]
+        else:
+            # 单源情况（1 套或 0 套有后缀都 fallback 为单源）：从 9 个资产中组合多套方案
+            source_label = "源A" if has_a else "源B" if has_b else "当前可用"
+            source_tag_note = "资产 ID 带 _a 后缀" if has_a else "资产 ID 带 _b 后缀" if has_b else "使用原始资产 ID（无后缀）"
+            strategy_lines = [
+                f"你需要生成 {max_schemes} 套不同的设计方案（schemes）。虽然只有一套 3×3 看板的 9 个资产，但这 9 个面板仍有丰富的组合空间，请充分发挥创造力。",
+                "",
+                f"当前只有一套资产（{source_label}），{source_tag_note}，请从这 9 个面板中组合出多套差异化方案：",
+                "  - scheme_01 '经典主调方案'：主底纹 + 标准 hero 定位 + 安静饰边，稳妥可穿。",
+                "  - scheme_02 '深色反转方案'：使用 dark_base 作为主底纹，营造沉稳/高级感，hero 图案保持浅色对比。",
+                "  - scheme_03 '图案聚焦方案'：将 hero_motif 放大或改变位置（如偏左/偏下），其他区域极度安静，突出单品感。",
+                "  - scheme_04 '纹理层次方案'：body 用主底纹，secondary 用 accent_mid，trim 用 accent_light，形成同色系层次变化。",
+                "  - scheme_05 '点缀跳跃方案'：body 用 solid_quiet，仅在局部（如口袋、袖口）使用小面积 accent 纹理或 trim_motif，极简克制。",
+                "",
+                "即使是同一套资产，不同的分配策略（谁做 base、谁做 overlay、scale/rotation/anchor 如何变化）也能产生截然不同的商业效果。",
+                "请尽可能给出多套有实质差异的方案，不要敷衍。",
+            ]
+
+        lines.extend(["", "===== 多方案策略指导 ====="] + strategy_lines + [""])
+
     lines.extend([
         "===== 输出格式 =====",
         "请返回严格的 JSON，格式如下（不要任何解释文字、不要 markdown 代码块，只返回纯 JSON）：",
         "",
-        json.dumps({
+    ])
+
+    if multi_scheme:
+        lines.append(json.dumps({
+            "schemes": [
+                {
+                    "scheme_id": "scheme_01",
+                    "name": "保守量产方案",
+                    "description": "全部使用源A资产，低噪安全，适合量产",
+                    "garment_map": {
+                        "pieces": [
+                            {
+                                "piece_id": "piece_001",
+                                "garment_role": "front_body",
+                                "zone": "body",
+                                "symmetry_group": "sg_front",
+                                "same_shape_group": "",
+                                "texture_direction": "transverse",
+                                "confidence": 0.88,
+                                "needs_ai_review": False
+                            }
+                        ]
+                    },
+                    "piece_fill_plan": {
+                        "pieces": [
+                            {
+                                "piece_id": "piece_001",
+                                "base": {
+                                    "fill_type": "texture",
+                                    "texture_id": "main_a",
+                                    "scale": 1.0,
+                                    "rotation": 0,
+                                    "offset_x": 0,
+                                    "offset_y": 0,
+                                    "mirror_x": False,
+                                    "mirror_y": False
+                                },
+                                "overlay": {
+                                    "fill_type": "motif",
+                                    "motif_id": "hero_motif_1_a",
+                                    "anchor": "center",
+                                    "scale": 0.72,
+                                    "opacity": 0.92,
+                                    "offset_x": 0,
+                                    "offset_y": -40
+                                },
+                                "trim": None,
+                                "texture_direction": "transverse",
+                                "reason": "前片使用源A主底纹横向铺陈，中心定位源A牡丹图案",
+                                "intentional_asymmetry": False
+                            }
+                        ],
+                        "art_direction": {
+                            "strategy": "单一卖点定位，低噪身片，协调副片，安静饰边",
+                            "hero_piece_ids": ["piece_001"],
+                            "notes": [],
+                            "self_assessment": {
+                                "overall_score": 8.5,
+                                "wearability": 9,
+                                "cohesion": 8,
+                                "hero_clarity": 9,
+                                "trim_quality": 8,
+                                "season_fit": 8,
+                                "customer_match": 8,
+                                "production_safety": 9,
+                                "color_balance": 8,
+                                "negative_space": 9,
+                                "narrative_control": 9
+                            }
+                        }
+                    }
+                }
+            ],
+            "risk_notes": []
+        }, ensure_ascii=False, indent=2))
+    else:
+        lines.append(json.dumps({
             "garment_map": {
                 "pieces": [
                     {
@@ -279,7 +404,9 @@ def build_production_plan_prompt(
                 }
             },
             "risk_notes": []
-        }, ensure_ascii=False, indent=2),
+        }, ensure_ascii=False, indent=2))
+
+    lines.extend([
         "",
         "===== 重要声明 =====",
         "以上所有程序推断（裁片几何、部位候选、面料描述）均为参考建议，不是事实。",
@@ -299,6 +426,8 @@ def main() -> int:
     parser.add_argument("--garment-map", default="", help="已有 garment_map.json（可选，作为 fallback 参考）")
     parser.add_argument("--piece-overview", default="", help="piece_overview.png 路径。若省略，尝试从 pieces.json 所在目录推断。")
     parser.add_argument("--out", required=True, help="输出目录")
+    parser.add_argument("--multi-scheme", action="store_true", help="启用多方案模式。要求 AI 输出多套不同的 piece_fill_plan。")
+    parser.add_argument("--max-schemes", type=int, default=4, help="最大方案数（默认 4）。")
     args = parser.parse_args()
 
     out_dir = Path(args.out)
@@ -370,13 +499,15 @@ def main() -> int:
     prompt_text = build_production_plan_prompt(
         pieces_payload, texture_set, brief, geometry_hints,
         visual_elements, overview_path, texture_thumbnails,
+        multi_scheme=args.multi_scheme,
+        max_schemes=args.max_schemes,
     )
 
     prompt_path = out_dir / "ai_production_plan_prompt.txt"
     prompt_path.write_text(prompt_text, encoding="utf-8")
 
     request_summary = {
-        "request_id": "ai_production_plan_v1",
+        "request_id": "ai_multi_production_plan_v1" if args.multi_scheme else "ai_production_plan_v1",
         "pieces_json": str(Path(args.pieces).resolve()),
         "texture_set": str(Path(args.texture_set).resolve()),
         "brief": str(Path(args.brief).resolve()) if args.brief else "",
@@ -385,7 +516,9 @@ def main() -> int:
         "piece_overview": overview_path,
         "texture_thumbnails": texture_thumbnails,
         "prompt_path": str(prompt_path.resolve()),
-        "expected_output": str((out_dir / "ai_production_plan.json").resolve()),
+        "expected_output": str((out_dir / ("ai_multi_production_plan.json" if args.multi_scheme else "ai_production_plan.json")).resolve()),
+        "multi_scheme": args.multi_scheme,
+        "max_schemes": args.max_schemes if args.multi_scheme else 1,
     }
     request_path = out_dir / "ai_production_plan_request.json"
     request_path.write_text(json.dumps(request_summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -395,6 +528,8 @@ def main() -> int:
         "子Agent提示词": str(prompt_path.resolve()),
         "纸样总览图": overview_path,
         "预期输出": request_summary["expected_output"],
+        "多方案模式": args.multi_scheme,
+        "最大方案数": args.max_schemes if args.multi_scheme else 1,
     }, ensure_ascii=False, indent=2))
     return 0
 

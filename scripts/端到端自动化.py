@@ -1011,6 +1011,12 @@ def _run_render_pipeline(args, out_dir: Path, texture_set_path: Path, suffix: st
                 "texture_set": file_sha256(texture_set_path),
                 "garment_type": args.garment_type,
                 "brief": file_sha256(args.brief) if args.brief else "",
+                "template": args.template,
+                "template_size": args.template_size,
+                "mode": args.mode,
+                "multi_scheme": args.multi_scheme,
+                "max_schemes": args.max_schemes,
+                "visual_elements": file_sha256(args.visual_elements) if args.visual_elements else "",
             }
             cached = cache_lookup(out_dir, "production_plan", plan_hash)
             if cached:
@@ -1074,6 +1080,11 @@ def _run_render_pipeline(args, out_dir: Path, texture_set_path: Path, suffix: st
             plan_cmd.extend(["--ai-plan", str(ai_plan_path)])
         else:
             print(f"[警告{suffix}] AI 计划不存在: {ai_plan_path}，将使用后端规则生成。")
+    else:
+        auto_ai_plan = out_dir / "ai_piece_fill_plan.json"
+        if auto_ai_plan.exists():
+            plan_cmd.extend(["--ai-plan", str(auto_ai_plan)])
+            print(f"[自动{suffix}] 检测到 AI 填充计划，自动使用: {auto_ai_plan}")
     run_step(plan_cmd)
 
     # ---- 渲染裁片 ----
@@ -1089,7 +1100,7 @@ def _run_render_pipeline(args, out_dir: Path, texture_set_path: Path, suffix: st
     run_step(render_cmd)
 
     # ---- 多尺寸自动渲染 ----
-    if HAS_TEMPLATE_LOADER:
+    if args.full_set and HAS_TEMPLATE_LOADER:
         _render_size_variants(args, out_dir, texture_set_path, suffix=suffix)
 
     # ---- 时尚质检 ----
@@ -1138,46 +1149,124 @@ def _run_render_pipeline(args, out_dir: Path, texture_set_path: Path, suffix: st
     return 0
 
 
-def _render_size_variants(args, out_dir: Path, texture_set_path: Path, suffix: str = "") -> None:
-    """基于-S渲染结果，纯程序生成其他尺寸的渲染输出（无AI）。"""
-    pattern_path = getattr(args, "pattern", "")
-    if not pattern_path:
-        return
+def _run_render_pipeline_for_scheme(
+    args,
+    out_dir: Path,
+    texture_set_path: Path,
+    pieces_path: Path,
+    scheme: dict,
+) -> int:
+    """针对单个 scheme 执行渲染流水线（创建填充计划 → 渲染 → 质检 → 商业复审）。
+    scheme 字典包含: scheme_id, suffix, garment_map, fill_plan
+    失败时返回非零 exit code，但调用方负责决定是否继续下一个 scheme。"""
+    scheme_id = scheme["scheme_id"]
+    suffix = scheme["suffix"]
+    gm_path = Path(scheme["garment_map"])
+    fp_path = Path(scheme["fill_plan"])
 
-    template = find_template_by_pattern_path(pattern_path)
-    if not template:
-        return
+    print(f"\n{'='*60}")
+    print(f"[方案渲染 {scheme_id}] 开始独立渲染流水线")
+    print(f"  garment_map: {gm_path}")
+    print(f"  fill_plan:   {fp_path}")
+    print(f"{'='*60}")
 
-    template_id = template.get("template_id", "")
-    mappings = load_size_mappings(template_id)
-    if not mappings:
-        return
+    # ---- 创建填充计划 ----
+    plan_cmd = [
+        sys.executable,
+        str(SKILL_DIR / "scripts" / "创建填充计划.py"),
+        "--pieces", str(pieces_path),
+        "--texture-set", str(texture_set_path),
+        "--garment-map", str(gm_path),
+        "--out", str(out_dir),
+    ]
+    if args.brief:
+        plan_cmd.extend(["--brief", args.brief])
+    if fp_path.exists():
+        plan_cmd.extend(["--ai-plan", str(fp_path)])
+    rc = run_step(plan_cmd, check=False).returncode
+    if rc != 0:
+        print(f"[错误 {scheme_id}] 创建填充计划失败 (rc={rc})，跳过本方案", file=sys.stderr)
+        return rc
 
-    base_size = mappings.get("base_size", "s")
-    size_data = mappings.get("sizes", {})
-    if not size_data:
-        return
+    # ---- 渲染裁片 ----
+    rendered_dir = out_dir / f"rendered{suffix}"
+    render_cmd = [
+        sys.executable,
+        str(SKILL_DIR / "scripts" / "渲染裁片.py"),
+        "--pieces", str(pieces_path),
+        "--texture-set", str(texture_set_path),
+        "--fill-plan", str(out_dir / "piece_fill_plan.json"),
+        "--out", str(rendered_dir),
+    ]
+    rc = run_step(render_cmd, check=False).returncode
+    if rc != 0:
+        print(f"[错误 {scheme_id}] 渲染裁片失败 (rc={rc})，跳过本方案", file=sys.stderr)
+        return rc
 
-    # 读取-S的 fill_plan
-    base_fill_plan_path = out_dir / "piece_fill_plan.json"
-    if not base_fill_plan_path.exists():
-        print("[多尺寸渲染] 未找到基准 fill_plan，跳过")
-        return
-    try:
-        base_fill_plan = json.loads(base_fill_plan_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        print(f"[多尺寸渲染] 读取基准 fill_plan 失败: {exc}")
-        return
+    # ---- 多尺寸自动渲染 ----
+    if HAS_TEMPLATE_LOADER:
+        _render_size_variants(args, out_dir, texture_set_path, suffix=suffix)
 
-    print(f"[多尺寸渲染] 检测到多尺寸模板: {template_id}，准备渲染 {list(size_data.keys())}")
+    # ---- 时尚质检 ----
+    fashion_cmd = [
+        sys.executable,
+        str(SKILL_DIR / "scripts" / "时尚质检.py"),
+        "--pieces", str(pieces_path),
+        "--texture-set", str(texture_set_path),
+        "--fill-plan", str(out_dir / "piece_fill_plan.json"),
+        "--rendered", str(rendered_dir),
+        "--out", str(out_dir / f"fashion_qc_report{suffix}.json"),
+    ]
+    run_step(fashion_cmd)
 
+    # ---- 备份 scheme 中间产物 ----
+    for src_name, dst_name in [
+        ("piece_fill_plan.json", f"piece_fill_plan{suffix}.json"),
+        ("garment_map.json", f"garment_map{suffix}.json"),
+    ]:
+        src = out_dir / src_name
+        dst = out_dir / dst_name
+        if src.exists():
+            dst.write_bytes(src.read_bytes())
+
+    # ---- 商业复审 ----
+    if args.commercial_review:
+        brief_for_review = args.brief or str(out_dir / "commercial_design_brief.json")
+        if not Path(brief_for_review).exists():
+            print(f"[警告 {scheme_id}] 未找到商业设计简报，跳过商业复审")
+        else:
+            review_cmd = [
+                sys.executable,
+                str(SKILL_DIR / "scripts" / "构造商业复审请求.py"),
+                "--preview", str(rendered_dir / "preview.png"),
+                "--fill-plan", str(out_dir / "piece_fill_plan.json"),
+                "--brief", brief_for_review,
+                "--qc-report", str(out_dir / f"fashion_qc_report{suffix}.json"),
+                "--out", str(out_dir),
+            ]
+            review_json_path = out_dir / f"ai_commercial_review{suffix}.json"
+            if review_json_path.exists():
+                review_cmd.extend(["--selected", str(review_json_path)])
+            run_step(review_cmd)
+
+    print(f"[方案渲染 {scheme_id}] 完成 ✓")
+    return 0
+
+
+def render_size_variants_core(
+    base_fill_plan: dict,
+    texture_set_path: Path,
+    out_dir: Path,
+    template_id: str,
+    size_data: dict,
+) -> None:
+    """纯程序渲染多尺寸变体（可复用核心，无AI）。"""
     for size_label, mapping in size_data.items():
         piece_map = mapping.get("piece_map", {})
         scale_factor = mapping.get("scale_factor", {}).get("area_sqrt", 1.0)
         if not piece_map:
             continue
 
-        # 加载该尺寸的 pieces.json
         size_pieces = load_size_pieces(template_id, size_label)
         if not size_pieces:
             print(f"[多尺寸渲染] 未找到 {size_label} 的 pieces.json，跳过")
@@ -1185,7 +1274,6 @@ def _render_size_variants(args, out_dir: Path, texture_set_path: Path, suffix: s
 
         size_pieces_path = SKILL_DIR / "templates" / template_id / size_label / f"pieces_{size_label}.json"
 
-        # 生成映射后的 fill_plan：将 piece_id 从 base 映射到目标尺寸
         mapped_fill_plan = {
             "plan_id": f"{base_fill_plan.get('plan_id', 'auto')}_{size_label}",
             "texture_set_id": base_fill_plan.get("texture_set_id", ""),
@@ -1205,11 +1293,9 @@ def _render_size_variants(args, out_dir: Path, texture_set_path: Path, suffix: s
             print(f"[多尺寸渲染] {size_label.upper()} 映射后无有效填充计划，跳过")
             continue
 
-        # 保存临时 fill_plan
         mapped_plan_path = out_dir / f"piece_fill_plan_{size_label}.json"
         mapped_plan_path.write_text(json.dumps(mapped_fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        # 调用渲染
         size_rendered_dir = out_dir / f"rendered_{size_label}"
         render_cmd = [
             sys.executable,
@@ -1223,6 +1309,39 @@ def _render_size_variants(args, out_dir: Path, texture_set_path: Path, suffix: s
         ]
         print(f"[多尺寸渲染] 渲染 {size_label.upper()} (scale={scale_factor:.4f}) ...")
         run_step(render_cmd)
+
+
+def _render_size_variants(args, out_dir: Path, texture_set_path: Path, suffix: str = "") -> None:
+    """基于-S渲染结果，纯程序生成其他尺寸的渲染输出（无AI）。"""
+    pattern_path = getattr(args, "pattern", "")
+    if not pattern_path:
+        return
+
+    template = find_template_by_pattern_path(pattern_path)
+    if not template:
+        return
+
+    template_id = template.get("template_id", "")
+    mappings = load_size_mappings(template_id)
+    if not mappings:
+        return
+
+    size_data = mappings.get("sizes", {})
+    if not size_data:
+        return
+
+    base_fill_plan_path = out_dir / "piece_fill_plan.json"
+    if not base_fill_plan_path.exists():
+        print("[多尺寸渲染] 未找到基准 fill_plan，跳过")
+        return
+    try:
+        base_fill_plan = json.loads(base_fill_plan_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[多尺寸渲染] 读取基准 fill_plan 失败: {exc}")
+        return
+
+    print(f"[多尺寸渲染] 检测到多尺寸模板: {template_id}，准备渲染 {list(size_data.keys())}")
+    render_size_variants_core(base_fill_plan, texture_set_path, out_dir, template_id, size_data)
 
 
 def main() -> int:
@@ -1255,6 +1374,7 @@ def main() -> int:
     parser.add_argument("--template-file", default="", help="用户自定义模板 JSON 文件路径。优先于内置模板。")
     parser.add_argument("--no-template", action="store_true", help="禁用模板匹配，强制走 AI/几何推断路径。")
     parser.add_argument("--commercial-review", action=argparse.BooleanOptionalAction, default=True, help="启用整体商业感复审（默认开启）。传 --no-commercial-review 显式关闭。")
+    parser.add_argument("--full-set", action="store_true", help="生成整套所有尺寸。默认只生成-S基准尺寸，加此参数后额外输出 M/L/XL/XXL（基于-S映射，纯程序）。")
     parser.add_argument("--mode", default="standard", choices=["fast", "standard", "production", "legacy"], help="运行模式。fast=跳过看板选择AI和商业复审（草稿预览），standard=默认完整流程，production=含资产审批gate和强制返工，legacy=旧分步脚本兼容模式。")
     parser.add_argument("--reuse-cache", action="store_true", help="启用缓存复用。若输入未变化，跳过对应阶段的AI调用和程序计算。")
     parser.add_argument("--production-plan", default="", help="已完成的 ai_production_plan.json 路径。若提供且缓存允许，跳过生产规划AI调用，直接应用该计划。")
@@ -1263,6 +1383,8 @@ def main() -> int:
     parser.add_argument("--libtv-key", default="", help="libtv Access Key。优先使用 LIBTV_ACCESS_KEY 环境变量。")
     parser.add_argument("--dual-prompts", default="", help="dual_collection_prompts.json 路径。若提供，跳过设计简报中的双提示词生成，直接使用该文件。")
     parser.add_argument("--max-retries", type=int, default=2, help="双源均失败时的最大重试次数")
+    parser.add_argument("--multi-scheme", action="store_true", help="启用多方案渲染模式。双源模式下，合并 A/B 资产后由 AI 生成多套设计方案并分别渲染。")
+    parser.add_argument("--max-schemes", type=int, default=4, help="多方案模式下的最大方案数（默认4）")
     args = parser.parse_args()
     # fast 模式自动关闭商业复审和看板选择
     # fast 模式自动关闭商业复审和看板选择
@@ -1360,8 +1482,6 @@ def main() -> int:
                 if args.garment_type:
                     ve_cmd.extend(["--garment-type", args.garment_type])
                 run_step(ve_cmd)
-                if args.reuse_cache:
-                    cache_save(out_dir, "visual_elements", ve_hash, out_dir / "ai_vision_request.json")
                 print("\n[提示] 子 Agent 视觉分析请求已构造。请启动子 Agent 阅读以下文件并输出 visual_elements.json：")
                 print(f"  主题图: {theme_path}")
                 print(f"  提示词文件: {out_dir / 'ai_vision_prompt.txt'}")
@@ -1373,6 +1493,10 @@ def main() -> int:
         ve_path = Path(args.visual_elements)
         if not ve_path.exists():
             raise RuntimeError(f"visual_elements 不存在: {ve_path}")
+        # 保存正确的 visual_elements 缓存（只有文件存在且有效时才缓存）
+        if args.reuse_cache and args.theme_image:
+            ve_hash = {"theme_image": file_sha256(args.theme_image), "garment_type": args.garment_type}
+            cache_save(out_dir, "visual_elements", ve_hash, ve_path)
         # 基于视觉元素分析生成设计简报与纹理提示词
         brief_cmd = [
             sys.executable,
@@ -1510,7 +1634,177 @@ def main() -> int:
             ts_path = crop_collection_board(board_path, out_dir, args.crop_inset, not args.no_tile_repair, palette=palette, suffix=suffix)
             texture_sets.append({"source": result["source"], "path": ts_path, "style": result["style"], "suffix": suffix})
 
-        # 6. 分别执行后续渲染流水线
+        # 6. 多方案模式：合并 A/B 资产 → 构造多方案生产规划 → 拆解 → 逐 scheme 渲染
+        if args.multi_scheme:
+            print("\n[多方案模式] 启用多方案并行渲染")
+
+            # 6a. 准备 merged_texture_set（双源合并 或 单源直接使用）
+            sys.path.insert(0, str(SKILL_DIR / "scripts"))
+            from 合并面料组合 import merge_texture_sets
+            ts_a = next((ts for ts in texture_sets if ts["suffix"] == "_A"), None)
+            ts_b = next((ts for ts in texture_sets if ts["suffix"] == "_B"), None)
+
+            available_sources = []
+            if ts_a:
+                available_sources.append(("a", ts_a["path"]))
+            if ts_b:
+                available_sources.append(("b", ts_b["path"]))
+
+            if not available_sources:
+                print("[错误] 多方案模式需要至少一个源成功", file=sys.stderr)
+                return 1
+
+            if len(available_sources) == 2:
+                # 双源均成功：合并为 18 个资产
+                merged_ts_path = merge_texture_sets(ts_a["path"], ts_b["path"], out_dir)
+                print(f"[多方案] 双源均成功，合并面料组合: {merged_ts_path}")
+            else:
+                # 单源成功：直接复制该套为 merged_texture_set.json（让 AI 从 9 个资产中组合多套方案）
+                single_name, single_path = available_sources[0]
+                merged_ts_path = out_dir / "merged_texture_set.json"
+                ts_data = load_json(single_path)
+                # 为资产 ID 统一加上源后缀，使下游逻辑一致
+                for tex in ts_data.get("textures", []):
+                    tex["texture_id"] = f"{tex['texture_id']}_{single_name}"
+                for motif in ts_data.get("motifs", []):
+                    motif["motif_id"] = f"{motif['motif_id']}_{single_name}"
+                    motif["texture_id"] = f"{motif['texture_id']}_{single_name}"
+                for solid in ts_data.get("solids", []):
+                    solid["solid_id"] = f"{solid['solid_id']}_{single_name}"
+                ts_data["texture_set_id"] = f"{out_dir.name}_merged_from_{single_name}"
+                ts_data["source_sets"] = {single_name: str(Path(single_path).resolve())}
+                write_json(merged_ts_path, ts_data)
+                print(f"[多方案] 仅源{single_name.upper()} 成功，从 9 个资产中组合多套方案: {merged_ts_path}")
+
+            # 6b. 质检合并后的资产（只做一次）
+            qc_out = out_dir / "texture_qc_report_merged.json"
+            qc_cmd = [
+                sys.executable,
+                str(SKILL_DIR / "scripts" / "质检纹理.py"),
+                "--texture-set", str(merged_ts_path),
+                "--out", str(qc_out),
+            ]
+            qc_result = run_step(qc_cmd, check=False)
+            if qc_out.exists():
+                texture_qc = load_json(qc_out)
+                texture_qc_issues = collect_texture_qc_issues(texture_qc)
+                blocking_issues = [issue for issue in texture_qc_issues if issue.get("severity") == "high" and issue.get("type") != "not_user_approved"]
+                if blocking_issues:
+                    print("[错误] 合并面料质检存在 high severity 问题，停止渲染：", file=sys.stderr)
+                    for issue in blocking_issues[:10]:
+                        print(f"  - {issue.get('asset_id')}: {issue.get('message', issue.get('type'))}", file=sys.stderr)
+                    return 1
+            elif qc_result.returncode != 0:
+                return qc_result.returncode
+
+            # 6c. 构造多方案生产规划请求
+            multi_plan_path = out_dir / "ai_multi_production_plan.json"
+            plan_loaded_from_cache = False
+            if args.reuse_cache:
+                plan_hash = {
+                    "pattern_image": file_sha256(args.pattern),
+                    "texture_set": file_sha256(merged_ts_path),
+                    "garment_type": args.garment_type,
+                    "brief": file_sha256(args.brief) if args.brief else "",
+                    "template": args.template,
+                    "template_size": args.template_size,
+                    "mode": args.mode,
+                    "multi_scheme": args.multi_scheme,
+                    "max_schemes": args.max_schemes,
+                    "visual_elements": file_sha256(args.visual_elements) if args.visual_elements else "",
+                }
+                cached = cache_lookup(out_dir, "multi_production_plan", plan_hash)
+                if cached:
+                    print(f"[缓存复用] 多方案生产规划: {cached}")
+                    multi_plan_path.write_bytes(cached.read_bytes())
+                    plan_loaded_from_cache = True
+
+            if not plan_loaded_from_cache:
+                if args.construct_ai_request or not multi_plan_path.exists():
+                    plan_request_cmd = [
+                        sys.executable,
+                        str(SKILL_DIR / "scripts" / "构造生产规划请求.py"),
+                        "--pieces", str(pieces_path),
+                        "--texture-set", str(merged_ts_path),
+                        "--out", str(out_dir),
+                        "--multi-scheme",
+                        "--max-schemes", str(args.max_schemes),
+                    ]
+                    if args.brief:
+                        plan_request_cmd.extend(["--brief", args.brief])
+                    gh_path = out_dir / "geometry_hints.json"
+                    if gh_path.exists():
+                        plan_request_cmd.extend(["--geometry-hints", str(gh_path)])
+                    if args.visual_elements:
+                        plan_request_cmd.extend(["--visual-elements", args.visual_elements])
+                    if args.ai_map:
+                        plan_request_cmd.extend(["--garment-map", args.ai_map])
+                    run_step(plan_request_cmd)
+                    print(f"\n[提示] 多方案生产规划 AI 请求已构造。请启动子 Agent 阅读以下文件并输出 ai_multi_production_plan.json：")
+                    print(f"  提示词文件: {out_dir / 'ai_production_plan_prompt.txt'}")
+                    print(f"  预期输出: {multi_plan_path}")
+                    print("  该文件应包含 schemes 数组，每套方案含 garment_map + piece_fill_plan。")
+                    print("  完成后重新运行本脚本并传入 --dual-source --multi-scheme 参数。\n")
+                    return 0
+
+            # 6d. 拆解多方案
+            if multi_plan_path.exists():
+                apply_cmd = [
+                    sys.executable,
+                    str(SKILL_DIR / "scripts" / "应用生产规划.py"),
+                    "--production-plan", str(multi_plan_path),
+                    "--out", str(out_dir),
+                    "--multi-scheme",
+                ]
+                run_step(apply_cmd)
+                if args.reuse_cache and not plan_loaded_from_cache:
+                    cache_save(out_dir, "multi_production_plan", plan_hash, multi_plan_path)
+            else:
+                print(f"[错误] {multi_plan_path} 不存在，无法拆解多方案", file=sys.stderr)
+                return 1
+
+            # 6e. 读取 schemes 元数据并逐 scheme 渲染
+            schemes_meta_path = out_dir / "schemes_meta.json"
+            if not schemes_meta_path.exists():
+                print(f"[错误] schemes_meta.json 不存在", file=sys.stderr)
+                return 1
+            schemes_meta = load_json(schemes_meta_path)
+            schemes = schemes_meta.get("schemes", [])
+            if not schemes:
+                print("[警告] schemes_meta.json 中无 scheme 定义", file=sys.stderr)
+                return 1
+
+            print(f"\n[多方案渲染] 共 {len(schemes)} 套方案，开始逐套独立渲染（失败跳过）")
+            success_schemes = []
+            failed_schemes = []
+            for scheme in schemes:
+                rc = _run_render_pipeline_for_scheme(args, out_dir, merged_ts_path, pieces_path, scheme)
+                if rc == 0:
+                    success_schemes.append(scheme["scheme_id"])
+                else:
+                    failed_schemes.append(scheme["scheme_id"])
+                    print(f"[多方案渲染] {scheme['scheme_id']} 失败，继续下一套...")
+
+            print(f"\n[多方案渲染完成] 成功 {len(success_schemes)}/{len(schemes)} 套")
+            if failed_schemes:
+                print(f"  失败方案: {', '.join(failed_schemes)}")
+
+            summary = {
+                "面料看板": [str(r["path"]) for r in board_results],
+                "面料组合_A": str(ts_a["path"]),
+                "面料组合_B": str(ts_b["path"]),
+                "合并面料组合": str(merged_ts_path),
+                "多方案生产规划": str(multi_plan_path),
+                "方案元数据": str(schemes_meta_path),
+                "成功方案": success_schemes,
+                "失败方案": failed_schemes,
+                "渲染目录": [str((out_dir / f"rendered{sc['suffix']}").resolve()) for sc in schemes],
+            }
+            write_json(out_dir / "automation_summary.json", summary)
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
+        # 6. 非多方案模式：分别执行后续渲染流水线
         if len(texture_sets) == 2:
             print(f"\n[双源模式] 两套看板均成功，将分别渲染两种风格")
             for ts in texture_sets:
@@ -1672,6 +1966,12 @@ def main() -> int:
                 "texture_set": file_sha256(texture_set_path),
                 "garment_type": args.garment_type,
                 "brief": file_sha256(args.brief) if args.brief else "",
+                "template": args.template,
+                "template_size": args.template_size,
+                "mode": args.mode,
+                "multi_scheme": args.multi_scheme,
+                "max_schemes": args.max_schemes,
+                "visual_elements": file_sha256(args.visual_elements) if args.visual_elements else "",
             }
             cached = cache_lookup(out_dir, "production_plan", plan_hash)
             if cached:
@@ -1742,6 +2042,11 @@ def main() -> int:
             plan_cmd.extend(["--ai-plan", str(ai_plan_path)])
         else:
             print(f"[警告] AI 计划不存在: {ai_plan_path}，将使用后端规则生成。")
+    else:
+        auto_ai_plan = out_dir / "ai_piece_fill_plan.json"
+        if auto_ai_plan.exists():
+            plan_cmd.extend(["--ai-plan", str(auto_ai_plan)])
+            print(f"[自动] 检测到 AI 填充计划，自动使用: {auto_ai_plan}")
     run_step(plan_cmd)
 
     rendered_dir = out_dir / "rendered"
@@ -1760,7 +2065,7 @@ def main() -> int:
     run_step(render_cmd)
 
     # ========== 多尺寸自动渲染（纯程序，无AI）==========
-    if HAS_TEMPLATE_LOADER:
+    if args.full_set and HAS_TEMPLATE_LOADER:
         _render_size_variants(args, out_dir, texture_set_path)
 
     fashion_cmd = [

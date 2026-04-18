@@ -42,7 +42,7 @@ def find_template_by_id(template_id: str, size: str = "base") -> dict | None:
 
 
 def find_template_by_garment_type(garment_type: str) -> dict | None:
-    """按 garment_type 模糊匹配模板。"""
+    """按 garment_type 或 aliases 模糊匹配模板。"""
     index = load_index()
     gt_lower = garment_type.lower().strip()
     for entry in index.get("templates", []):
@@ -51,6 +51,10 @@ def find_template_by_garment_type(garment_type: str) -> dict | None:
         # 也匹配 template_name
         if entry.get("template_name", "").lower().strip() == gt_lower:
             return find_template_by_id(entry["template_id"], entry.get("default_size", "base"))
+        # 匹配 aliases（支持中文别名如"T恤"、"防晒服"等）
+        for alias in entry.get("aliases", []):
+            if alias.lower().strip() == gt_lower:
+                return find_template_by_id(entry["template_id"], entry.get("default_size", "base"))
     return None
 
 
