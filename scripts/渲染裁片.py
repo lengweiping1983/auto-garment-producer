@@ -324,8 +324,10 @@ def render_texture_layer(piece: dict, layer: dict, texture_info: dict) -> Image.
     return apply_opacity(content, float(layer.get("opacity", 1) or 1))
 
 
-def render_motif_layer(piece: dict, layer: dict, motif_info: dict) -> Image.Image:
-    """渲染图案图层（含智能放置与防切割）。"""
+def render_motif_layer(piece: dict, layer: dict, motif_info: dict, underlay: Image.Image = None) -> Image.Image:
+    """渲染图案图层（含智能放置、防切割、边缘羽化与底纹融合）。"""
+    from PIL import ImageFilter
+
     motif = Image.open(motif_info["path"]).convert("RGBA")
     if layer.get("mirror_x"):
         motif = ImageOps.mirror(motif)
@@ -344,14 +346,44 @@ def render_motif_layer(piece: dict, layer: dict, motif_info: dict) -> Image.Imag
     if abs(rotation % 360) > 0.001:
         motif = motif.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
     motif = apply_opacity(motif, float(layer.get("opacity", 1) or 1))
+
+    # ---- 边缘羽化：对 motif alpha 通道高斯模糊，消除硬边 ----
+    mw, mh = motif.size
+    feather_radius = max(1, min(3, round(min(mw, mh) / 150)))
+    if feather_radius >= 1:
+        alpha = motif.getchannel("A")
+        alpha = alpha.filter(ImageFilter.GaussianBlur(radius=feather_radius))
+        motif.putalpha(alpha)
+
     content = Image.new("RGBA", (piece["width"], piece["height"]), (0, 0, 0, 0))
     # 智能放置：防切割 + 视觉重心
     pos = smart_motif_placement(motif, piece, layer)
-    content.alpha_composite(motif, pos)
+    mx, my = pos
+
+    # ---- 底纹保留层混合（让 motif 像印在面料上，而非贴纸）----
+    if underlay is not None:
+        # 提取 motif 对应区域的底纹
+        underlay_crop = underlay.crop((mx, my, mx + mw, my + mh))
+        # 创建羽化遮罩：中心 255（全 motif），边缘线性衰减到 0（全底纹）
+        blend_w = max(8, min(20, round(min(mw, mh) / 6)))
+        blend_mask = Image.new("L", (mw, mh), 0)
+        inner = blend_w
+        ImageDraw.Draw(blend_mask).rounded_rectangle(
+            [(inner, inner), (mw - inner, mh - inner)],
+            radius=inner,
+            fill=255,
+        )
+        # 对遮罩羽化，让过渡自然
+        blend_mask = blend_mask.filter(ImageFilter.GaussianBlur(radius=blend_w))
+        # 在 blend_mask 控制下混合 motif 和底纹
+        blended = Image.composite(motif, underlay_crop, blend_mask)
+        content.paste(blended, (mx, my))
+    else:
+        content.alpha_composite(motif, pos)
     return content
 
 
-def layer_to_image(piece: dict, layer: dict, textures: dict, solids: dict, motifs: dict) -> Image.Image:
+def layer_to_image(piece: dict, layer: dict, textures: dict, solids: dict, motifs: dict, underlay: Image.Image = None) -> Image.Image:
     """将单层定义渲染为图像。"""
     fill_type = layer.get("fill_type", "texture")
     if fill_type == "solid":
@@ -361,7 +393,7 @@ def layer_to_image(piece: dict, layer: dict, textures: dict, solids: dict, motif
         motif_info = motifs.get(motif_id)
         if not motif_info:
             raise RuntimeError(f"裁片 {piece['piece_id']} 的图案 {motif_id!r} 未批准或缺失。")
-        return render_motif_layer(piece, layer, motif_info)
+        return render_motif_layer(piece, layer, motif_info, underlay=underlay)
     texture_id = layer.get("texture_id")
     texture_info = textures.get(texture_id)
     if not texture_info:
@@ -384,7 +416,9 @@ def render_layered_piece(piece: dict, plan: dict, textures: dict, solids: dict, 
         return render_texture_piece(piece, plan, texture_info)
     content = Image.new("RGBA", (piece["width"], piece["height"]), (0, 0, 0, 0))
     for layer in layers:
-        layer_image = layer_to_image(piece, layer, textures, solids, motifs)
+        # 如果当前是 motif overlay，传入当前 content（底纹）作为 underlay，实现底纹融合
+        underlay = content if layer.get("fill_type") == "motif" else None
+        layer_image = layer_to_image(piece, layer, textures, solids, motifs, underlay=underlay)
         content.alpha_composite(layer_image)
     return apply_mask(content, piece["mask_path"])
 

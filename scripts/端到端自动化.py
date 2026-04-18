@@ -517,9 +517,23 @@ def _estimate_bg_color(img: Image.Image) -> tuple[tuple[int, int, int], int, int
     return ((mean_r, mean_g, mean_b), bright_threshold, chroma_threshold)
 
 
+def _feather_alpha(img: Image.Image, radius: int | None = None) -> Image.Image:
+    """对图像的 alpha 通道进行高斯模糊羽化，消除硬边。"""
+    if radius is None:
+        w, h = img.size
+        radius = max(1, min(3, round(min(w, h) / 200)))
+    if radius < 1:
+        return img
+    alpha = img.getchannel("A")
+    alpha = alpha.filter(ImageFilter.GaussianBlur(radius=radius))
+    img.putalpha(alpha)
+    return img
+
+
 def make_motif_transparent(panel: Image.Image, threshold: int = 235) -> Image.Image:
     """自适应透明背景去除：根据四角采样自动估计背景色范围。
-    兼容暖白/冷白/微蓝/浅灰背景，深色调主题也能正确处理。"""
+    兼容暖白/冷白/微蓝/浅灰背景，深色调主题也能正确处理。
+    增加边缘距离感知去背景和 alpha 羽化，处理渐变背景和羽化边缘。"""
     # 先裁剪底部可能的文字条带
     img = clean_motif_bottom(panel)
     img = img.convert("RGBA")
@@ -529,6 +543,7 @@ def make_motif_transparent(panel: Image.Image, threshold: int = 235) -> Image.Im
     # 自适应估计背景色
     bg_mean, bright_thresh, chroma_thresh = _estimate_bg_color(img)
 
+    # ---- 阶段 1：基础阈值去背景 ----
     for y in range(height):
         for x in range(width):
             r, g, b, a = pixels[x, y]
@@ -540,19 +555,68 @@ def make_motif_transparent(panel: Image.Image, threshold: int = 235) -> Image.Im
             elif bright:
                 pixels[x, y] = (r, g, b, max(0, min(a, 140)))
 
-    # 二次清理：检测并去除孤立的高对比度文字像素
+    # ---- 阶段 2：边缘距离感知清理 ----
+    # 检测前景边缘，基于像素到边缘的距离动态调整透明度
+    # 距离边缘越近的残留背景像素，越容易被清除
     gray = img.convert("L").filter(ImageFilter.FIND_EDGES)
     edge_pixels = list(gray.get_flattened_data())
     alpha = img.getchannel("A")
     alpha_pixels = list(alpha.get_flattened_data())
-    for idx, edge_val in enumerate(edge_pixels):
-        if edge_val > 120 and alpha_pixels[idx] > 0:
+
+    # 构建边缘掩码（edge = 255, non-edge = 0）
+    edge_mask = [255 if e > 80 else 0 for e in edge_pixels]
+    # 计算每个像素到最近边缘的距离（简化：用两次 pass 近似）
+    dist_map = [width + height] * (width * height)
+    for idx, is_edge in enumerate(edge_mask):
+        if is_edge:
+            dist_map[idx] = 0
+    # 水平传播
+    INF = width + height
+    for y in range(height):
+        base = y * width
+        # 左→右
+        best = INF
+        for x in range(width):
+            idx = base + x
+            best = min(best + 1, dist_map[idx])
+            dist_map[idx] = best
+        # 右→左
+        best = INF
+        for x in range(width - 1, -1, -1):
+            idx = base + x
+            best = min(best + 1, dist_map[idx])
+            dist_map[idx] = best
+    # 垂直传播
+    for x in range(width):
+        # 上→下
+        best = INF
+        for y in range(height):
+            idx = y * width + x
+            best = min(best + 1, dist_map[idx])
+            dist_map[idx] = best
+        # 下→上
+        best = INF
+        for y in range(height - 1, -1, -1):
+            idx = y * width + x
+            best = min(best + 1, dist_map[idx])
+            dist_map[idx] = best
+
+    # 根据距离边缘的远近，动态清理残留背景
+    for idx, dist in enumerate(dist_map):
+        if dist <= 8 and alpha_pixels[idx] > 0:
             y_pos, x_pos = divmod(idx, width)
             r, g, b, a = pixels[x_pos, y_pos]
-            # 自适应：如果像素接近背景色则透明
+            # 距离边缘 8px 内的像素：如果接近背景色，则降低 alpha
             bg_dist = abs(r - bg_mean[0]) + abs(g - bg_mean[1]) + abs(b - bg_mean[2])
-            if bg_dist < chroma_thresh * 2:
-                pixels[x_pos, y_pos] = (r, g, b, 0)
+            if bg_dist < chroma_thresh * 3:
+                # 距离边缘越近，alpha 降得越多
+                fade = max(0, int(a * (dist / 8)))
+                pixels[x_pos, y_pos] = (r, g, b, fade)
+
+    # ---- 阶段 3：alpha 边缘羽化 ----
+    # 对 alpha 通道进行高斯模糊，消除残留的硬边光晕
+    # 这样即使背景去除不彻底，边缘也会被柔化到不可见
+    img = _feather_alpha(img)
 
     alpha = img.getchannel("A")
     bbox = alpha.getbbox()
