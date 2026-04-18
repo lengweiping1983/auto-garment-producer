@@ -12,6 +12,7 @@
 Neo AI 负责创作 artwork。本脚本仅准备已批准资产并以确定性方式渲染到裁片中。
 """
 import argparse
+import copy
 import datetime
 import hashlib
 import json
@@ -174,6 +175,23 @@ def build_production_context(args, out_dir: Path) -> Path:
         ctx["paths"]["pattern_image"] = str(Path(args.pattern).resolve())
     ctx["input_hash"]["garment_type"] = args.garment_type
     ctx["input_hash"]["user_prompt"] = getattr(args, "user_prompt", "")
+    ctx["input_hash"]["mode"] = getattr(args, "mode", "")
+    ctx["input_hash"]["template"] = getattr(args, "template", "")
+    ctx["input_hash"]["template_size"] = getattr(args, "template_size", "")
+    ctx["input_hash"]["multi_scheme"] = bool(getattr(args, "multi_scheme", False))
+    ctx["input_hash"]["max_schemes"] = getattr(args, "max_schemes", 0)
+    ctx["input_hash"]["skip_collection_selection"] = bool(getattr(args, "skip_collection_selection", False))
+    ctx["input_hash"]["dual_source"] = bool(getattr(args, "dual_source", False))
+    ctx["input_hash"]["full_set"] = bool(getattr(args, "full_set", False))
+    if getattr(args, "brief", ""):
+        ctx["input_hash"]["brief"] = file_sha256(args.brief)
+        ctx["paths"]["input_brief"] = str(Path(args.brief).resolve())
+    if getattr(args, "visual_elements", ""):
+        ctx["input_hash"]["visual_elements"] = file_sha256(args.visual_elements)
+        ctx["paths"]["input_visual_elements"] = str(Path(args.visual_elements).resolve())
+    if getattr(args, "template_file", ""):
+        ctx["input_hash"]["template_file"] = file_sha256(args.template_file)
+        ctx["paths"]["template_file"] = str(Path(args.template_file).resolve())
 
     # 中间产物路径
     for name, fname in [
@@ -1336,6 +1354,37 @@ def render_size_variants_core(
     size_data: dict,
 ) -> None:
     """纯程序渲染多尺寸变体（可复用核心，无AI）。"""
+
+    def apply_aspect_orientation_correction(entry: dict, warning: dict) -> None:
+        """对严重 aspect 反转的目标裁片统一补偿图层旋转。"""
+        corrected_layers = []
+        for layer_key in ("base", "overlay", "trim"):
+            layer = entry.get(layer_key)
+            if not isinstance(layer, dict):
+                continue
+            old_rotation = layer.get("rotation", 0) or 0
+            try:
+                new_rotation = (float(old_rotation) + 90) % 360
+            except (TypeError, ValueError):
+                old_rotation = 0
+                new_rotation = 90.0
+            layer["rotation"] = int(new_rotation) if new_rotation.is_integer() else new_rotation
+            corrected_layers.append({
+                "layer": layer_key,
+                "old_rotation": old_rotation,
+                "new_rotation": layer["rotation"],
+            })
+
+        if corrected_layers:
+            entry.setdefault("issues", []).append({
+                "type": "aspect_orientation_corrected",
+                "delta": warning.get("delta", 0),
+                "base_aspect": warning.get("base_aspect"),
+                "target_aspect": warning.get("target_aspect"),
+                "corrected_layers": corrected_layers,
+                "note": "auto +90° rotation for aspect inversion",
+            })
+
     for size_label, mapping in size_data.items():
         piece_map = mapping.get("piece_map", {})
         scale_factor = mapping.get("scale_factor", {}).get("area_sqrt", 1.0)
@@ -1365,18 +1414,11 @@ def render_size_variants_core(
             entry = base_entries.get(base_pid)
             if not entry:
                 continue
-            mapped_entry = dict(entry)
+            mapped_entry = copy.deepcopy(entry)
             mapped_entry["piece_id"] = target_pid
             if target_pid in warning_pieces:
-                # aspect 翻转 ≈ 朝向反了，对 base.rotation 加 90°
-                base = mapped_entry.setdefault("base", {})
-                if isinstance(base, dict):
-                    base["rotation"] = (base.get("rotation", 0) + 90) % 360
-                mapped_entry.setdefault("issues", []).append({
-                    "type": "aspect_orientation_corrected",
-                    "delta": warning_pieces[target_pid]["delta"],
-                    "note": "auto +90° rotation for aspect inversion",
-                })
+                # aspect 翻转 ≈ 裁片坐标系旋转，对所有可旋转图层统一 +90°
+                apply_aspect_orientation_correction(mapped_entry, warning_pieces[target_pid])
             mapped_fill_plan["pieces"].append(mapped_entry)
 
         if not mapped_fill_plan["pieces"]:
@@ -2319,19 +2361,21 @@ def main() -> int:
 
                             # 支持占位符替换：{prompt_path} / {output_path}
                             resolved_cmd = cmd_str.replace("{prompt_path}", str(prompt_path.resolve())).replace("{output_path}", str(revised_plan_path.resolve()))
-                            cmd_parts = shlex.split(resolved_cmd)
 
-                            # 判断命令是否包含文件重定向（> output_path），如果有则 stdin 不传 prompt_text
-                            has_file_redirection = ">" in resolved_cmd
-                            if has_file_redirection:
+                            # shell 元字符（尤其是 > 重定向）必须交给 shell 解释；
+                            # 否则 shlex.split 后的 ">" 只是普通参数，文件不会被写入。
+                            needs_shell = any(token in resolved_cmd for token in (">", "<", "|", "&&", "||", ";"))
+                            if needs_shell:
                                 proc = subprocess.run(
-                                    cmd_parts,
+                                    resolved_cmd,
+                                    shell=True,
                                     capture_output=True,
                                     text=True,
                                     env=env,
                                     timeout=300,
                                 )
                             else:
+                                cmd_parts = shlex.split(resolved_cmd)
                                 proc = subprocess.run(
                                     cmd_parts,
                                     input=prompt_text,

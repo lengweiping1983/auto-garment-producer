@@ -35,6 +35,8 @@ def build_review_prompt(preview_path: str, fill_plan: dict, brief: dict, qc_repo
     """构造面向子Agent的整体商业感复审 prompt。"""
     pieces = fill_plan.get("pieces", [])
     hero_ids = [p["piece_id"] for p in pieces if (p.get("overlay") or {}).get("fill_type") == "motif"]
+    art_direction = fill_plan.get("art_direction", {}) if isinstance(fill_plan.get("art_direction"), dict) else {}
+    self_assessment = art_direction.get("self_assessment", {})
 
     lines = [
         "你是一位资深服装买手总监，精通商业成衣的市场可接受性判断。",
@@ -55,6 +57,15 @@ def build_review_prompt(preview_path: str, fill_plan: dict, brief: dict, qc_repo
     palette = brief.get("palette", {})
     if palette:
         lines.append(f"色板: {palette}")
+
+    if art_direction:
+        lines.extend([
+            "",
+            "===== 生产规划 AI 的自评（需验证，不可照单全收） =====",
+            f"策略: {art_direction.get('strategy', '')}",
+            f"自评: {json.dumps(self_assessment, ensure_ascii=False)}" if self_assessment else "自评: 未提供",
+            "请对照最终预览图验证这些自评分数。若你不同意，请在 issues 中指出被高估的维度、你认为合理的分数，以及视觉证据。",
+        ])
 
     lines.extend([
         "",
@@ -97,11 +108,22 @@ def build_review_prompt(preview_path: str, fill_plan: dict, brief: dict, qc_repo
             "issues": [
                 {
                     "severity": "high|medium|low",
-                    "category": "harmony|wearability|hero_placement|trim|season|customer|clutter",
+                    "category": "harmony|wearability|hero_placement|trim|season|customer|clutter|self_assessment",
                     "description": "具体问题描述",
                     "suggested_fix": "修改建议"
                 }
             ],
+            "self_assessment_review": {
+                "verified": True,
+                "disagreements": [
+                    {
+                        "criterion": "hero_clarity",
+                        "claimed_score": 9,
+                        "reviewer_score": 6,
+                        "evidence": "预览图中卖点图案被裁片边界切断，远看不够清晰"
+                    }
+                ]
+            },
             "priority_fix": "如果有必须修改的问题，指出最关键的一条",
         }, ensure_ascii=False, indent=2),
         "",

@@ -16,6 +16,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from image_utils import ensure_thumbnail
 
+SKILL_DIR = Path(__file__).resolve().parents[1]
+STYLE_REFERENCE_DIR = SKILL_DIR / "references" / "styles"
+STYLE_REFERENCE_BY_TEMPLATE = {
+    "BFSK26308XCJ01L": {
+        "path": STYLE_REFERENCE_DIR / "BFSK26308XCJ01L-style-reference.jpg",
+        "label": "BFSK26308XCJ01L 男士防晒服标准裁片参考图",
+        "notes": "前后身片、袖片、门襟/下摆窄条在该参考图中已有成衣印花方向，可用于判断纸样部位与上下方向。",
+    },
+    "DDS26126XCJ01L": {
+        "path": STYLE_REFERENCE_DIR / "DDS26126XCJ01L-style-reference.jpg",
+        "label": "DDS26126XCJ01L 男士衬衫标准裁片参考图",
+        "notes": "衬衫前后片、袖片、领/门襟/窄条在该参考图中已有成衣印花方向，可用于判断部位、对称组和饰边。",
+    },
+}
+
 
 def load_json(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -32,6 +47,36 @@ def _load_visual_motif_geometries(visual_elements: dict) -> dict:
     return geos
 
 
+def infer_style_references(pieces_payload: dict, brief: dict) -> list[dict]:
+    """根据纸样来源或服装类型匹配款式参考图。"""
+    haystack = " ".join(
+        str(value)
+        for value in (
+            pieces_payload.get("pattern_image", ""),
+            pieces_payload.get("prepared_pattern", ""),
+            pieces_payload.get("overview_image", ""),
+            brief.get("garment_type", ""),
+        )
+    ).lower()
+    refs = []
+    for template_id, ref in STYLE_REFERENCE_BY_TEMPLATE.items():
+        template_lower = template_id.lower()
+        if template_lower in haystack or (
+            template_id == "BFSK26308XCJ01L" and any(term in haystack for term in ("防晒", "sun protection"))
+        ) or (
+            template_id == "DDS26126XCJ01L" and any(term in haystack for term in ("衬衫", "shirt"))
+        ):
+            path = ref["path"]
+            if path.exists():
+                refs.append({
+                    "template_id": template_id,
+                    "label": ref["label"],
+                    "path": str(path.resolve()),
+                    "notes": ref["notes"],
+                })
+    return refs
+
+
 def build_production_plan_prompt(
     pieces_payload: dict,
     texture_set: dict,
@@ -40,6 +85,7 @@ def build_production_plan_prompt(
     visual_elements: dict | None,
     piece_overview_path: str,
     texture_thumbnail_paths: list[str],
+    style_reference_paths: list[dict] | None = None,
     multi_scheme: bool = False,
     max_schemes: int = 4,
 ) -> str:
@@ -91,8 +137,20 @@ def build_production_plan_prompt(
         "",
     ]
 
+    if style_reference_paths:
+        lines.append("【必看 2】款式参考图（用于部位识别和上下方向判断）：")
+        for ref in style_reference_paths:
+            lines.append(f"  - {ref.get('label', '款式参考图')}: {ref.get('path', '')}")
+            if ref.get("notes"):
+                lines.append(f"    参考重点: {ref['notes']}")
+        lines.extend([
+            "  请先把款式参考图中的标准裁片形状，与 piece_overview.png 中的白色 mask 一一对照。",
+            "  如果几何数字和参考图冲突，以款式参考图 + piece_overview.png 的视觉判断为准。",
+            "",
+        ])
+
     if texture_thumbnail_paths:
-        lines.append("【必看 2】面料资产缩略图（必须查看后再分配）：")
+        lines.append("【必看 3】面料资产缩略图（必须查看后再分配）：")
         for tp in texture_thumbnail_paths:
             lines.append(f"  - {tp}")
         lines.append("")
@@ -455,7 +513,12 @@ def main() -> int:
     overview_path = args.piece_overview
     if not overview_path:
         pieces_dir = Path(args.pieces).parent
-        for cand in ["piece_overview.png", "piece_overview.jpg", "garment_map_overview.jpg"]:
+        overview_candidates = ["piece_overview.png", "piece_overview.jpg", "garment_map_overview.jpg"]
+        pieces_stem = Path(args.pieces).stem
+        if pieces_stem.startswith("pieces_"):
+            size_label = pieces_stem.removeprefix("pieces_")
+            overview_candidates.insert(0, f"piece_overview_{size_label}.png")
+        for cand in overview_candidates:
             cp = pieces_dir / cand
             if cp.exists():
                 overview_path = str(cp.resolve())
@@ -472,9 +535,17 @@ def main() -> int:
                 thumb = ensure_thumbnail(tp, max_size=256)
                 texture_thumbnails.append(str(thumb.resolve()))
 
+    style_references = []
+    for ref in infer_style_references(pieces_payload, brief):
+        ref_path = Path(ref["path"])
+        thumb = ensure_thumbnail(ref_path, max_size=900)
+        ref["path"] = str(thumb.resolve())
+        style_references.append(ref)
+
     prompt_text = build_production_plan_prompt(
         pieces_payload, texture_set, brief, geometry_hints,
         visual_elements, overview_path, texture_thumbnails,
+        style_reference_paths=style_references,
         multi_scheme=args.multi_scheme,
         max_schemes=args.max_schemes,
     )
@@ -491,6 +562,7 @@ def main() -> int:
         "visual_elements": str(Path(args.visual_elements).resolve()) if args.visual_elements else "",
         "piece_overview": overview_path,
         "texture_thumbnails": texture_thumbnails,
+        "style_references": style_references,
         "prompt_path": str(prompt_path.resolve()),
         "expected_output": str((out_dir / ("ai_multi_production_plan.json" if args.multi_scheme else "ai_production_plan.json")).resolve()),
         "multi_scheme": args.multi_scheme,
@@ -503,6 +575,7 @@ def main() -> int:
         "生产规划请求摘要": str(request_path.resolve()),
         "子Agent提示词": str(prompt_path.resolve()),
         "纸样总览图": overview_path,
+        "款式参考图": [ref["path"] for ref in style_references],
         "预期输出": request_summary["expected_output"],
         "多方案模式": args.multi_scheme,
         "最大方案数": args.max_schemes if args.multi_scheme else 1,

@@ -1,0 +1,18 @@
+{
+  "style_references": [
+    {
+      "template_id": "BFSK26308XCJ01L",
+      "garment_type": "sun protection clothing",
+      "label": "BFSK26308XCJ01L 男士防晒服标准裁片参考图",
+      "path": "references/styles/BFSK26308XCJ01L-style-reference.jpg",
+      "usage": "生产规划 AI 在部位识别时对照此图判断前后片、袖片、门襟/下摆窄条、上下方向与对称关系。"
+    },
+    {
+      "template_id": "DDS26126XCJ01L",
+      "garment_type": "shirt",
+      "label": "DDS26126XCJ01L 男士衬衫标准裁片参考图",
+      "path": "references/styles/DDS26126XCJ01L-style-reference.jpg",
+      "usage": "生产规划 AI 在部位识别时对照此图判断衬衫前后片、袖片、领/门襟/窄条、上下方向与对称关系。"
+    }
+  ]
+}
