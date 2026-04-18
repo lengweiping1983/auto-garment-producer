@@ -26,8 +26,8 @@ STYLE_REFERENCE_BY_TEMPLATE = {
     },
     "DDS26126XCJ01L": {
         "path": STYLE_REFERENCE_DIR / "DDS26126XCJ01L-style-reference.jpg",
-        "label": "DDS26126XCJ01L 男士衬衫标准裁片参考图",
-        "notes": "衬衫前后片、袖片、领/门襟/窄条在该参考图中已有成衣印花方向，可用于判断部位、对称组和饰边。",
+        "label": "DDS26126XCJ01L 上装/T恤/衬衫标准裁片参考图",
+        "notes": "T 恤/衬衫前后片、袖片、领/门襟/窄条在该参考图中已有成衣印花方向，可用于判断部位、对称组和饰边。",
     },
 }
 
@@ -64,7 +64,8 @@ def infer_style_references(pieces_payload: dict, brief: dict) -> list[dict]:
         if template_lower in haystack or (
             template_id == "BFSK26308XCJ01L" and any(term in haystack for term in ("防晒", "sun protection"))
         ) or (
-            template_id == "DDS26126XCJ01L" and any(term in haystack for term in ("衬衫", "shirt"))
+            template_id == "DDS26126XCJ01L"
+            and any(term in haystack for term in ("t恤", "t-shirt", "tee", "衬衫", "男士衬衫", "shirt"))
         ):
             path = ref["path"]
             if path.exists():
@@ -83,6 +84,7 @@ def build_production_plan_prompt(
     brief: dict,
     geometry_hints: dict,
     visual_elements: dict | None,
+    garment_map: dict | None,
     piece_overview_path: str,
     texture_thumbnail_paths: list[str],
     style_reference_paths: list[dict] | None = None,
@@ -136,6 +138,28 @@ def build_production_plan_prompt(
         "  - 哪些裁片看起来是左右对称的（大小形状相同、位置左右对应）",
         "",
     ]
+
+    if garment_map and garment_map.get("pieces"):
+        is_template_map = (
+            str(garment_map.get("method", "")).startswith("template_")
+            or str(garment_map.get("map_id", "")).startswith("template_")
+            or bool(garment_map.get("template_id"))
+        )
+        if is_template_map:
+            lines.extend([
+                "===== 固定模板部位映射（必须遵守）=====",
+                "本任务命中了内置模板库。下面的 garment_map 是模板库预生成的固定生产资料，不需要重新识别，也不要修改 piece_id、garment_role、zone、symmetry_group、same_shape_group 或 grain_direction。",
+                "你的主要任务是基于该固定部位映射制定 piece_fill_plan；如果输出 JSON 中包含 garment_map，也必须与下方模板映射保持一致。",
+                json.dumps(garment_map, ensure_ascii=False, indent=2),
+                "",
+            ])
+        else:
+            lines.extend([
+                "===== 已有部位映射参考 =====",
+                "下面是当前流程已有的 garment_map。请优先参考它制定填充计划；只有在明显不合理时才调整。",
+                json.dumps(garment_map, ensure_ascii=False, indent=2),
+                "",
+            ])
 
     if style_reference_paths:
         lines.append("【必看 2】款式参考图（用于部位识别和上下方向判断）：")
@@ -538,6 +562,13 @@ def main() -> int:
         except Exception as exc:
             print(f"[警告] 无法读取 visual_elements: {exc}", file=sys.stderr)
 
+    garment_map = None
+    if args.garment_map:
+        try:
+            garment_map = load_json(args.garment_map)
+        except Exception as exc:
+            print(f"[警告] 无法读取 garment_map: {exc}", file=sys.stderr)
+
     # 推断 piece_overview 路径
     overview_path = args.piece_overview
     if not overview_path:
@@ -573,7 +604,7 @@ def main() -> int:
 
     prompt_text = build_production_plan_prompt(
         pieces_payload, texture_set, brief, geometry_hints,
-        visual_elements, overview_path, texture_thumbnails,
+        visual_elements, garment_map, overview_path, texture_thumbnails,
         style_reference_paths=style_references,
         multi_scheme=args.multi_scheme,
         max_schemes=args.max_schemes,
@@ -589,6 +620,7 @@ def main() -> int:
         "brief": str(Path(args.brief).resolve()) if args.brief else "",
         "geometry_hints": str(Path(args.geometry_hints).resolve()) if args.geometry_hints else "",
         "visual_elements": str(Path(args.visual_elements).resolve()) if args.visual_elements else "",
+        "garment_map": str(Path(args.garment_map).resolve()) if args.garment_map else "",
         "piece_overview": overview_path,
         "texture_thumbnails": texture_thumbnails,
         "style_references": style_references,

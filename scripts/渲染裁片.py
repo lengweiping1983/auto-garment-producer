@@ -142,9 +142,9 @@ def transform_texture(texture: Image.Image, plan: dict, piece: dict | None = Non
     # 应用 texture_direction 自动旋转
     if piece:
         rotation += auto_rotation_for_direction(out, plan.get("texture_direction", ""), piece)
-        # 补偿裁片在 pattern 中的方向（倒置裁片需额外旋转）
+        # 默认不再用纸样摆放方向旋转普通纹理；只有方向性图案显式声明时才补偿。
         piece_orientation = piece.get("pattern_orientation", 0)
-        if piece_orientation:
+        if plan.get("respect_pattern_orientation") and piece_orientation:
             rotation += piece_orientation
     if abs(rotation % 360) > 0.001:
         out = out.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)

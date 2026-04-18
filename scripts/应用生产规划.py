@@ -16,23 +16,29 @@ def load_json(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def apply_production_plan(plan_path: Path, out_dir: Path) -> tuple[Path, Path]:
+def apply_production_plan(
+    plan_path: Path,
+    out_dir: Path,
+    pieces_path: Path | None = None,
+    fixed_garment_map_path: Path | None = None,
+) -> tuple[Path, Path]:
     """拆解 ai_production_plan.json 为 garment_map.json + ai_piece_fill_plan.json。"""
     plan = load_json(plan_path)
 
     # 尝试读取 pieces.json 获取 pattern_orientation 等几何信息
     pieces_data = {}
-    pieces_path = out_dir / "pieces.json"
-    if pieces_path.exists():
+    effective_pieces_path = pieces_path or (out_dir / "pieces.json")
+    if effective_pieces_path.exists():
         try:
-            pieces_payload = load_json(pieces_path)
+            pieces_payload = load_json(effective_pieces_path)
             for p in pieces_payload.get("pieces", []):
                 pieces_data[p["piece_id"]] = p
         except Exception:
             pass
 
     # 1. 提取 garment_map
-    garment_map = plan.get("garment_map", {})
+    fixed_garment_map_path = fixed_garment_map_path if fixed_garment_map_path and fixed_garment_map_path.exists() else None
+    garment_map = load_json(fixed_garment_map_path) if fixed_garment_map_path else plan.get("garment_map", {})
     # 确保有标准字段
     if "map_id" not in garment_map:
         garment_map["map_id"] = "ai_garment_map_v1"
@@ -69,8 +75,12 @@ def apply_production_plan(plan_path: Path, out_dir: Path) -> tuple[Path, Path]:
             p["orientation_confidence"] = source.get("orientation_confidence", 0)
             p["orientation_reason"] = source.get("orientation_reason", "")
 
-    garment_map_path = out_dir / "garment_map.json"
-    garment_map_path.write_text(json.dumps(garment_map, ensure_ascii=False, indent=2), encoding="utf-8")
+    if fixed_garment_map_path:
+        garment_map_path = fixed_garment_map_path
+        print(f"[固定部位映射] 使用模板库 garment_map，不写入输出目录: {garment_map_path}")
+    else:
+        garment_map_path = out_dir / "garment_map.json"
+        garment_map_path.write_text(json.dumps(garment_map, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # 2. 提取 piece_fill_plan
     fill_plan = plan.get("piece_fill_plan", {})
@@ -133,7 +143,11 @@ def apply_production_plan(plan_path: Path, out_dir: Path) -> tuple[Path, Path]:
     return garment_map_path, fill_plan_path
 
 
-def apply_multi_production_plan(plan_path: Path, out_dir: Path) -> list[dict]:
+def apply_multi_production_plan(
+    plan_path: Path,
+    out_dir: Path,
+    fixed_garment_map_path: Path | None = None,
+) -> list[dict]:
     """拆解 ai_multi_production_plan.json 为多个独立 scheme 文件。
     返回 scheme 元数据列表，用于下游遍历渲染。"""
     plan = load_json(plan_path)
@@ -141,12 +155,17 @@ def apply_multi_production_plan(plan_path: Path, out_dir: Path) -> list[dict]:
 
     if not schemes:
         # fallback：当作单方案处理
-        gm_path, fp_path = apply_production_plan(plan_path, out_dir)
+        gm_path, fp_path = apply_production_plan(
+            plan_path,
+            out_dir,
+            fixed_garment_map_path=fixed_garment_map_path,
+        )
         return [{"scheme_id": "scheme_01", "suffix": "", "garment_map": str(gm_path), "fill_plan": str(fp_path)}]
 
     # 预加载标准模式的 garment_map 作为 fallback（多方案 AI 通常不输出 garment_map）
-    fallback_garment_map = None
-    for fallback_path in [out_dir / "garment_map.json", out_dir / "ai_production_plan.json"]:
+    fixed_garment_map_path = fixed_garment_map_path if fixed_garment_map_path and fixed_garment_map_path.exists() else None
+    fallback_garment_map = load_json(fixed_garment_map_path) if fixed_garment_map_path else None
+    for fallback_path in [] if fixed_garment_map_path else [out_dir / "garment_map.json", out_dir / "ai_production_plan.json"]:
         if fallback_path.exists():
             try:
                 data = load_json(fallback_path)
@@ -166,17 +185,24 @@ def apply_multi_production_plan(plan_path: Path, out_dir: Path) -> list[dict]:
 
         # 提取并写入 garment_map
         garment_map = scheme.get("garment_map", {})
+        # 固定模板模式下忽略 AI 输出的 garment_map，所有方案共享模板库固定映射。
+        if fixed_garment_map_path:
+            gm_path = fixed_garment_map_path
+            garment_map = fallback_garment_map or {}
         # 如果 AI 未输出 garment_map pieces，复用标准模式的 garment_map
-        if not garment_map.get("pieces") and fallback_garment_map:
+        elif not garment_map.get("pieces") and fallback_garment_map:
             garment_map = dict(fallback_garment_map)
             garment_map["map_id"] = f"ai_garment_map_{scheme_id}"
             garment_map["method"] = "ai_multi_production_plan_extraction"
-        if "map_id" not in garment_map:
+        if fixed_garment_map_path:
+            pass
+        elif "map_id" not in garment_map:
             garment_map["map_id"] = f"ai_garment_map_{scheme_id}"
-        if "method" not in garment_map:
+        if not fixed_garment_map_path and "method" not in garment_map:
             garment_map["method"] = "ai_multi_production_plan_extraction"
-        gm_path = out_dir / f"garment_map{suffix}.json"
-        gm_path.write_text(json.dumps(garment_map, ensure_ascii=False, indent=2), encoding="utf-8")
+        if not fixed_garment_map_path:
+            gm_path = out_dir / f"garment_map{suffix}.json"
+            gm_path.write_text(json.dumps(garment_map, ensure_ascii=False, indent=2), encoding="utf-8")
 
         # 提取并写入 piece_fill_plan
         fill_plan = scheme.get("piece_fill_plan", {})
@@ -218,6 +244,8 @@ def main() -> int:
     parser.add_argument("--production-plan", required=True, help="ai_production_plan.json 或 ai_multi_production_plan.json 路径")
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument("--multi-scheme", action="store_true", help="输入为 ai_multi_production_plan.json，拆解为多个独立 scheme 文件")
+    parser.add_argument("--pieces", default="", help="运行期 pieces.json 路径。模板模式下可指向模板库。")
+    parser.add_argument("--fixed-garment-map", default="", help="固定 garment_map 路径。提供后忽略 AI 输出的 garment_map，不写入输出目录。")
     args = parser.parse_args()
 
     plan_path = Path(args.production_plan)
@@ -228,15 +256,23 @@ def main() -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    pieces_path = Path(args.pieces) if args.pieces else None
+    fixed_garment_map = Path(args.fixed_garment_map) if args.fixed_garment_map else None
+
     if args.multi_scheme:
-        schemes = apply_multi_production_plan(plan_path, out_dir)
+        schemes = apply_multi_production_plan(plan_path, out_dir, fixed_garment_map_path=fixed_garment_map)
         print(json.dumps({
             "schemes_meta": str((out_dir / "schemes_meta.json").resolve()),
             "scheme_count": len(schemes),
             "status": "applied_multi",
         }, ensure_ascii=False, indent=2))
     else:
-        garment_map_path, fill_plan_path = apply_production_plan(plan_path, out_dir)
+        garment_map_path, fill_plan_path = apply_production_plan(
+            plan_path,
+            out_dir,
+            pieces_path=pieces_path,
+            fixed_garment_map_path=fixed_garment_map,
+        )
         print(json.dumps({
             "garment_map": str(garment_map_path.resolve()),
             "ai_piece_fill_plan": str(fill_plan_path.resolve()),

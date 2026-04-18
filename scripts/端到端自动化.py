@@ -34,6 +34,7 @@ try:
         find_template_by_pattern_path,
         load_size_mappings,
         load_size_pieces,
+        resolve_template_assets,
     )
     HAS_TEMPLATE_LOADER = True
 except Exception:
@@ -157,7 +158,13 @@ def _build_geometry_hints(pieces_path: Path, out_path: Path) -> None:
         print(f"[警告] geometry_hints 生成失败: {exc}")
 
 
-def build_production_context(args, out_dir: Path) -> Path:
+def build_production_context(
+    args,
+    out_dir: Path,
+    pieces_path: Path | None = None,
+    garment_map_path: Path | None = None,
+    template_assets: dict | None = None,
+) -> Path:
     """生成 production_context.json，统一索引所有输入和中间产物。"""
     ctx = {
         "input_hash": {},
@@ -192,12 +199,17 @@ def build_production_context(args, out_dir: Path) -> Path:
     if getattr(args, "template_file", ""):
         ctx["input_hash"]["template_file"] = file_sha256(args.template_file)
         ctx["paths"]["template_file"] = str(Path(args.template_file).resolve())
+    if template_assets:
+        ctx["computed"]["template_assets_reused"] = True
+        ctx["computed"]["template_id"] = template_assets.get("template_id", "")
+        ctx["computed"]["template_size_label"] = template_assets.get("size_label", "")
+        ctx["computed"]["template_size"] = template_assets.get("size_label", "")
+        ctx["computed"]["template_source"] = template_assets.get("template_source", "")
+        ctx["computed"]["original_garment_type"] = getattr(args, "garment_type", "")
+        ctx["paths"]["template_asset_dir"] = template_assets.get("asset_dir", "")
 
     # 中间产物路径
     for name, fname in [
-        ("pieces_json", "pieces.json"),
-        ("piece_overview", "piece_overview.png"),
-        ("garment_map", "garment_map.json"),
         ("texture_set", "texture_set.json"),
         ("visual_elements", "visual_elements.json"),
         ("brief", "commercial_design_brief.json"),
@@ -206,12 +218,29 @@ def build_production_context(args, out_dir: Path) -> Path:
         p = out_dir / fname
         if p.exists():
             ctx["paths"][name] = str(p.resolve())
+    resolved_pieces_path = pieces_path or (out_dir / "pieces.json")
+    if resolved_pieces_path.exists():
+        ctx["paths"]["pieces_json"] = str(resolved_pieces_path.resolve())
+        try:
+            pieces_payload = json.loads(resolved_pieces_path.read_text(encoding="utf-8"))
+            if pieces_payload.get("overview_image"):
+                ctx["paths"]["piece_overview"] = pieces_payload["overview_image"]
+            if pieces_payload.get("prepared_pattern"):
+                ctx["paths"]["prepared_pattern"] = pieces_payload["prepared_pattern"]
+            if not ctx["paths"].get("pattern_image") and pieces_payload.get("pattern_image"):
+                ctx["paths"]["pattern_image"] = pieces_payload["pattern_image"]
+                ctx["input_hash"]["pattern_image"] = file_sha256(pieces_payload["pattern_image"])
+        except Exception:
+            pass
+    if garment_map_path and garment_map_path.exists():
+        ctx["paths"]["garment_map"] = str(garment_map_path.resolve())
+    elif (out_dir / "garment_map.json").exists():
+        ctx["paths"]["garment_map"] = str((out_dir / "garment_map.json").resolve())
 
     # 计算字段
-    pieces_path = out_dir / "pieces.json"
-    if pieces_path.exists():
+    if resolved_pieces_path.exists():
         try:
-            pieces = json.loads(pieces_path.read_text(encoding="utf-8"))
+            pieces = json.loads(resolved_pieces_path.read_text(encoding="utf-8"))
             pc = pieces.get("pieces", [])
             ctx["computed"]["piece_count"] = len(pc)
             if pc:
@@ -1012,7 +1041,54 @@ def run_garment_mapping(args, pieces_path: Path, out_dir: Path) -> None:
     run_step(garment_cmd)
 
 
-def _run_render_pipeline(args, out_dir: Path, texture_set_path: Path, suffix: str, pieces_path: Path) -> int:
+def resolve_reusable_template_assets_for_run(args) -> dict | None:
+    """内置模板资产完整时直接复用，用户自定义模板/禁用模板时回退旧流程。"""
+    if args.no_template or args.template_file or not HAS_TEMPLATE_LOADER:
+        return None
+    requested_template = bool(args.template)
+    requested_pattern = bool(args.pattern)
+    assets = resolve_template_assets(
+        template_id=args.template,
+        size_label=args.template_size,
+        pattern_path=args.pattern,
+        garment_type=args.garment_type,
+    )
+    if assets:
+        args.template = assets["template_id"]
+        args.template_size = assets["size_label"]
+        if requested_template:
+            assets["template_source"] = "template_arg"
+        elif requested_pattern:
+            assets["template_source"] = "pattern_match"
+        else:
+            assets["template_source"] = "garment_type_match"
+    return assets
+
+
+def pattern_hash_for_run(args, pieces_path: Path | None = None) -> str:
+    """Return a stable pattern hash for explicit masks or reusable template pieces."""
+    if getattr(args, "pattern", ""):
+        return file_sha256(args.pattern)
+    if pieces_path and pieces_path.exists():
+        try:
+            pieces_payload = load_json(pieces_path)
+            pattern_image = pieces_payload.get("pattern_image", "")
+            if pattern_image:
+                return file_sha256(pattern_image)
+        except Exception:
+            return ""
+    return ""
+
+
+def _run_render_pipeline(
+    args,
+    out_dir: Path,
+    texture_set_path: Path,
+    suffix: str,
+    pieces_path: Path,
+    garment_map_path: Path,
+    template_assets: dict | None = None,
+) -> int:
     """基于指定 texture_set 执行剩余流水线：质检 → 生产规划 → 渲染 → 时尚质检 → 商业复审。
     suffix 用于区分双源输出（如 "_A" / "_B" / ""）。
     返回 exit code（0=成功）。
@@ -1074,7 +1150,10 @@ def _run_render_pipeline(args, out_dir: Path, texture_set_path: Path, suffix: st
                 str(SKILL_DIR / "scripts" / "应用生产规划.py"),
                 "--production-plan", str(provided),
                 "--out", str(out_dir),
+                "--pieces", str(pieces_path),
             ]
+            if template_assets:
+                apply_cmd.extend(["--fixed-garment-map", str(garment_map_path)])
             run_step(apply_cmd)
         else:
             print(f"[错误{suffix}] 提供的生产规划不存在: {provided}", file=sys.stderr)
@@ -1085,7 +1164,7 @@ def _run_render_pipeline(args, out_dir: Path, texture_set_path: Path, suffix: st
                 sys.executable,
                 str(SKILL_DIR / "scripts" / "构造审美请求.py"),
                 "--pieces", str(pieces_path),
-                "--garment-map", str(out_dir / "garment_map.json"),
+                "--garment-map", str(garment_map_path),
                 "--texture-set", str(texture_set_path),
                 "--out", str(out_dir),
             ]
@@ -1100,7 +1179,7 @@ def _run_render_pipeline(args, out_dir: Path, texture_set_path: Path, suffix: st
         plan_loaded_from_cache = False
         if args.reuse_cache:
             plan_hash = {
-                "pattern_image": file_sha256(args.pattern),
+                "pattern_image": pattern_hash_for_run(args, pieces_path),
                 "texture_set": file_sha256(texture_set_path),
                 "garment_type": args.garment_type,
                 "brief": file_sha256(args.brief) if args.brief else "",
@@ -1124,6 +1203,7 @@ def _run_render_pipeline(args, out_dir: Path, texture_set_path: Path, suffix: st
                     str(SKILL_DIR / "scripts" / "构造生产规划请求.py"),
                     "--pieces", str(pieces_path),
                     "--texture-set", str(texture_set_path),
+                    "--garment-map", str(garment_map_path),
                     "--out", str(out_dir),
                 ]
                 if args.brief:
@@ -1133,8 +1213,6 @@ def _run_render_pipeline(args, out_dir: Path, texture_set_path: Path, suffix: st
                     plan_request_cmd.extend(["--geometry-hints", str(gh_path)])
                 if args.visual_elements:
                     plan_request_cmd.extend(["--visual-elements", args.visual_elements])
-                if args.ai_map:
-                    plan_request_cmd.extend(["--garment-map", args.ai_map])
                 run_step(plan_request_cmd)
                 print(f"\n[提示{suffix}] 生产规划 AI 请求已构造。请启动子 Agent 阅读以下文件并输出 ai_production_plan.json：")
                 print(f"  提示词文件: {out_dir / 'ai_production_plan_prompt.txt'}")
@@ -1147,7 +1225,10 @@ def _run_render_pipeline(args, out_dir: Path, texture_set_path: Path, suffix: st
                 str(SKILL_DIR / "scripts" / "应用生产规划.py"),
                 "--production-plan", str(production_plan_path),
                 "--out", str(out_dir),
+                "--pieces", str(pieces_path),
             ]
+            if template_assets:
+                apply_cmd.extend(["--fixed-garment-map", str(garment_map_path)])
             run_step(apply_cmd)
             if args.reuse_cache and not plan_loaded_from_cache:
                 cache_save(out_dir, "production_plan", plan_hash, production_plan_path)
@@ -1160,7 +1241,7 @@ def _run_render_pipeline(args, out_dir: Path, texture_set_path: Path, suffix: st
         str(SKILL_DIR / "scripts" / "创建填充计划.py"),
         "--pieces", str(pieces_path),
         "--texture-set", str(texture_set_path),
-        "--garment-map", str(out_dir / "garment_map.json"),
+        "--garment-map", str(garment_map_path),
         "--out", str(out_dir),
     ]
     if args.brief:
@@ -1214,6 +1295,8 @@ def _run_render_pipeline(args, out_dir: Path, texture_set_path: Path, suffix: st
             ("piece_fill_plan.json", f"piece_fill_plan{suffix}.json"),
             ("garment_map.json", f"garment_map{suffix}.json"),
         ]:
+            if template_assets and src_name == "garment_map.json":
+                continue
             src = out_dir / src_name
             dst = out_dir / dst_name
             if src.exists():
@@ -1478,7 +1561,7 @@ def _render_size_variants(args, out_dir: Path, texture_set_path: Path, suffix: s
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="生成 Neo AI 面料看板并自动渲染服装裁片。")
-    parser.add_argument("--pattern", required=True, help="透明纸样 mask PNG/WebP")
+    parser.add_argument("--pattern", default="", help="透明纸样 mask PNG/WebP。若 garment_type/template 命中内置模板，可省略。")
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument("--collection-board", default="", help="已有的 Neo AI 3×3 面料看板。若省略，则调用 Neo AI 生成。")
     parser.add_argument("--texture-set", default="", help="已审批的 texture_set.json。提供后跳过看板生成/裁剪，直接使用该面料组合继续裁片映射、填充和渲染。")
@@ -1561,9 +1644,24 @@ def main() -> int:
     # ============================================================
     # Phase 1: 程序-only 准备层（与 AI 调用无关，可并行执行）
     # ============================================================
-    # 1a. 裁片提取 —— 纯程序，不依赖任何 AI 输出，优先执行
-    pieces_path = out_dir / "pieces.json"
-    if not pieces_path.exists() or not args.reuse_cache:
+    # 1a. 裁片提取 —— 内置模板命中时直接复用模板库资产，否则保持旧流程。
+    template_assets = resolve_reusable_template_assets_for_run(args)
+    if template_assets:
+        pieces_path = Path(template_assets["pieces_path"])
+        garment_map_path = Path(template_assets["garment_map_path"])
+        print(
+            "[模板复用] 使用内置模板资产: "
+            f"{template_assets['template_id']}/{template_assets['size_label']}"
+        )
+        print(f"  pieces: {pieces_path}")
+        print(f"  garment_map: {garment_map_path}")
+    else:
+        pieces_path = out_dir / "pieces.json"
+        garment_map_path = out_dir / "garment_map.json"
+        if not args.pattern:
+            print("[错误] 未提供 --pattern，且未能通过 --template 或 --garment-type 命中可复用内置模板。", file=sys.stderr)
+            return 1
+    if not template_assets and (not pieces_path.exists() or not args.reuse_cache):
         pieces_cmd = [
             sys.executable,
             str(SKILL_DIR / "scripts" / "提取裁片.py"),
@@ -1571,12 +1669,12 @@ def main() -> int:
             "--out", str(out_dir),
         ]
         run_step(pieces_cmd)
-    else:
+    elif not template_assets:
         print(f"[缓存] pieces.json 已存在，跳过裁片提取")
 
     # 1b. 程序几何推断 → geometry_hints.json（供后续 AI 参考）
     geometry_hints_path = out_dir / "geometry_hints.json"
-    if pieces_path.exists() and (not geometry_hints_path.exists() or not args.reuse_cache):
+    if not template_assets and pieces_path.exists() and (not geometry_hints_path.exists() or not args.reuse_cache):
         _build_geometry_hints(pieces_path, geometry_hints_path)
 
     # ============================================================
@@ -1698,8 +1796,6 @@ def main() -> int:
         except Exception:
             pass
 
-    pieces_path = out_dir / "pieces.json"
-
     # ============================================================
     # 双源模式（Neo AI + libtv 并行生成）
     # ============================================================
@@ -1731,10 +1827,15 @@ def main() -> int:
         try:
             with ThreadPoolExecutor(max_workers=2) as executor:
                 boards_future = executor.submit(generator.generate, dual_prompts_path)
-                mapping_future = executor.submit(run_garment_mapping, args, pieces_path, out_dir)
+                mapping_future = None
+                if template_assets:
+                    print("[模板复用] 双源模式跳过部位映射生成，直接使用模板库 garment_map。")
+                else:
+                    mapping_future = executor.submit(run_garment_mapping, args, pieces_path, out_dir)
 
                 board_results = boards_future.result()
-                mapping_future.result()
+                if mapping_future:
+                    mapping_future.result()
         except Exception as exc:
             print(f"[错误] 双源看板生成失败: {exc}", file=sys.stderr)
             return 1
@@ -1834,7 +1935,7 @@ def main() -> int:
             plan_loaded_from_cache = False
             if args.reuse_cache:
                 plan_hash = {
-                    "pattern_image": file_sha256(args.pattern),
+                    "pattern_image": pattern_hash_for_run(args, pieces_path),
                     "texture_set": file_sha256(merged_ts_path),
                     "garment_type": args.garment_type,
                     "brief": file_sha256(args.brief) if args.brief else "",
@@ -1858,6 +1959,7 @@ def main() -> int:
                         str(SKILL_DIR / "scripts" / "构造生产规划请求.py"),
                         "--pieces", str(pieces_path),
                         "--texture-set", str(merged_ts_path),
+                        "--garment-map", str(garment_map_path),
                         "--out", str(out_dir),
                         "--multi-scheme",
                         "--max-schemes", str(args.max_schemes),
@@ -1869,8 +1971,6 @@ def main() -> int:
                         plan_request_cmd.extend(["--geometry-hints", str(gh_path)])
                     if args.visual_elements:
                         plan_request_cmd.extend(["--visual-elements", args.visual_elements])
-                    if args.ai_map:
-                        plan_request_cmd.extend(["--garment-map", args.ai_map])
                     run_step(plan_request_cmd)
                     print(f"\n[提示] 多方案生产规划 AI 请求已构造。请启动子 Agent 阅读以下文件并输出 ai_multi_production_plan.json：")
                     print(f"  提示词文件: {out_dir / 'ai_production_plan_prompt.txt'}")
@@ -1887,7 +1987,10 @@ def main() -> int:
                     "--production-plan", str(multi_plan_path),
                     "--out", str(out_dir),
                     "--multi-scheme",
+                    "--pieces", str(pieces_path),
                 ]
+                if template_assets:
+                    apply_cmd.extend(["--fixed-garment-map", str(garment_map_path)])
                 run_step(apply_cmd)
                 if args.reuse_cache and not plan_loaded_from_cache:
                     cache_save(out_dir, "multi_production_plan", plan_hash, multi_plan_path)
@@ -1954,12 +2057,18 @@ def main() -> int:
         if len(texture_sets) == 2:
             print(f"\n[双源模式] 两套看板均成功，将分别渲染两种风格")
             for ts in texture_sets:
-                rc = _run_render_pipeline(args, out_dir, ts["path"], ts["suffix"], pieces_path)
+                rc = _run_render_pipeline(
+                    args, out_dir, ts["path"], ts["suffix"],
+                    pieces_path, garment_map_path, template_assets,
+                )
                 if rc != 0:
                     print(f"[警告] 风格 {ts['suffix']} 的渲染流水线返回非零: {rc}")
         else:
             print(f"\n[双源模式] 仅一套看板成功 ({texture_sets[0]['source']})，使用该套继续")
-            rc = _run_render_pipeline(args, out_dir, texture_sets[0]["path"], texture_sets[0]["suffix"], pieces_path)
+            rc = _run_render_pipeline(
+                args, out_dir, texture_sets[0]["path"], texture_sets[0]["suffix"],
+                pieces_path, garment_map_path, template_assets,
+            )
             if rc != 0:
                 return rc
 
@@ -2008,8 +2117,11 @@ def main() -> int:
     if not args.texture_set:
         texture_set_path = crop_collection_board(board_path, out_dir, args.crop_inset, not args.no_tile_repair, palette=palette)
 
-    # 部位映射（单源模式下执行；双源模式下已在并行线程中完成）
-    run_garment_mapping(args, pieces_path, out_dir)
+    # 部位映射（模板模式直接使用模板库固定映射；非模板保持旧流程）
+    if template_assets:
+        print("[模板复用] 单源模式跳过部位映射生成，直接使用模板库 garment_map。")
+    else:
+        run_garment_mapping(args, pieces_path, out_dir)
 
     qc_cmd = [
         sys.executable,
@@ -2062,7 +2174,13 @@ def main() -> int:
     # Phase 3: 生产规划（合并部位识别 + 审美决策）
     # ============================================================
     # 生成 production_context（用于缓存 key 和状态追踪）
-    ctx_path = build_production_context(args, out_dir)
+    ctx_path = build_production_context(
+        args,
+        out_dir,
+        pieces_path=pieces_path,
+        garment_map_path=garment_map_path,
+        template_assets=template_assets,
+    )
 
     # 根据模式选择路径
     use_legacy = args.mode == "legacy"
@@ -2077,7 +2195,10 @@ def main() -> int:
                 str(SKILL_DIR / "scripts" / "应用生产规划.py"),
                 "--production-plan", str(provided),
                 "--out", str(out_dir),
+                "--pieces", str(pieces_path),
             ]
+            if template_assets:
+                apply_cmd.extend(["--fixed-garment-map", str(garment_map_path)])
             run_step(apply_cmd)
             print(f"[生产规划] 已应用用户提供的规划: {provided}")
         else:
@@ -2090,7 +2211,7 @@ def main() -> int:
                 sys.executable,
                 str(SKILL_DIR / "scripts" / "构造审美请求.py"),
                 "--pieces", str(pieces_path),
-                "--garment-map", str(out_dir / "garment_map.json"),
+                "--garment-map", str(garment_map_path),
                 "--texture-set", str(texture_set_path),
                 "--out", str(out_dir),
             ]
@@ -2108,7 +2229,7 @@ def main() -> int:
         plan_loaded_from_cache = False
         if args.reuse_cache:
             plan_hash = {
-                "pattern_image": file_sha256(args.pattern),
+                "pattern_image": pattern_hash_for_run(args, pieces_path),
                 "texture_set": file_sha256(texture_set_path),
                 "garment_type": args.garment_type,
                 "brief": file_sha256(args.brief) if args.brief else "",
@@ -2133,6 +2254,7 @@ def main() -> int:
                     str(SKILL_DIR / "scripts" / "构造生产规划请求.py"),
                     "--pieces", str(pieces_path),
                     "--texture-set", str(texture_set_path),
+                    "--garment-map", str(garment_map_path),
                     "--out", str(out_dir),
                 ]
                 if args.brief:
@@ -2142,8 +2264,6 @@ def main() -> int:
                     plan_request_cmd.extend(["--geometry-hints", str(gh_path)])
                 if args.visual_elements:
                     plan_request_cmd.extend(["--visual-elements", args.visual_elements])
-                if args.ai_map:
-                    plan_request_cmd.extend(["--garment-map", args.ai_map])
                 run_step(plan_request_cmd)
                 print("\n[提示] 生产规划 AI 请求已构造。请启动子 Agent 阅读以下文件并输出 ai_production_plan.json：")
                 print(f"  提示词文件: {out_dir / 'ai_production_plan_prompt.txt'}")
@@ -2159,7 +2279,10 @@ def main() -> int:
                 str(SKILL_DIR / "scripts" / "应用生产规划.py"),
                 "--production-plan", str(production_plan_path),
                 "--out", str(out_dir),
+                "--pieces", str(pieces_path),
             ]
+            if template_assets:
+                apply_cmd.extend(["--fixed-garment-map", str(garment_map_path)])
             run_step(apply_cmd)
             if args.reuse_cache and not plan_loaded_from_cache:
                 cache_save(out_dir, "production_plan", plan_hash, production_plan_path)
@@ -2174,7 +2297,7 @@ def main() -> int:
         "--texture-set",
         str(texture_set_path),
         "--garment-map",
-        str(out_dir / "garment_map.json"),
+        str(garment_map_path),
         "--out",
         str(out_dir),
     ]
@@ -2305,14 +2428,17 @@ def main() -> int:
                         str(SKILL_DIR / "scripts" / "应用生产规划.py"),
                         "--production-plan", str(revised_plan_path),
                         "--out", str(out_dir),
+                        "--pieces", str(pieces_path),
                     ]
+                    if template_assets:
+                        apply_cmd.extend(["--fixed-garment-map", str(garment_map_path)])
                     run_step(apply_cmd)
                     plan_cmd = [
                         sys.executable,
                         str(SKILL_DIR / "scripts" / "创建填充计划.py"),
                         "--pieces", str(pieces_path),
                         "--texture-set", str(texture_set_path),
-                        "--garment-map", str(out_dir / "garment_map.json"),
+                        "--garment-map", str(garment_map_path),
                         "--out", str(out_dir),
                         "--ai-plan", str(out_dir / "ai_piece_fill_plan.json"),
                     ]
@@ -2322,7 +2448,7 @@ def main() -> int:
                         str(SKILL_DIR / "scripts" / "创建填充计划.py"),
                         "--pieces", str(pieces_path),
                         "--texture-set", str(texture_set_path),
-                        "--garment-map", str(out_dir / "garment_map.json"),
+                        "--garment-map", str(garment_map_path),
                         "--out", str(out_dir),
                         "--ai-plan", str(revised_plan_path),
                     ]
@@ -2460,7 +2586,7 @@ def main() -> int:
         "面料看板": str(board_path),
         "面料组合": str(texture_set_path.resolve()),
         "裁片清单": str(pieces_path.resolve()),
-        "部位映射": str((out_dir / "garment_map.json").resolve()),
+        "部位映射": str(garment_map_path.resolve()),
         "裁片填充计划": str((out_dir / "piece_fill_plan.json").resolve()),
         "渲染目录": str(rendered_dir.resolve()),
         "预览图": str((rendered_dir / "preview.png").resolve()),

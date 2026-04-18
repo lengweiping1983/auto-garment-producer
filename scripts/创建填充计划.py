@@ -515,6 +515,9 @@ def apply_symmetry_relations(entries: list[dict], garment_map: dict, pieces_payl
     4. slave 的 base/overlay/trim 完全复制 master 的
     5. slave 的纹理层面 mirror_x/mirror_y 置 false（镜像在 PNG 层面做）
     6. 在 slave entry 中标记 symmetry_source 和 symmetry_transform
+
+    注意：front / sleeve / collar 这类成对裁片的商业目标是“主纹理观感一致”，
+    不是最终 PNG 镜像复制。它们由 enforce_pair_texture_constraints 处理。
     """
     import sys
     from pathlib import Path
@@ -527,6 +530,18 @@ def apply_symmetry_relations(entries: list[dict], garment_map: dict, pieces_payl
     gm_pieces = {p["piece_id"]: p for p in garment_map.get("pieces", [])}
     entries_by_id = {e["piece_id"]: e for e in entries}
 
+    def allows_png_symmetry(piece_id: str, rel: dict) -> bool:
+        gm = gm_pieces.get(piece_id, {})
+        role = gm.get("garment_role", "")
+        group = gm.get("symmetry_group") or gm.get("same_shape_group") or ""
+        pair_texture_roles = {"front_body", "front_hero", "sleeve_pair", "collar_or_upper_trim"}
+        pair_texture_groups = ("front", "sleeve", "collar")
+        if rel.get("render_strategy") == "png_mirror" or gm.get("allow_png_symmetry"):
+            return True
+        if role in pair_texture_roles or any(token in group for token in pair_texture_groups):
+            return False
+        return True
+
     # 构建 slave→master 映射
     slave_map = {}
 
@@ -534,7 +549,7 @@ def apply_symmetry_relations(entries: list[dict], garment_map: dict, pieces_payl
     for piece_id, gm in gm_pieces.items():
         for rel in gm.get("symmetry_relations", []):
             target_pid = rel.get("target_piece_id")
-            if target_pid and target_pid in entries_by_id:
+            if target_pid and target_pid in entries_by_id and allows_png_symmetry(piece_id, rel):
                 slave_map[target_pid] = {
                     "source": piece_id,
                     "transform": {"mirror_x": rel.get("mirror_x", False), "mirror_y": rel.get("mirror_y", False)},
@@ -551,8 +566,7 @@ def apply_symmetry_relations(entries: list[dict], garment_map: dict, pieces_payl
                 master_role = master_gm.get("garment_role", "")
                 # 大身裁片（front/back/secondary）默认不自动应用，需人工在 base.json 配置
                 auto_symmetry_roles = {
-                    "sleeve_pair", "sleeve_or_side_panel",
-                    "collar_or_upper_trim", "hem_or_lower_trim",
+                    "sleeve_or_side_panel", "hem_or_lower_trim",
                     "trim_strip", "matched_panel", "small_detail",
                 }
                 can_auto_apply = master_role in auto_symmetry_roles
@@ -617,7 +631,177 @@ def apply_symmetry_relations(entries: list[dict], garment_map: dict, pieces_payl
     return new_entries
 
 
-def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: dict, motif_geometries: dict = None, brief: dict = None) -> tuple[list[dict], list[dict]]:
+def _base_texture_direction(entry: dict) -> str:
+    base = entry.get("base")
+    if isinstance(base, dict):
+        return base.get("texture_direction") or entry.get("texture_direction", "")
+    return entry.get("texture_direction", "")
+
+
+def _is_pair_texture_piece(item: dict) -> bool:
+    role = item.get("garment_role", "")
+    group = item.get("symmetry_group") or item.get("same_shape_group") or ""
+    return (
+        role in {"front_body", "front_hero", "sleeve_pair", "collar_or_upper_trim"}
+        or any(token in group for token in ("front", "sleeve", "collar"))
+    )
+
+
+def restore_pair_metadata(entries: list[dict], garment_map: dict, issues: list[dict]) -> None:
+    """从 garment_map 恢复左右成对裁片的 group 信息，防止 AI 计划丢掉约束。"""
+    gm_by_id = {p.get("piece_id"): p for p in garment_map.get("pieces", [])}
+    for entry in entries:
+        gm = gm_by_id.get(entry.get("piece_id"))
+        if not gm or not _is_pair_texture_piece(gm):
+            continue
+        changed = []
+        for key in ("zone", "symmetry_group", "same_shape_group"):
+            value = gm.get(key, "")
+            if value and entry.get(key) != value:
+                entry[key] = value
+                changed.append(key)
+        if not entry.get("texture_direction") and gm.get("texture_direction"):
+            entry["texture_direction"] = gm.get("texture_direction")
+            changed.append("texture_direction")
+        # 保留 AI 的 front_hero 判断，但普通 front/sleeve/collar 角色从模板恢复。
+        if entry.get("garment_role") != "front_hero" and gm.get("garment_role") and entry.get("garment_role") != gm.get("garment_role"):
+            entry["garment_role"] = gm.get("garment_role")
+            changed.append("garment_role")
+        if changed:
+            issues.append({
+                "type": "restored_pair_metadata",
+                "severity": "high",
+                "piece_id": entry["piece_id"],
+                "fields": changed,
+                "message": "从 garment_map 恢复左右成对裁片的分组/方向信息，防止 AI 计划绕过 pair 约束",
+            })
+
+
+def _texture_tile_size(texture_set: dict, texture_id: str, base: dict) -> tuple[int, int]:
+    tex_w, tex_h = 512, 512
+    for tex in texture_set.get("textures", []):
+        if tex.get("texture_id") != texture_id and tex.get("role") != texture_id:
+            continue
+        path = tex.get("path", "")
+        if path and Path(path).exists():
+            try:
+                with Image.open(path) as img:
+                    tex_w, tex_h = img.size
+            except Exception:
+                pass
+        break
+    scale = max(0.05, float(base.get("scale", 1.0) or 1.0))
+    tex_w = max(1, round(tex_w * scale))
+    tex_h = max(1, round(tex_h * scale))
+    rotation = int(float(base.get("rotation", 0) or 0)) % 180
+    if rotation == 90:
+        tex_w, tex_h = tex_h, tex_w
+    return tex_w, tex_h
+
+
+def _pair_group_mode(group: str) -> str:
+    if "front" in group:
+        return "front_seam"
+    if "sleeve" in group:
+        return "identical_pair"
+    if "collar" in group:
+        return "identical_pair"
+    return "pair"
+
+
+def enforce_pair_texture_constraints(
+    entries: list[dict],
+    garment_map: dict,
+    pieces_payload: dict,
+    texture_set: dict,
+    issues: list[dict],
+) -> None:
+    """强制左右成对裁片的 base 主纹理一致；前片额外做中缝相位约束。"""
+    restore_pair_metadata(entries, garment_map, issues)
+    by_piece = {p["piece_id"]: p for p in pieces_payload.get("pieces", [])}
+    groups: dict[str, list[dict]] = {}
+    for entry in entries:
+        if entry.get("intentional_asymmetry"):
+            continue
+        if not _is_pair_texture_piece(entry):
+            continue
+        group = entry.get("symmetry_group") or entry.get("same_shape_group")
+        if not group:
+            continue
+        groups.setdefault(group, []).append(entry)
+
+    copy_keys = (
+        "fill_type", "texture_id", "solid_id", "scale", "rotation",
+        "mirror_x", "mirror_y", "texture_direction", "respect_pattern_orientation",
+    )
+    for group, members in groups.items():
+        if len(members) < 2:
+            continue
+        members = sorted(members, key=lambda e: (by_piece.get(e["piece_id"], {}).get("source_x", 0), e["piece_id"]))
+        master = members[0]
+        master_base = master.get("base")
+        if not isinstance(master_base, dict):
+            continue
+        mode = _pair_group_mode(group)
+        master_piece = by_piece.get(master["piece_id"], {})
+        tex_w, tex_h = _texture_tile_size(texture_set, master_base.get("texture_id", ""), master_base)
+        master_ox = int(master_base.get("offset_x", 0) or 0)
+        master_oy = int(master_base.get("offset_y", 0) or 0)
+
+        for member in members:
+            base = member.get("base")
+            if not isinstance(base, dict):
+                member["base"] = dict(master_base)
+                base = member["base"]
+            changed = []
+            for key in copy_keys:
+                if key in master_base and base.get(key) != master_base.get(key):
+                    base[key] = master_base.get(key)
+                    changed.append(key)
+            if mode == "front_seam" and member is not master:
+                piece = by_piece.get(member["piece_id"], {})
+                dx = piece.get("source_x", 0) - master_piece.get("source_x", 0)
+                dy = piece.get("source_y", 0) - master_piece.get("source_y", 0)
+                new_x = (master_ox - dx) % tex_w
+                new_y = (master_oy - dy) % tex_h
+            else:
+                new_x = master_ox
+                new_y = master_oy
+            if base.get("offset_x") != round(new_x):
+                base["offset_x"] = round(new_x)
+                changed.append("offset_x")
+            if base.get("offset_y") != round(new_y):
+                base["offset_y"] = round(new_y)
+                changed.append("offset_y")
+            base["pair_texture_constraint"] = mode
+            member["pair_texture_constraint"] = {
+                "group": group,
+                "mode": mode,
+                "source_piece_id": master["piece_id"],
+            }
+            member.pop("symmetry_source", None)
+            member.pop("symmetry_transform", None)
+            if changed:
+                issues.append({
+                    "type": "fixed_pair_texture_constraint",
+                    "severity": "high",
+                    "piece_id": member["piece_id"],
+                    "group": group,
+                    "mode": mode,
+                    "source_piece_id": master["piece_id"],
+                    "fields": sorted(set(changed)),
+                    "message": "强制左右成对裁片主纹理一致；前片按缝合相位约束，袖片/领贴按同相位约束",
+                })
+
+
+def enforce_validation(
+    entries: list[dict],
+    pieces_payload: dict,
+    texture_set: dict,
+    garment_map: dict | None = None,
+    motif_geometries: dict = None,
+    brief: dict = None,
+) -> tuple[list[dict], list[dict]]:
     """后端强制校验修正填充计划。"""
     issues = []
     by_piece = {p["piece_id"]: p for p in pieces_payload.get("pieces", [])}
@@ -629,6 +813,9 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
     secondary_id = choose(texture_ids, ["secondary", "main", "accent_light", "accent_mid", "dark_base"])
     dark_id = choose(texture_ids, ["dark_base", "dark", "secondary", "accent_light", "main"])
     trim_solid_id = choose(solid_ids, ["quiet_solid", "quiet_moss", "moss_green", "forest_green", "dark", "solid"])
+
+    garment_map = garment_map or {}
+    restore_pair_metadata(entries, garment_map, issues)
 
     # 1. 同组一致性修正（安全修正：支持 intentional_asymmetry 声明时跳过）
     group_templates: dict[str, dict] = {}
@@ -752,7 +939,7 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
         group = entry.get("symmetry_group") or entry.get("same_shape_group")
         if not group:
             continue
-        direction = entry.get("texture_direction", "")
+        direction = _base_texture_direction(entry)
         if direction:
             group_directions.setdefault(group, set()).add(direction)
     for group, directions in group_directions.items():
@@ -771,6 +958,9 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
 
     # 6b. 对花对条后重新同步同组一致性（防止对称组因对花被拆散）
     _resync_group_consistency(entries, issues)
+
+    # 6c. 强制左右成对裁片的主纹理约束。放在普通对花之后，确保 pair 约束最终生效。
+    enforce_pair_texture_constraints(entries, garment_map, pieces_payload, texture_set, issues)
 
     # 7. Nap（绒毛方向）一致性检查
     fabric_has_nap = brief.get("fabric", {}).get("has_nap", False) if brief else False
@@ -833,7 +1023,7 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
                 geo = max(motif_geometries.values(), key=lambda g: g.get("pixel_width", 0) * g.get("pixel_height", 0))
         if not geo:
             continue
-        texture_dir = entry.get("texture_direction", "transverse")
+        texture_dir = _base_texture_direction(entry) or "transverse"
         recommended = compute_motif_rotation(geo.get("orientation", "irregular"), texture_dir, piece)
         current = overlay.get("rotation", 0)
         if abs(current - recommended) > 15:
@@ -935,7 +1125,10 @@ def _resync_group_consistency(entries: list[dict], issues: list) -> None:
         else:
             template = group_templates[group]
             changed = False
-            for key in ("fill_type", "texture_id", "scale", "rotation", "offset_x", "offset_y", "mirror_x", "mirror_y"):
+            keys = ["fill_type", "texture_id", "scale", "rotation", "mirror_x", "mirror_y"]
+            if not entry.get("pair_texture_constraint"):
+                keys.extend(["offset_x", "offset_y"])
+            for key in keys:
                 if base.get(key) != template.get(key):
                     base[key] = template[key]
                     changed = True
@@ -974,7 +1167,7 @@ def _apply_pattern_matching(entries: list[dict], by_piece: dict, texture_set: di
         if not base or base.get("fill_type") != "texture":
             continue
         tid = base.get("texture_id", "")
-        direction = entry.get("texture_direction", "transverse")
+        direction = _base_texture_direction(entry) or "transverse"
         key = f"{tid}:{direction}"
         groups.setdefault(key, []).append(entry)
 
@@ -1019,6 +1212,8 @@ def _apply_pattern_matching(entries: list[dict], by_piece: dict, texture_set: di
                 continue
 
             group = entry.get("symmetry_group") or entry.get("same_shape_group")
+            if group and _pair_group_mode(group) in {"front_seam", "identical_pair"}:
+                continue
             if group:
                 if group in seen_groups:
                     continue
@@ -1031,11 +1226,11 @@ def _apply_pattern_matching(entries: list[dict], by_piece: dict, texture_set: di
             # pattern image 中的相对位移 → 纹理空间位移
             dx = bbox.get("x", 0) - anchor_bbox.get("x", 0)
             dy = bbox.get("y", 0) - anchor_bbox.get("y", 0)
-            tex_dx = dx / anchor_scale
-            tex_dy = dy / anchor_scale
+            tex_dx = dx
+            tex_dy = dy
 
-            new_x = (anchor_ox + tex_dx) % tex_w
-            new_y = (anchor_oy + tex_dy) % tex_h
+            new_x = (anchor_ox - tex_dx) % max(1, round(tex_w * anchor_scale))
+            new_y = (anchor_oy - tex_dy) % max(1, round(tex_h * anchor_scale))
 
             old_x = entry["base"].get("offset_x", 0)
             old_y = entry["base"].get("offset_y", 0)
@@ -1122,7 +1317,7 @@ def main() -> int:
     entries = apply_symmetry_relations(entries, garment_map, pieces_payload)
 
     # 阶段 2：强制校验修正
-    entries, fix_issues = enforce_validation(entries, pieces_payload, texture_set, motif_geometries, brief)
+    entries, fix_issues = enforce_validation(entries, pieces_payload, texture_set, garment_map, motif_geometries, brief)
 
     # 重新组装 art_direction
     hero_ids = [e["piece_id"] for e in entries if (e.get("overlay") or {}).get("fill_type") == "motif"]

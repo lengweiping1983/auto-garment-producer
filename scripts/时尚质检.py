@@ -19,6 +19,21 @@ def collect_layer_refs(plan_entry: dict) -> list[dict]:
     return [plan_entry]
 
 
+def base_texture_direction(plan_entry: dict) -> str:
+    base = plan_entry.get("base")
+    if isinstance(base, dict):
+        return base.get("texture_direction") or plan_entry.get("texture_direction", "")
+    return plan_entry.get("texture_direction", "")
+
+
+def pair_group_mode(group: str) -> str:
+    if "front" in group:
+        return "front_seam"
+    if "sleeve" in group or "collar" in group:
+        return "identical_pair"
+    return ""
+
+
 def approved_assets(texture_set: dict) -> tuple[set[str], set[str], set[str]]:
     textures = {item.get("texture_id") or item.get("role") for item in texture_set.get("textures", []) if item.get("approved", False)}
     motifs = {item.get("motif_id") or item.get("role") for item in texture_set.get("motifs", []) if item.get("approved", False)}
@@ -216,7 +231,7 @@ def main() -> int:
         group = entry.get("symmetry_group") or entry.get("same_shape_group")
         if group:
             # 检查 texture_direction 一致性
-            direction = entry.get("texture_direction", "")
+            direction = base_texture_direction(entry)
             if direction:
                 group_directions.setdefault(group, set()).add(direction)
         if not group:
@@ -232,12 +247,16 @@ def main() -> int:
         else:
             ref = group_base_layers[group]["ref"]
             mismatches = []
-            for key in ("texture_id", "scale", "rotation", "offset_x", "offset_y", "mirror_x", "mirror_y"):
+            keys = ["texture_id", "scale", "rotation", "mirror_x", "mirror_y"]
+            if pair_group_mode(group) != "front_seam":
+                keys.extend(["offset_x", "offset_y"])
+            for key in keys:
                 if base.get(key) != ref.get(key):
                     mismatches.append(key)
             if mismatches:
                 issues.append({
                     "type": "group_layer_mismatch",
+                    "severity": "high",
                     "piece_id": entry["piece_id"],
                     "group": group,
                     "mismatched_keys": mismatches,
@@ -254,6 +273,53 @@ def main() -> int:
                 "group": group,
                 "directions": list(directions),
                 "message": f"同组裁片 texture_direction 不一致: {directions}",
+            })
+
+    # 左右成对裁片强约束：front/sleeve/collar 必须有一致主纹理；front 还必须声明前中缝对花。
+    for group, payload in group_base_layers.items():
+        mode = pair_group_mode(group)
+        if not mode or len(payload.get("pieces", [])) < 2:
+            continue
+        refs = []
+        constraint_modes = set()
+        for piece_id in payload["pieces"]:
+            entry = next((e for e in fill_plan.get("pieces", []) if e.get("piece_id") == piece_id), {})
+            base = entry.get("base") if isinstance(entry.get("base"), dict) else {}
+            refs.append({
+                "piece_id": piece_id,
+                "fill_type": base.get("fill_type"),
+                "texture_id": base.get("texture_id"),
+                "solid_id": base.get("solid_id"),
+                "scale": base.get("scale"),
+                "rotation": base.get("rotation"),
+                "texture_direction": base.get("texture_direction"),
+            })
+            marker = entry.get("pair_texture_constraint") or base.get("pair_texture_constraint")
+            if isinstance(marker, dict):
+                constraint_modes.add(marker.get("mode", ""))
+            elif isinstance(marker, str):
+                constraint_modes.add(marker)
+        comparable = [
+            (r["fill_type"], r["texture_id"], r["solid_id"], r["scale"], r["rotation"], r["texture_direction"])
+            for r in refs
+        ]
+        if len(set(comparable)) > 1:
+            issues.append({
+                "type": "pair_base_texture_mismatch",
+                "severity": "high",
+                "group": group,
+                "pieces": refs,
+                "message": "左右成对裁片主纹理不一致，必须由 pair texture constraint 修正",
+            })
+        expected_mode = "front_seam" if mode == "front_seam" else "identical_pair"
+        if expected_mode not in constraint_modes:
+            issues.append({
+                "type": "missing_pair_texture_constraint",
+                "severity": "high",
+                "group": group,
+                "expected_mode": expected_mode,
+                "piece_ids": payload["pieces"],
+                "message": "左右成对裁片缺少主纹理约束标记；前片必须有缝合相位约束，袖片/领贴必须有同相位约束",
             })
 
     for entry in fill_plan.get("pieces", []):

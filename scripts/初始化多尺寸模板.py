@@ -29,12 +29,25 @@ from 提取裁片 import (
     analyze_piece_orientation,
     guess_role,
 )
+from template_loader import (
+    find_template_by_id,
+    format_template_garment_map,
+    match_pieces_to_template,
+    resolve_template_assets,
+)
 from PIL import Image, ImageDraw, ImageFont
 
 # 模板根目录
 SKILL_DIR = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = SKILL_DIR / "templates"
 INDEX_PATH = TEMPLATES_DIR / "index.json"
+
+
+def _font_for_size(width: int, height: int):
+    try:
+        return ImageFont.truetype("Arial.ttf", max(14, min(width, height) // 45))
+    except Exception:
+        return ImageFont.load_default()
 
 
 def _load_json(path: Path) -> dict:
@@ -89,10 +102,7 @@ def _build_overview_with_suffix(prepared_path: Path, pieces: list[dict],
     bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
     bg.alpha_composite(img)
     draw = ImageDraw.Draw(bg)
-    try:
-        font = ImageFont.truetype("Arial.ttf", max(14, min(img.size) // 45))
-    except Exception:
-        font = ImageFont.load_default()
+    font = _font_for_size(*img.size)
     for piece in pieces:
         b = piece["bbox"]
         draw.rectangle(
@@ -108,6 +118,98 @@ def _build_overview_with_suffix(prepared_path: Path, pieces: list[dict],
         )
     bg.convert("RGB").save(out_path)
     return out_path
+
+
+def _draw_garment_map_overview(pieces_payload: dict, garment_map: dict, out_path: Path) -> Path:
+    overview = Path(pieces_payload.get("overview_image", ""))
+    prepared = Path(pieces_payload.get("prepared_pattern", ""))
+    source = overview if overview.exists() else prepared
+    image = Image.open(source).convert("RGB") if source.exists() else Image.new(
+        "RGB",
+        (
+            int(pieces_payload.get("canvas", {}).get("width", 1200)),
+            int(pieces_payload.get("canvas", {}).get("height", 1200)),
+        ),
+        "white",
+    )
+    draw = ImageDraw.Draw(image)
+    width, height = image.size
+    font = _font_for_size(width, height)
+    colors = {
+        "body": (33, 97, 140),
+        "secondary": (42, 157, 143),
+        "trim": (120, 72, 0),
+        "detail": (90, 90, 90),
+    }
+    by_id = {item["piece_id"]: item for item in garment_map.get("pieces", [])}
+    for piece in pieces_payload.get("pieces", []):
+        item = by_id.get(piece["piece_id"])
+        if not item:
+            continue
+        b = piece["bbox"]
+        color = colors.get(item.get("zone", "detail"), (40, 40, 40))
+        draw.rectangle(
+            [b["x"], b["y"], b["x"] + b["width"], b["y"] + b["height"]],
+            outline=color,
+            width=max(3, min(width, height) // 400),
+        )
+        label = f"{piece['piece_id']} {item.get('garment_role', 'unknown')} {item.get('confidence', 0):.2f}"
+        draw.text((b["x"] + 8, b["y"] + 8), label, fill=color, font=font)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(out_path, quality=95)
+    return out_path
+
+
+def build_template_garment_assets(template_id: str, size_label: str, force: bool = False) -> list[str]:
+    """生成指定模板尺寸的固定 garment_map 与总览图。"""
+    size_label = size_label.lower()
+    pieces_path = TEMPLATES_DIR / template_id / size_label / f"pieces_{size_label}.json"
+    if not pieces_path.exists():
+        return [f"missing pieces: {pieces_path}"]
+
+    garment_map_path = TEMPLATES_DIR / template_id / size_label / f"garment_map_{size_label}.json"
+    garment_map_overview_path = TEMPLATES_DIR / template_id / size_label / f"garment_map_overview_{size_label}.jpg"
+    if not force and garment_map_path.exists() and garment_map_overview_path.exists():
+        return []
+
+    template = find_template_by_id(template_id, size_label) or find_template_by_id(template_id, "base")
+    if not template:
+        return [f"missing template metadata: {template_id}/{size_label}"]
+
+    pieces_payload = _load_json(pieces_path)
+    matched, avg_conf = match_pieces_to_template(pieces_payload.get("pieces", []), template)
+    if not matched or avg_conf < 0.75:
+        return [f"template match failed: {template_id}/{size_label} avg_conf={avg_conf:.2f}"]
+
+    garment_map = format_template_garment_map(matched, template)
+    garment_map["asset_size_label"] = size_label
+    garment_map["pieces_json"] = str(pieces_path.resolve())
+    _save_json(garment_map_path, garment_map)
+    _draw_garment_map_overview(pieces_payload, garment_map, garment_map_overview_path)
+    print(f"[生成] 模板部位映射: {garment_map_path}")
+    print(f"[生成] 模板部位总览: {garment_map_overview_path}")
+    return []
+
+
+def validate_or_backfill_template_assets(backfill: bool = False, force: bool = False) -> int:
+    index = _load_json(INDEX_PATH) if INDEX_PATH.exists() else {"templates": []}
+    issues = []
+    for entry in index.get("templates", []):
+        template_id = entry.get("template_id", "")
+        for size_label in entry.get("sizes", []) or [entry.get("default_size", "s")]:
+            size_label = str(size_label).lower()
+            if backfill:
+                issues.extend(build_template_garment_assets(template_id, size_label, force=force))
+            assets = resolve_template_assets(template_id=template_id, size_label=size_label)
+            if not assets:
+                issues.append(f"incomplete assets: {template_id}/{size_label}")
+    if issues:
+        print("[模板资产校验] 未通过:")
+        for issue in issues:
+            print(f"  - {issue}")
+        return 1
+    print("[模板资产校验] 全部模板资产完整。")
+    return 0
 
 
 def extract_pieces(mask_path: Path, out_subdir: Path, size_label: str, min_area: int = 1000) -> dict:
@@ -280,16 +382,29 @@ def update_template_index(template_id: str, template_name: str, garment_type: st
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="多尺寸模板初始化")
-    parser.add_argument("--template-id", required=True, help="模板唯一标识，如 BFSK26308XCJ01L")
-    parser.add_argument("--base-mask", required=True, help="基准尺寸 mask 路径（-S）")
-    parser.add_argument("--size-masks", nargs="+", required=True,
+    parser.add_argument("--template-id", default="", help="模板唯一标识，如 BFSK26308XCJ01L")
+    parser.add_argument("--base-mask", default="", help="基准尺寸 mask 路径（-S）")
+    parser.add_argument("--size-masks", nargs="+", default=[],
                         help="其他尺寸 mask 路径列表（-M -L -XL -XXL）")
-    parser.add_argument("--size-labels", nargs="+", required=True,
+    parser.add_argument("--size-labels", nargs="+", default=[],
                         help="对应尺寸标签（m l xl xxl），顺序与 --size-masks 一致")
     parser.add_argument("--garment-type", default="children outerwear set", help="服装类型")
     parser.add_argument("--min-area", type=int, default=1000, help="最小裁片面积")
     parser.add_argument("--alpha-threshold", type=int, default=16, help="Alpha 通道阈值")
+    parser.add_argument("--validate-only", action="store_true", help="只校验模板固定资产是否完整，不改写文件")
+    parser.add_argument("--backfill-derived-assets", action="store_true", help="补齐缺失的模板派生资产（garment_map 与总览图）")
+    parser.add_argument("--force-backfill", action="store_true", help="强制重建模板派生资产")
     args = parser.parse_args()
+
+    if args.validate_only or args.backfill_derived_assets:
+        return validate_or_backfill_template_assets(
+            backfill=args.backfill_derived_assets,
+            force=args.force_backfill,
+        )
+
+    if not args.template_id or not args.base_mask or not args.size_masks:
+        print("[错误] 初始化模板时必须提供 --template-id、--base-mask 和 --size-masks。", file=sys.stderr)
+        return 1
 
     if len(args.size_masks) != len(args.size_labels):
         print("[错误] --size-masks 和 --size-labels 数量必须一致", file=sys.stderr)
@@ -388,6 +503,14 @@ def main() -> int:
         }
         _save_json(template_dir / f"{size_label}.json", size_template)
         print(f"[生成] 尺寸变体: {template_dir / f'{size_label}.json'}")
+
+    # ========== 6. 生成各尺寸固定部位映射与总览 ==========
+    for size_label in all_sizes:
+        errors = build_template_garment_assets(args.template_id, size_label, force=True)
+        if errors:
+            for error in errors:
+                print(f"[错误] {error}", file=sys.stderr)
+            return 1
 
     print("\n" + "=" * 60)
     print("初始化完成。请检查以下文件并手动修正角色定义：")
