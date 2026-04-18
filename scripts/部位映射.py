@@ -207,19 +207,71 @@ def draw_overview(pieces_payload: dict, garment_map: dict, out_path: Path) -> Pa
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="从裁片清单推断服装部位角色与对称性。")
+    parser = argparse.ArgumentParser(description="从裁片清单推断服装部位角色与对称性。优先使用AI识别结果。")
     parser.add_argument("--pieces", required=True, help="裁片清单 JSON 路径（pieces.json）")
     parser.add_argument("--out", required=True, help="输出目录")
+    parser.add_argument("--ai-map", default="", help="AI子Agent输出的 ai_garment_map.json 路径。若提供，优先使用。")
     args = parser.parse_args()
 
     pieces_payload = load_json(args.pieces)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    roles = infer_roles(pieces_payload)
+
+    # 双路径：优先AI识别，无则几何启发
+    ai_map_path = Path(args.ai_map) if args.ai_map else None
+    if ai_map_path and ai_map_path.exists():
+        try:
+            ai_map = load_json(ai_map_path)
+            # 简单合并：AI输出 piece_id/garment_role/zone/symmetry_group/same_shape_group
+            roles = []
+            ai_by_id = {p["piece_id"]: p for p in ai_map.get("pieces", [])}
+            for piece in pieces_payload.get("pieces", []):
+                pid = piece["piece_id"]
+                ai = ai_by_id.get(pid, {})
+                if ai:
+                    aspect = piece["width"] / max(1, piece["height"])
+                    role = ai.get("garment_role", "small_detail")
+                    zone = ai.get("zone", "detail")
+                    entry = {
+                        "piece_id": pid,
+                        "garment_role": role,
+                        "zone": zone,
+                        "symmetry_group": ai.get("symmetry_group", ""),
+                        "same_shape_group": ai.get("same_shape_group", ""),
+                        "direction_degrees": direction_degrees(piece),
+                        "texture_direction": texture_direction(role, zone, aspect),
+                        "confidence": ai.get("confidence", 0.7),
+                        "reason": ai.get("reason", "AI识别"),
+                    }
+                else:
+                    # 单个裁片fallback
+                    aspect = piece["width"] / max(1, piece["height"])
+                    entry = {
+                        "piece_id": pid,
+                        "garment_role": "small_detail",
+                        "zone": "detail",
+                        "symmetry_group": "",
+                        "same_shape_group": "",
+                        "direction_degrees": direction_degrees(piece),
+                        "texture_direction": texture_direction("small_detail", "detail", aspect),
+                        "confidence": 0.5,
+                        "reason": "AI未覆盖，回退",
+                    }
+                roles.append(entry)
+            method = "ai_driven"
+            print(f"[部位映射] 使用AI识别结果: {ai_map_path}")
+        except Exception as exc:
+            print(f"[警告] AI识别结果处理失败 ({exc})，回退到几何启发")
+            roles = infer_roles(pieces_payload)
+            method = "geometry_inference"
+    else:
+        roles = infer_roles(pieces_payload)
+        method = "geometry_inference"
+
     confidence = round(sum(item["confidence"] for item in roles) / max(1, len(roles)), 2)
     payload = {
         "map_id": "garment_map_v1",
-        "method": "geometry_inference",
+        "method": method,
         "confidence": confidence,
         "pieces": roles,
     }

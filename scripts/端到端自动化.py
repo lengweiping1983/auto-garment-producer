@@ -291,40 +291,75 @@ def clean_motif_bottom(panel: Image.Image, text_threshold: float = 0.08) -> Imag
     return panel
 
 
+def _estimate_bg_color(img: Image.Image) -> tuple[tuple[int, int, int], int, int]:
+    """采样四角 + 边缘估计背景色。返回 (mean_rgb, brightness_threshold, chroma_threshold)。"""
+    w, h = img.size
+    # 采样四角 8x8 区域
+    corners = []
+    for cx, cy in [(0, 0), (w - 8, 0), (0, h - 8), (w - 8, h - 8)]:
+        if cx < 0 or cy < 0:
+            continue
+        crop = img.crop((cx, cy, min(cx + 8, w), min(cy + 8, h)))
+        for px in crop.getdata():
+            if len(px) >= 3:
+                corners.append(px[:3])
+    if not corners:
+        return ((255, 255, 255), 700, 50)
+
+    # 计算均值和标准差
+    n = len(corners)
+    mean_r = sum(c[0] for c in corners) // n
+    mean_g = sum(c[1] for c in corners) // n
+    mean_b = sum(c[2] for c in corners) // n
+    var = sum((c[0] - mean_r) ** 2 + (c[1] - mean_g) ** 2 + (c[2] - mean_b) ** 2 for c in corners) / n
+    std = int(var ** 0.5)
+
+    # 亮度阈值：根据背景亮度自适应（暗背景时用更低阈值）
+    brightness = mean_r + mean_g + mean_b
+    bright_threshold = max(480, brightness - max(30, std * 2))
+
+    # 色度阈值：背景越不均匀，阈值越宽松
+    chroma_threshold = min(80, 35 + std)
+
+    return ((mean_r, mean_g, mean_b), bright_threshold, chroma_threshold)
+
+
 def make_motif_transparent(panel: Image.Image, threshold: int = 235) -> Image.Image:
-    """增强版透明背景去除：亮度+饱和度+边缘密度联合判断。
-    threshold 默认为 235，以兼容暖象牙白背景（如 #f3f1df ~ 243,241,223）。"""
+    """自适应透明背景去除：根据四角采样自动估计背景色范围。
+    兼容暖白/冷白/微蓝/浅灰背景，深色调主题也能正确处理。"""
     # 先裁剪底部可能的文字条带
     img = clean_motif_bottom(panel)
     img = img.convert("RGBA")
     pixels = img.load()
     width, height = img.size
 
+    # 自适应估计背景色
+    bg_mean, bright_thresh, chroma_thresh = _estimate_bg_color(img)
+
     for y in range(height):
         for x in range(width):
             r, g, b, a = pixels[x, y]
-            # 使用相对亮度和色度判断，兼容暖白/冷白/微蓝背景
             total = r + g + b
-            bright = total >= 705  # 平均 235，覆盖暖象牙白
-            low_chroma = max(r, g, b) - min(r, g, b) < 45
+            bright = total >= bright_thresh
+            low_chroma = max(r, g, b) - min(r, g, b) < chroma_thresh
             if bright and low_chroma:
                 pixels[x, y] = (r, g, b, 0)
             elif bright:
                 pixels[x, y] = (r, g, b, max(0, min(a, 140)))
 
-    # 二次清理：检测并去除孤立的高对比度文字像素（小面积高边缘区域）
+    # 二次清理：检测并去除孤立的高对比度文字像素
     gray = img.convert("L").filter(ImageFilter.FIND_EDGES)
     edge_pixels = list(gray.get_flattened_data())
     alpha = img.getchannel("A")
     alpha_pixels = list(alpha.get_flattened_data())
     for idx, edge_val in enumerate(edge_pixels):
         if edge_val > 120 and alpha_pixels[idx] > 0:
-            # 高边缘 + 不透明 = 可能是文字笔画
-            y, x = divmod(idx, width)
-            # 检查周围像素亮度，如果周围是白色背景则设为透明
-            r, g, b, a = pixels[x, y]
-            if r >= 230 and g >= 230 and b >= 230:
-                pixels[x, y] = (r, g, b, 0)
+            y_pos, x_pos = divmod(idx, width)
+            r, g, b, a = pixels[x_pos, y_pos]
+            # 自适应：如果像素接近背景色则透明
+            bg_dist = abs(r - bg_mean[0]) + abs(g - bg_mean[1]) + abs(b - bg_mean[2])
+            if bg_dist < chroma_thresh * 2:
+                pixels[x_pos, y_pos] = (r, g, b, 0)
 
     alpha = img.getchannel("A")
     bbox = alpha.getbbox()
@@ -334,7 +369,8 @@ def make_motif_transparent(panel: Image.Image, threshold: int = 235) -> Image.Im
 
 
 def quiet_solid_from_image(image: Image.Image, palette: dict = None, target_role: str = "trim") -> str:
-    """从图像平均色提取纯色，优先遵循 palette，避免硬编码颜色偏差。
+    """从图像提取纯色，使用 MedianCut 取主色（避免单像素平均的脏灰问题），
+    优先遵循 palette，避免硬编码颜色偏差。
 
     Args:
         image: 面板图像。
@@ -342,13 +378,37 @@ def quiet_solid_from_image(image: Image.Image, palette: dict = None, target_role
         target_role: 目标用途，决定从 palette 的哪个 tier 选色。
     """
     from PIL import ImageColor
+    from collections import Counter
 
-    sample = image.convert("RGB").resize((1, 1), Image.Resampling.LANCZOS)
-    r, g, b = sample.getpixel((0, 0))
-    img_hex = "#{:02x}{:02x}{:02x}".format(r, g, b)
+    # MedianCut 量化提取主色（避免花哨纹理平均成脏灰）
+    sample = image.convert("RGB").resize((160, 160), Image.Resampling.LANCZOS)
+    quantized = sample.quantize(colors=8, method=Image.Quantize.MEDIANCUT)
+    palette_raw = quantized.getpalette() or []
+    if hasattr(quantized, "get_flattened_data"):
+        used = Counter(quantized.get_flattened_data())
+    else:
+        used = Counter(quantized.getdata())
+
+    dominant_colors = []
+    for index, _ in used.most_common(4):
+        offset = index * 3
+        if offset + 2 >= len(palette_raw):
+            continue
+        rgb = tuple(palette_raw[offset:offset + 3])
+        # 跳过接近纯黑/纯白的极端值
+        brightness = sum(rgb) / 3
+        if brightness < 20 or brightness > 250:
+            continue
+        dominant_colors.append(rgb)
+
+    if not dominant_colors:
+        # fallback：单像素平均
+        sample = image.convert("RGB").resize((1, 1), Image.Resampling.LANCZOS)
+        dominant_colors = [sample.getpixel((0, 0))]
 
     if not palette:
-        return img_hex
+        r, g, b = dominant_colors[0]
+        return "#{:02x}{:02x}{:02x}".format(r, g, b)
 
     # 根据 target_role 从 palette 选最合适的颜色 tier
     if target_role in ("trim", "dark", "dark_base"):
@@ -367,10 +427,21 @@ def quiet_solid_from_image(image: Image.Image, palette: dict = None, target_role
             except Exception:
                 return float("inf")
 
-        best = min(candidates, key=lambda c: _color_distance(c, img_hex))
-        return best
+        # 从 dominant_colors 中选与 palette 最接近的一个
+        best_color = None
+        best_dist = float("inf")
+        for dom_rgb in dominant_colors:
+            dom_hex = "#{:02x}{:02x}{:02x}".format(*dom_rgb)
+            dist = min(_color_distance(dom_hex, c) for c in candidates)
+            if dist < best_dist:
+                best_dist = dist
+                best_color = dom_hex
 
-    return img_hex
+        if best_color:
+            return best_color
+
+    r, g, b = dominant_colors[0]
+    return "#{:02x}{:02x}{:02x}".format(r, g, b)
 
 
 def clean_internal_text_strip(image: Image.Image, min_strip_height: int = 5, diff_threshold: float = 12.0) -> Image.Image:
@@ -495,6 +566,22 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
     quiet_solid = quiet_solid_from_image(Image.open(paths["solid_quiet"]), palette=palette, target_role="trim")
     moss_color = quiet_solid_from_image(Image.open(paths["secondary"]), palette=palette, target_role="secondary")
 
+    # warm_ivory 从 palette primary 中最亮颜色派生，不再硬编码
+    warm_ivory = "#f3f1df"
+    if palette and palette.get("primary"):
+        from PIL import ImageColor
+        primary_colors = palette["primary"]
+        if primary_colors:
+            # 选最亮的 primary 颜色
+            def _brightness(hex_str):
+                try:
+                    r, g, b = ImageColor.getrgb(hex_str)
+                    return r + g + b
+                except Exception:
+                    return 0
+            brightest = max(primary_colors, key=_brightness)
+            warm_ivory = brightest
+
     texture_set = {
         "texture_set_id": f"{out_dir.name}_neo_collection_texture_set",
         "locked": False,
@@ -599,7 +686,7 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
         "solids": [
             {"solid_id": "quiet_solid", "color": quiet_solid, "approved": True},
             {"solid_id": "quiet_moss", "color": moss_color, "approved": True},
-            {"solid_id": "warm_ivory", "color": "#f3f1df", "approved": True},
+            {"solid_id": "warm_ivory", "color": warm_ivory, "approved": True},
         ],
     }
     return write_json(out_dir / "texture_set.json", texture_set)
@@ -625,6 +712,8 @@ def main() -> int:
     parser.add_argument("--ai-plan", default="", help="子 Agent 生成的 AI 填充计划 JSON 路径。若提供，优先使用 AI 审美决策。")
     parser.add_argument("--construct-ai-request", action="store_true", help="在部位映射后构造子 Agent 审美请求并退出，等待外部子 Agent 生成 ai_piece_fill_plan.json。")
     parser.add_argument("--selected-collection", default="", help="子Agent已选择的 selected_variants.json 路径。若提供，直接生成最终看板 prompt 并跳过选择请求构造。")
+    parser.add_argument("--auto-retry", type=int, default=0, help="自动重试次数（0=不重试）。时尚QC发现issues时，自动构造返工请求并重新渲染。")
+    parser.add_argument("--ai-map", default="", help="AI子Agent输出的 ai_garment_map.json 路径。若提供，部位映射优先使用AI识别结果。")
     args = parser.parse_args()
 
     out_dir = Path(args.out)
@@ -766,6 +855,8 @@ def main() -> int:
         "--out",
         str(out_dir),
     ]
+    if args.ai_map:
+        garment_cmd.extend(["--ai-map", args.ai_map])
     run_step(garment_cmd)
 
     qc_cmd = [
@@ -851,6 +942,46 @@ def main() -> int:
         str(out_dir / "fashion_qc_report.json"),
     ]
     run_step(fashion_cmd)
+
+    # 质检反馈闭环：自动重试模式
+    if args.auto_retry > 0:
+        qc_report_path = out_dir / "fashion_qc_report.json"
+        retry_count = 0
+        while retry_count < args.auto_retry and qc_report_path.exists():
+            qc = json.loads(qc_report_path.read_text(encoding="utf-8"))
+            if qc.get("approved", False):
+                print(f"[自动重试] 第 {retry_count} 轮质检通过")
+                break
+            issues = qc.get("issues", [])
+            if not issues:
+                break
+            retry_count += 1
+            print(f"\n[自动重试] 第 {retry_count}/{args.auto_retry} 轮：发现 {len(issues)} 个问题")
+            # 使用返工提示词让子Agent修订
+            revised_plan_path = out_dir / f"ai_piece_fill_plan_rev{retry_count}.json"
+            if revised_plan_path.exists():
+                print(f"[自动重试] 使用修订计划: {revised_plan_path}")
+                # 重新运行创建填充计划（使用修订后的ai-plan）
+                plan_cmd = [
+                    sys.executable,
+                    str(SKILL_DIR / "scripts" / "创建填充计划.py"),
+                    "--pieces", str(pieces_path),
+                    "--texture-set", str(texture_set_path),
+                    "--garment-map", str(out_dir / "garment_map.json"),
+                    "--out", str(out_dir),
+                    "--ai-plan", str(revised_plan_path),
+                ]
+                if args.brief:
+                    plan_cmd.extend(["--brief", args.brief])
+                run_step(plan_cmd)
+                # 重新渲染
+                run_step(render_cmd)
+                # 重新QC
+                run_step(fashion_cmd)
+            else:
+                print(f"[自动重试] 等待子Agent生成修订计划: {revised_plan_path}")
+                print("  请启动子Agent，传入 rework_prompt.txt，输出 ai_piece_fill_plan_rev1.json")
+                break
 
     summary = {
         "面料看板": str(board_path),

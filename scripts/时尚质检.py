@@ -370,8 +370,66 @@ def main() -> int:
     }
     out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    # 质检报告生成成功即返回 0；issues/warnings 供人工/子 Agent 审阅，不阻塞流程
+
+    # 质检反馈闭环：发现 issues 时自动构造返工请求
+    if issues:
+        _build_rework_request(issues, warnings, fill_plan, out_path.parent)
+
+    # 质检报告生成成功即返回 0；issues/warnings 供人工/子 Agent 审阅
     return 0
+
+
+def _build_rework_request(issues: list, warnings: list, fill_plan: dict, out_dir: Path) -> None:
+    """构造返工请求，供子Agent修订填充计划。"""
+    lines = [
+        "你是一位高级服装印花艺术指导。当前填充计划存在以下问题，请修订。",
+        "",
+        "===== 当前填充计划摘要 =====",
+        f"总裁片数: {len(fill_plan.get('pieces', []))}",
+        f"Hero裁片: {[p['piece_id'] for p in fill_plan.get('pieces', []) if (p.get('overlay') or {}).get('fill_type') == 'motif']}",
+        "",
+        "===== 必须修复的问题 =====",
+    ]
+    for issue in issues:
+        lines.append(f"- [{issue.get('type')}] {issue.get('piece_id', '')}: {issue.get('message', '')}")
+
+    if warnings:
+        lines.extend([
+            "",
+            "===== 建议优化（警告） =====",
+        ])
+        for w in warnings:
+            lines.append(f"- [{w.get('type')}] {w.get('piece_id', '')}: {w.get('message', '')}")
+
+    lines.extend([
+        "",
+        "===== 修订要求 =====",
+        "1. 针对每个 issue 给出具体修正：修改哪个裁片的哪个参数",
+        "2. 保持已有的正确决策不变",
+        "3. 输出完整的 ai_piece_fill_plan.json 格式（与之前相同）",
+        "4. 每个修改必须附带 reason",
+        "",
+        "===== 输出格式 =====",
+        "请返回严格的 JSON，格式与之前的 piece_fill_plan.json 完全一致。",
+    ])
+
+    prompt_path = out_dir / "rework_prompt.txt"
+    prompt_path.write_text("\n".join(lines), encoding="utf-8")
+
+    request = {
+        "request_id": "rework_request_v1",
+        "issue_count": len(issues),
+        "warning_count": len(warnings),
+        "prompt_path": str(prompt_path.resolve()),
+        "expected_output": str((out_dir / "ai_piece_fill_plan_revised.json").resolve()),
+        "issues": issues,
+        "warnings": warnings,
+    }
+    req_path = out_dir / "ai_rework_request.json"
+    req_path.write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\n[质检闭环] 发现 {len(issues)} 个问题，已构造返工请求:")
+    print(f"  返工提示词: {prompt_path}")
+    print(f"  预期输出: {request['expected_output']}")
 
 
 if __name__ == "__main__":

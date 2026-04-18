@@ -32,9 +32,11 @@ def build_agent_prompt(garment_map: dict, texture_set: dict, brief: dict, pieces
         if solid.get("approved", True):
             lines.append(f"- {solid.get('solid_id')}: 纯色 {solid.get('color', '')}")
 
+    garment_type = brief.get("garment_type", "成衣")
     lines.extend([
         "",
         "===== 设计简报 =====",
+        f"服装类型: {garment_type}",
         f"审美方向: {brief.get('aesthetic_direction', '商业畅销款')}",
         f"季节: {brief.get('season', '四季')}",
         f"目标客群: {brief.get('target_customer', '大众')}",
@@ -125,7 +127,23 @@ def build_agent_prompt(garment_map: dict, texture_set: dict, brief: dict, pieces
                     f"方向匹配{dir_match}, 宽高比 motif={round(motif_aspect,2)} vs piece={round(piece_aspect,2)}"
                 )
 
+    # 根据服装类型生成部位规则提示
+    type_hints = {
+        "shirt": "衬衫类：前片+后片+袖子+领+袖口，body区比例通常较大，trim较窄",
+        "dress": "连衣裙：前片+后片+袖子+裙摆，可能有育克或拼接",
+        "jacket": "外套：前片+后片+袖子+领+门襟，可能有口袋盖",
+        "coat": "大衣：前片+后片+袖子+领+下摆，trim较宽",
+        "pants": "裤装：前片+后片+腰头+裤脚，无袖子",
+        "children": "童装：部位较小，比例更紧凑，hero位置通常在胸口",
+    }
+    type_hint = type_hints.get(garment_type.lower(), f"{garment_type}类服装，请根据部位形状和上下文推断")
+
     lines.extend([
+        "",
+        "===== 服装类型指导 =====",
+        f"本次服装类型: {garment_type}",
+        f"类型特征: {type_hint}",
+        "注意：不同服装类型的部位集合和比例规则不同。例如裤装没有袖子，童装部位较小。",
         "",
         "===== 硬性约束（不可违反） =====",
         "1. 同 symmetry_group 或 same_shape_group 的裁片，base 层必须使用完全相同的参数（texture_id、scale、rotation、offset_x、offset_y、mirror_x、mirror_y）。",
