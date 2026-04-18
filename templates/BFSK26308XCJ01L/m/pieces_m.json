@@ -109,7 +109,7 @@
       "orientation_reason": "上半部分有明显内凹（领口特征）"
     },
     {
-      "piece_id": "piece_006_m",
+      "piece_id": "piece_007_m",
       "piece_role": "panel",
       "bbox": {
         "x": 3188,
@@ -129,7 +129,7 @@
       "orientation_reason": "下半部分有明显内凹（领口特征）"
     },
     {
-      "piece_id": "piece_007_m",
+      "piece_id": "piece_006_m",
       "piece_role": "panel",
       "bbox": {
         "x": 3211,
