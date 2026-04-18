@@ -571,14 +571,19 @@ def write_contact_sheet(rendered: list[dict], out_path: Path) -> Path:
 
 def write_manifest(texture_set: dict, fill_plan: dict, rendered: list[dict], preview_path: Path, out_path: Path) -> Path:
     """写入填充清单。"""
+    manifest_dir = out_path.parent.resolve()
     manifest = {
         "texture_set_id": texture_set.get("texture_set_id", ""),
         "fill_plan_id": fill_plan.get("plan_id", ""),
         "preview_path": str(preview_path.resolve()),
+        "preview_file": preview_path.name,
+        "preview_relpath": str(preview_path.resolve().relative_to(manifest_dir)) if preview_path.resolve().is_relative_to(manifest_dir) else preview_path.name,
         "pieces": [
             {
                 "piece_id": item["piece_id"],
                 "output_path": item["output_path"],
+                "output_file": Path(item["output_path"]).name,
+                "output_relpath": str(Path(item["output_path"]).resolve().relative_to(manifest_dir)) if Path(item["output_path"]).resolve().is_relative_to(manifest_dir) else Path(item["output_path"]).name,
                 "fill_type": item["plan"].get("fill_type"),
                 "texture_id": item["plan"].get("texture_id"),
                 "solid_id": item["plan"].get("solid_id"),

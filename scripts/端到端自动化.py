@@ -90,8 +90,8 @@ def cache_lookup(out_dir: Path, stage: str, input_hash: dict) -> Path | None:
         output_path = cd / meta.get("output_file", "")
         if output_path.exists():
             return output_path
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[缓存警告] 读取 {stage} 缓存失败: {exc}")
     return None
 
 
@@ -110,6 +110,27 @@ def cache_save(out_dir: Path, stage: str, input_hash: dict, output_path: Path) -
     }
     meta_path = cd / f"{stage}_{key}.meta.json"
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def validate_revised_agent_plan(parsed: dict, expect_production_plan: bool) -> None:
+    """Validate retry-agent JSON for either standard or legacy retry paths."""
+    if expect_production_plan:
+        if not isinstance(parsed.get("piece_fill_plan"), dict):
+            raise ValueError("standard 模式修订规划必须包含 piece_fill_plan 对象")
+        pieces = parsed["piece_fill_plan"].get("pieces")
+        schema_name = "piece_fill_plan.pieces"
+    else:
+        pieces = parsed.get("pieces")
+        schema_name = "pieces"
+    if not isinstance(pieces, list) or len(pieces) == 0:
+        raise ValueError(f"缺少 {schema_name} 数组")
+    for piece in pieces:
+        if not isinstance(piece, dict):
+            raise ValueError(f"{schema_name} 包含非对象元素: {piece}")
+        if not piece.get("piece_id"):
+            raise ValueError(f"piece 缺少 piece_id: {piece}")
+        if "base" not in piece:
+            raise ValueError(f"piece {piece.get('piece_id')} 缺少 base 字段")
 
 
 def _build_geometry_hints(pieces_path: Path, out_path: Path) -> None:
@@ -208,6 +229,12 @@ def build_production_context(
     if getattr(args, "template_file", ""):
         ctx["input_hash"]["template_file"] = file_sha256(args.template_file)
         ctx["paths"]["template_file"] = str(Path(args.template_file).resolve())
+    if getattr(args, "texture_set", ""):
+        texture_set_path = Path(args.texture_set)
+        if not texture_set_path.is_absolute():
+            texture_set_path = texture_set_path.resolve()
+        ctx["input_hash"]["texture_set"] = file_sha256(texture_set_path)
+        ctx["paths"]["texture_set"] = str(texture_set_path)
     if template_assets:
         ctx["computed"]["template_assets_reused"] = True
         ctx["computed"]["template_id"] = template_assets.get("template_id", "")
@@ -239,8 +266,12 @@ def build_production_context(
                 ctx["paths"]["piece_overview"] = relative_json_metadata_path(pieces_payload["overview_image"], ctx_path)
             if pieces_payload.get("prepared_pattern"):
                 ctx["paths"]["prepared_pattern"] = relative_json_metadata_path(pieces_payload["prepared_pattern"], ctx_path)
-        except Exception:
-            pass
+        except Exception as exc:
+            ctx.setdefault("warnings", []).append({
+                "type": "pieces_metadata_read_failed",
+                "path": str(resolved_pieces_path),
+                "message": str(exc),
+            })
     if garment_map_path and garment_map_path.exists():
         ctx["paths"]["garment_map"] = str(garment_map_path.resolve())
     elif (out_dir / "garment_map.json").exists():
@@ -254,8 +285,12 @@ def build_production_context(
             ctx["computed"]["piece_count"] = len(pc)
             if pc:
                 ctx["computed"]["largest_piece_area"] = max(p.get("area", 0) for p in pc)
-        except Exception:
-            pass
+        except Exception as exc:
+            ctx.setdefault("warnings", []).append({
+                "type": "pieces_summary_read_failed",
+                "path": str(resolved_pieces_path),
+                "message": str(exc),
+            })
 
     ctx_path = out_dir / "production_context.json"
     ctx_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1434,6 +1469,7 @@ def render_size_variants_core(
     out_dir: Path,
     template_id: str,
     size_data: dict,
+    suffix: str = "",
 ) -> None:
     """纯程序渲染多尺寸变体（可复用核心，无AI）。"""
 
@@ -1507,10 +1543,12 @@ def render_size_variants_core(
             print(f"[多尺寸渲染] {size_label.upper()} 映射后无有效填充计划，跳过")
             continue
 
-        mapped_plan_path = out_dir / f"piece_fill_plan_{size_label}.json"
+        safe_suffix = suffix.strip("_")
+        output_suffix = f"_{safe_suffix}_{size_label}" if safe_suffix else f"_{size_label}"
+        mapped_plan_path = out_dir / f"piece_fill_plan{output_suffix}.json"
         mapped_plan_path.write_text(json.dumps(mapped_fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        size_rendered_dir = out_dir / f"rendered_{size_label}"
+        size_rendered_dir = out_dir / f"rendered{output_suffix}"
         render_cmd = [
             sys.executable,
             str(SKILL_DIR / "scripts" / "渲染裁片.py"),
@@ -1519,7 +1557,7 @@ def render_size_variants_core(
             "--fill-plan", str(mapped_plan_path),
             "--out", str(size_rendered_dir),
             "--scale-factor", str(scale_factor),
-            "--size-label", size_label,
+            "--size-label", output_suffix.lstrip("_"),
         ]
         print(f"[多尺寸渲染] 渲染 {size_label.upper()} (scale={scale_factor:.4f}) ...")
         run_step(render_cmd)
@@ -1549,7 +1587,7 @@ def _render_size_variants(args, out_dir: Path, texture_set_path: Path, suffix: s
         return
 
     print(f"[多尺寸渲染] 检测到多尺寸模板: {template_id}，准备渲染 {list(size_data.keys())}")
-    render_size_variants_core(base_fill_plan, texture_set_path, out_dir, template_id, size_data)
+    render_size_variants_core(base_fill_plan, texture_set_path, out_dir, template_id, size_data, suffix=suffix)
 
 
 def main() -> int:
@@ -2571,15 +2609,13 @@ def main() -> int:
                                 if extracted:
                                     try:
                                         parsed = json.loads(extracted)
-                                        # 轻量 schema 校验：必须有 pieces 数组，每个 piece 有 piece_id 和 base
-                                        pieces = parsed.get("pieces")
-                                        if not isinstance(pieces, list) or len(pieces) == 0:
-                                            raise ValueError("缺少 pieces 数组")
-                                        for p in pieces:
-                                            if not p.get("piece_id"):
-                                                raise ValueError(f"piece 缺少 piece_id: {p}")
-                                            if "base" not in p:
-                                                raise ValueError(f"piece {p.get('piece_id')} 缺少 base 字段")
+                                        # 轻量 schema 校验：
+                                        # standard 模式接受 {garment_map, piece_fill_plan:{pieces:[...]}}
+                                        # legacy 模式接受 {pieces:[...]}
+                                        validate_revised_agent_plan(
+                                            parsed,
+                                            expect_production_plan=revised_is_production_plan and not use_legacy,
+                                        )
                                         # schema 校验通过
                                         revised_plan_path.write_text(extracted, encoding="utf-8")
                                         print(f"[自动重试] 子 Agent 成功生成修订计划: {revised_plan_path}")

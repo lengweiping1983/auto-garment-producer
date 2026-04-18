@@ -60,9 +60,10 @@ def main() -> int:
                 ctx = _load_json(ctx_path)
                 ts = ctx.get("paths", {}).get("texture_set", "")
                 if ts:
-                    texture_set_path = Path(ts)
-            except Exception:
-                pass
+                    candidate = Path(ts)
+                    texture_set_path = candidate if candidate.is_absolute() else (ctx_path.parent / candidate).resolve()
+            except Exception as exc:
+                print(f"[警告] 读取 production_context.json 中 texture_set 失败: {exc}", file=sys.stderr)
     if not texture_set_path.exists():
         print(f"[错误] 未找到 texture_set.json。", file=sys.stderr)
         return 1

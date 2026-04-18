@@ -33,8 +33,8 @@ def apply_production_plan(
             pieces_payload = load_json(effective_pieces_path)
             for p in pieces_payload.get("pieces", []):
                 pieces_data[p["piece_id"]] = p
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[警告] 读取 pieces 方向信息失败: {effective_pieces_path}: {exc}", file=sys.stderr)
 
     # 1. 提取 garment_map
     fixed_garment_map_path = fixed_garment_map_path if fixed_garment_map_path and fixed_garment_map_path.exists() else None
@@ -175,8 +175,8 @@ def apply_multi_production_plan(
                     fallback_garment_map = data
                 if fallback_garment_map and fallback_garment_map.get("pieces"):
                     break
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[警告] 读取 fallback garment_map 失败: {fallback_path}: {exc}", file=sys.stderr)
 
     results = []
     for idx, scheme in enumerate(schemes, 1):
