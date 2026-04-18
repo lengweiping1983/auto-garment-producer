@@ -121,7 +121,7 @@ def _build_geometry_hints(pieces_path: Path, out_path: Path) -> None:
                 geo_role = "small_detail"
             else:
                 geo_role = "panel"
-            hints.append({
+            hint = {
                 "piece_id": p["piece_id"],
                 "area": area,
                 "area_ratio": round(area_ratio, 3),
@@ -131,7 +131,13 @@ def _build_geometry_hints(pieces_path: Path, out_path: Path) -> None:
                 "centroid": [round(px, 1), round(py, 1)],
                 "relative_to_center": [round(px - cx, 1), round(py - cy, 1)],
                 "geometry_role_hint": geo_role,
-            })
+            }
+            # 透传裁片方向信息（若提取裁片.py 已生成）
+            if "pattern_orientation" in p:
+                hint["pattern_orientation"] = p["pattern_orientation"]
+                hint["orientation_confidence"] = p.get("orientation_confidence", 0)
+                hint["orientation_reason"] = p.get("orientation_reason", "")
+            hints.append(hint)
         out_path.write_text(json.dumps({"pieces": hints, "center": [round(cx, 1), round(cy, 1)]}, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[几何推断] geometry_hints 已生成: {out_path}")
     except Exception as exc:

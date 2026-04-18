@@ -20,6 +20,17 @@ def apply_production_plan(plan_path: Path, out_dir: Path) -> tuple[Path, Path]:
     """拆解 ai_production_plan.json 为 garment_map.json + ai_piece_fill_plan.json。"""
     plan = load_json(plan_path)
 
+    # 尝试读取 pieces.json 获取 pattern_orientation 等几何信息
+    pieces_data = {}
+    pieces_path = out_dir / "pieces.json"
+    if pieces_path.exists():
+        try:
+            pieces_payload = load_json(pieces_path)
+            for p in pieces_payload.get("pieces", []):
+                pieces_data[p["piece_id"]] = p
+        except Exception:
+            pass
+
     # 1. 提取 garment_map
     garment_map = plan.get("garment_map", {})
     # 确保有标准字段
@@ -51,6 +62,12 @@ def apply_production_plan(plan_path: Path, out_dir: Path) -> tuple[Path, Path]:
             p["confidence"] = 0.5
         if "needs_ai_review" not in p:
             p["needs_ai_review"] = p.get("confidence", 0.5) < 0.6
+        # 透传 pieces.json 中的 pattern_orientation
+        source = pieces_data.get(p.get("piece_id", ""))
+        if source and "pattern_orientation" in source:
+            p["pattern_orientation"] = source["pattern_orientation"]
+            p["orientation_confidence"] = source.get("orientation_confidence", 0)
+            p["orientation_reason"] = source.get("orientation_reason", "")
 
     garment_map_path = out_dir / "garment_map.json"
     garment_map_path.write_text(json.dumps(garment_map, ensure_ascii=False, indent=2), encoding="utf-8")

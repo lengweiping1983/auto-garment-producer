@@ -142,14 +142,29 @@ def build_production_plan_prompt(
         pid = p["piece_id"]
         h = hint_by_id.get(pid, {})
         aspect = p.get("width", 1) / max(1, p.get("height", 1))
+        orient = h.get("pattern_orientation", 0)
+        orient_str = ""
+        if orient == 180:
+            orient_str = f", 方向=倒置(领口在下, pattern_orientation=180°, conf={h.get('orientation_confidence',0)})"
+        elif orient != 0:
+            orient_str = f", 方向={orient}°"
         lines.append(
             f"  {pid}: 面积={p.get('area',0)} ({h.get('area_ratio','?')} of max), "
             f"尺寸={p.get('width',0)}×{p.get('height',0)}, 长宽比={round(aspect,2)}, "
             f"中心=({round(h.get('centroid',[0,0])[0],0)},{round(h.get('centroid',[0,0])[1],0)}), "
-            f"程序推测={h.get('geometry_role_hint','unknown')}"
+            f"程序推测={h.get('geometry_role_hint','unknown')}{orient_str}"
         )
 
     lines.extend([
+        "",
+        "===== 裁片方向补偿（重要）=====",
+        "某些裁片在纸样 pattern 中可能是倒置的（领口朝下，pattern_orientation=180°）。",
+        "当你在 Step 2 制定填充计划时，必须注意：",
+        "  - 若裁片 pattern_orientation=180°，base texture 的 rotation 需额外 +180°，",
+        "    或 texture_direction 相应反转，使纹理在最终成衣中呈现正确方向。",
+        "  - 若裁片 pattern_orientation=180°，motif overlay 的 rotation 也需额外 +180°，",
+        "    确保主题花（如中心大花）在穿着时花头朝上，不被倒置。",
+        "  - 程序会在渲染时自动应用 pattern_orientation 补偿，你的 rotation 值是在此基础上的增量。",
         "",
         "===== Step 2: 填充决策 =====",
         "基于 Step 1 的部位识别结果和以下面料资产，为每个裁片制定填充计划。",

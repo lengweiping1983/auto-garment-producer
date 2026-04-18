@@ -10,6 +10,17 @@ from pathlib import Path
 
 from PIL import Image
 
+# 导入提示词过滤器
+sys.path.insert(0, str(Path(__file__).parent))
+try:
+    from prompt_sanitizer import sanitize_prompt, sanitize_prompts_in_dict
+except Exception:
+    # fallback: 如果导入失败，定义空函数
+    def sanitize_prompt(text):
+        return text
+    def sanitize_prompts_in_dict(data, keys=("prompt",)):
+        return data
+
 
 def rgb_to_hex(rgb: tuple[int, int, int]) -> str:
     return "#{:02x}{:02x}{:02x}".format(*rgb)
@@ -120,6 +131,8 @@ def generate_prompt_variants(base_prompt: str, count: int = 3) -> list[str]:
         else:
             variants.append(base_prompt)
 
+    # 过滤停用词和禁用词
+    variants = [sanitize_prompt(v) for v in variants]
     return variants[:count]
 
 
@@ -357,7 +370,7 @@ def _generate_outputs(
         ("hero_motif_2", "次卖点定位图案", hero_motif_2_prompt, "row3_center", "placement_motif"),
         ("trim_motif", "小型装饰点缀", trim_motif_prompt, "row3_right", "placement_motif"),
     ]
-    prompts = [_make_prompt(tid, purpose, _inject_palette_constraints(ptext, tid, palette), panel=panel, role=role)
+    prompts = [_make_prompt(tid, purpose, sanitize_prompt(_inject_palette_constraints(ptext, tid, palette)), panel=panel, role=role)
                for tid, purpose, ptext, panel, role in _prompts]
 
     texture_prompts = {
@@ -365,6 +378,8 @@ def _generate_outputs(
         "generation_owner": "external_ai_image_model",
         "prompts": prompts,
     }
+    # 过滤所有 prompt 中的停用词和禁用词
+    texture_prompts = sanitize_prompts_in_dict(texture_prompts)
 
     motif_prompts = {
         "style_id": style_id,
@@ -373,7 +388,7 @@ def _generate_outputs(
             {
                 "motif_id": "hero_motif",
                 "purpose": "单一卖点定位，置于一个 hero 裁片",
-                "prompt": generated_prompts.get("hero_motif", f"elegant placement print motif, simplified {hero_selling_point}, balanced negative space, plain light background, soft fading edges, suitable for background removal, no text, no watermark") if generated_prompts else f"elegant placement print motif, simplified {hero_selling_point}, balanced negative space, plain light background, soft fading edges, suitable for background removal, no text, no watermark",
+                "prompt": sanitize_prompt(generated_prompts.get("hero_motif", f"elegant placement print motif, simplified {hero_selling_point}, balanced negative space, plain light background, soft fading edges, suitable for background removal, no text, no watermark")) if generated_prompts else sanitize_prompt(f"elegant placement print motif, simplified {hero_selling_point}, balanced negative space, plain light background, soft fading edges, suitable for background removal, no text, no watermark"),
                 "negative_prompt": "complex background, full scene, poster, text, logo, watermark, faces, multiple subjects, frame",
             }
         ],

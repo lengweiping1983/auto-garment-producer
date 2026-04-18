@@ -88,6 +88,82 @@ def guess_role(index: int, bbox: dict, area: int, total_area: int) -> str:
     return "panel"
 
 
+def analyze_piece_orientation(mask: Image.Image) -> dict:
+    """通过 mask 轮廓特征判断裁片在 pattern 中的方向。
+
+    核心假设：领口/领口侧通常有弧形内凹（neckline curve），导致该区域的
+    水平宽度明显小于中间区域。下摆侧通常较平或外凸。
+
+    返回 {"pattern_orientation": 0|180, "confidence": 0.0-1.0}
+    - 0°   = 正立（领口/内凹侧在上半部分）
+    - 180° = 倒置（领口/内凹侧在下半部分）
+    """
+    w, h = mask.size
+    if h < 20:
+        return {"pattern_orientation": 0, "confidence": 0.1}
+
+    pixels = list(mask.getdata())
+
+    # 计算每行的最左/最右非零像素位置
+    row_left = [w] * h
+    row_right = [-1] * h
+    for y in range(h):
+        base = y * w
+        for x in range(w):
+            if pixels[base + x] > 128:
+                row_left[y] = min(row_left[y], x)
+                row_right[y] = max(row_right[y], x)
+
+    # 计算每行有效宽度
+    row_width = [max(0, row_right[y] - row_left[y] + 1) for y in range(h)]
+
+    # 只考虑有内容的行
+    valid_rows = [(y, row_width[y]) for y in range(h) if row_width[y] > 0]
+    if not valid_rows:
+        return {"pattern_orientation": 0, "confidence": 0.1}
+
+    # 将有效行分为上/下两半（各 25% 区域）和中间区域（50%）
+    valid_y = [y for y, _ in valid_rows]
+    min_y, max_y = min(valid_y), max(valid_y)
+    span = max_y - min_y + 1
+
+    q1_end = min_y + span // 4
+    q3_start = min_y + 3 * span // 4
+
+    def avg_width(start_y, end_y):
+        vals = [row_width[y] for y in range(start_y, end_y) if row_width[y] > 0]
+        return sum(vals) / len(vals) if vals else 0
+
+    top_avg = avg_width(min_y, q1_end)
+    bottom_avg = avg_width(q3_start, max_y + 1)
+    center_avg = avg_width(q1_end, q3_start)
+
+    if center_avg <= 0:
+        return {"pattern_orientation": 0, "confidence": 0.1}
+
+    # 内凹度 = 中间宽度 - 边缘宽度（越大表示边缘越内凹）
+    top_concavity = center_avg - top_avg
+    bottom_concavity = center_avg - bottom_avg
+
+    # 归一化置信度
+    max_conc = max(abs(top_concavity), abs(bottom_concavity))
+    confidence = min(0.99, max_conc / center_avg) if center_avg > 0 else 0.1
+
+    # 阈值：内凹度需超过中间宽度的 5% 才判定为显著
+    threshold = center_avg * 0.05
+
+    if top_concavity > threshold and top_concavity > bottom_concavity:
+        return {"pattern_orientation": 0, "confidence": round(confidence, 2),
+                "orientation_reason": "上半部分有明显内凹（领口特征）"}
+    elif bottom_concavity > threshold and bottom_concavity > top_concavity:
+        return {"pattern_orientation": 180, "confidence": round(confidence, 2),
+                "orientation_reason": "下半部分有明显内凹（领口特征）"}
+    else:
+        # 无明显内凹特征，可能是矩形裁片或对称形状
+        return {"pattern_orientation": 0, "confidence": round(max(0.1, confidence * 0.3), 2),
+                "orientation_reason": "无明显领口内凹特征，默认正立"}
+
+
 def write_masks(components: list[dict], image_size: tuple[int, int], out_dir: Path) -> list[dict]:
     """为每个连通域生成遮罩 PNG，并返回裁片元数据列表。"""
     width, _ = image_size
@@ -105,20 +181,22 @@ def write_masks(components: list[dict], image_size: tuple[int, int], out_dir: Pa
             pix[x - bbox["x"], y - bbox["y"]] = 255
         mask_path = masks_dir / f"{piece_id}_mask.png"
         mask.save(mask_path)
-        pieces.append(
-            {
-                "piece_id": piece_id,
-                "piece_role": guess_role(index - 1, bbox, component["area"], total_area),
-                "bbox": bbox,
-                "source_x": bbox["x"],
-                "source_y": bbox["y"],
-                "width": bbox["width"],
-                "height": bbox["height"],
-                "area": component["area"],
-                "aspect": round(bbox["width"] / max(1, bbox["height"]), 4),
-                "mask_path": str(mask_path.resolve()),
-            }
-        )
+        # 分析裁片在 pattern 中的方向
+        orientation_info = analyze_piece_orientation(mask)
+        piece_meta = {
+            "piece_id": piece_id,
+            "piece_role": guess_role(index - 1, bbox, component["area"], total_area),
+            "bbox": bbox,
+            "source_x": bbox["x"],
+            "source_y": bbox["y"],
+            "width": bbox["width"],
+            "height": bbox["height"],
+            "area": component["area"],
+            "aspect": round(bbox["width"] / max(1, bbox["height"]), 4),
+            "mask_path": str(mask_path.resolve()),
+        }
+        piece_meta.update(orientation_info)
+        pieces.append(piece_meta)
     return pieces
 
 

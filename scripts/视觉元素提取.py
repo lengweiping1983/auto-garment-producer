@@ -19,7 +19,16 @@
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+# 导入提示词过滤器
+sys.path.insert(0, str(Path(__file__).parent))
+try:
+    from prompt_sanitizer import sanitize_prompt
+except Exception:
+    def sanitize_prompt(text):
+        return text
 
 
 def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, season: str) -> str:
@@ -72,6 +81,10 @@ def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, s
         "   - dark：深色饰边底纹提示词",
         "   - hero_motif：定位图案提示词。要求 plain light background、centered、suitable for background removal",
         "   所有提示词中必须包含 negative prompt 逻辑：no text, no watermark, no logo, no faces, no animals（除非用户明确要求）",
+        "   ⚠️ 重要约束：生成的英文提示词中不得包含停用词（stop words）和禁用词（banned words）。",
+        "     停用词包括：very, really, quite, beautiful, nice, good, bad, wonderful, fantastic, great, perfect 等模糊修饰词。",
+        "     禁用词包括：任何可能触发内容安全过滤的词汇（暴力、色情、仇恨相关）。",
+        "     提示词应使用具体、可视觉化的描述词，避免主观评价性形容词。",
         "",
         "===== 输出格式 =====",
         "请返回严格的 JSON，格式如下（不要任何解释文字、不要 markdown 代码块，只返回纯 JSON）：",
@@ -139,6 +152,7 @@ def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, s
         "- 颜色必须从图像中真实提取，不要编造",
         "- 提示词必须是英文，可直接用于 AI 图像生成器",
         "- 如果图像中有动物或人物，谨慎建议用途，优先建议用于 motif 而非 texture",
+        "- 所有 generated_prompts 的值在输出前必须经过停用词/禁用词过滤",
         "- 不要返回任何解释文字，只返回 JSON",
     ]
     return "\n".join(lines)
@@ -164,6 +178,9 @@ def main() -> int:
     prompt = build_vision_prompt(theme_path, args.user_prompt, args.garment_type, args.season)
     prompt_path = out_dir / "ai_vision_prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
+    
+    # 对示例中的 generated_prompts 也进行过滤（若视觉元素已存在）
+    # 注意：实际过滤应在子 Agent 输出 visual_elements.json 后由调用方处理
 
     request_summary = {
         "request_id": "ai_vision_extraction_v1",

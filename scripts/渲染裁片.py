@@ -142,6 +142,10 @@ def transform_texture(texture: Image.Image, plan: dict, piece: dict | None = Non
     # 应用 texture_direction 自动旋转
     if piece:
         rotation += auto_rotation_for_direction(out, plan.get("texture_direction", ""), piece)
+        # 补偿裁片在 pattern 中的方向（倒置裁片需额外旋转）
+        piece_orientation = piece.get("pattern_orientation", 0)
+        if piece_orientation:
+            rotation += piece_orientation
     if abs(rotation % 360) > 0.001:
         out = out.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
     return out
@@ -333,6 +337,10 @@ def render_motif_layer(piece: dict, layer: dict, motif_info: dict) -> Image.Imag
     ratio = min(target_max_w / max(1, motif.width), target_max_h / max(1, motif.height))
     motif = motif.resize((max(1, round(motif.width * ratio)), max(1, round(motif.height * ratio))), Image.Resampling.LANCZOS)
     rotation = float(layer.get("rotation", 0) or 0)
+    # 补偿裁片在 pattern 中的方向（倒置裁片需额外旋转 motif）
+    piece_orientation = piece.get("pattern_orientation", 0)
+    if piece_orientation:
+        rotation += piece_orientation
     if abs(rotation % 360) > 0.001:
         motif = motif.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
     motif = apply_opacity(motif, float(layer.get("opacity", 1) or 1))
