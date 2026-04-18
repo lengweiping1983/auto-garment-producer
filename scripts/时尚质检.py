@@ -311,7 +311,7 @@ def main() -> int:
             issues.append({"type": "missing_rendered_piece", "severity": "high", "piece_id": piece_id, "message": f"缺失渲染裁片: {image_path}"})
 
     if len(hero_entries) == 0:
-        warnings.append({"type": "missing_hero_piece", "severity": "low", "message": "未找到卖点裁片或图案定位。"})
+        warnings.append({"type": "missing_hero_piece", "severity": "medium", "message": "未找到卖点裁片或图案定位。如设计意图为极简/基础款，请在 reason 中声明。"})
     if len(hero_entries) > 2:
         issues.append({"type": "too_many_hero_pieces", "severity": "high", "message": f"卖点裁片过多（{len(hero_entries)} 个）: {hero_entries}"})
     if len(texture_usage) <= 1 and len(fill_plan.get("pieces", [])) > 3:

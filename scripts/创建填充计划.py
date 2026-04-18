@@ -515,6 +515,7 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
             ]
             issues.append({
                 "type": "missing_hero_decision",
+                "severity": "high",
                 "message": "当前没有 hero 裁片，需要 AI 决策指定。候选 body 裁片如下（按面积排序）：",
                 "candidates": sorted(candidates, key=lambda c: c["area"], reverse=True),
             })
@@ -522,7 +523,7 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
         # 取消多余的 hero
         for extra in hero_entries[2:]:
             extra["overlay"] = None
-            issues.append({"type": "fixed_excess_hero", "piece_id": extra["piece_id"]})
+            issues.append({"type": "fixed_excess_hero", "severity": "high", "piece_id": extra["piece_id"], "message": "hero 裁片超过 2 个，已取消多余 overlay"})
 
     # 3. Trim 安全修正：禁用 motif overlay（防切割风险），但允许 subtle accent texture
     for entry in entries:
@@ -534,7 +535,7 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
         overlay = entry.get("overlay")
         if overlay and overlay.get("fill_type") == "motif":
             entry["overlay"] = None
-            issues.append({"type": "fixed_trim_motif", "piece_id": entry["piece_id"], "message": "trim 禁用 motif overlay"})
+            issues.append({"type": "fixed_trim_motif", "severity": "high", "piece_id": entry["piece_id"], "message": "trim 禁用 motif overlay（防切割风险）"})
         # 不再强制把 accent texture 降级为 dark/solid——允许 subtle accent
         # 如果 accent 变化度过高（>50），才建议降级为 soft warning
         base = entry.get("base")
@@ -545,9 +546,9 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
             if scale > 1.5:
                 issues.append({
                     "type": "trim_accent_may_be_too_busy",
+                    "severity": "medium",
                     "piece_id": entry["piece_id"],
                     "message": "trim 使用 accent texture 且 scale 较大，可能过于繁忙，建议 AI 审阅",
-                    "severity": "warning",
                 })
 
     # 4. 大身纯色检查（审美修正 → 只记录 issue，不强制替换）
@@ -578,6 +579,7 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
         if len(directions) > 1:
             issues.append({
                 "type": "group_direction_mismatch",
+                "severity": "medium",
                 "group": group,
                 "directions": list(directions),
                 "message": f"同组裁片 texture_direction 不一致: {directions}，请AI统一方向",
@@ -600,13 +602,8 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
         elif nap_direction == "horizontal":
             target_rotation = 90
         else:
-            rotations = set()
-            for entry in entries:
-                base = entry.get("base", {})
-                if base and base.get("fill_type") == "texture":
-                    rotations.add(base.get("rotation", 0) % 180)
-            from collections import Counter
-            target_rotation = Counter(rotations).most_common(1)[0][0] if rotations else 0
+            # nap_direction 未指定时，默认 vertical（服装实务上灯芯绒/丝绒等绝大多数都是经向裁）
+            target_rotation = 0
 
         for entry in entries:
             base = entry.get("base", {})
@@ -614,7 +611,7 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
                 old = base.get("rotation", 0)
                 if old % 180 != target_rotation % 180:
                     base["rotation"] = target_rotation
-                    fix_issues.append({
+                    issues.append({
                         "type": "fixed_nap_rotation",
                         "severity": "high",
                         "piece_id": entry["piece_id"],
@@ -627,7 +624,7 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
             base = entry.get("base", {})
             if base and base.get("mirror_y"):
                 base["mirror_y"] = False
-                fix_issues.append({
+                issues.append({
                     "type": "fixed_nap_mirror_y",
                     "severity": "high",
                     "piece_id": entry["piece_id"],
@@ -685,11 +682,15 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
 
 
 def _resync_group_consistency(entries: list[dict], issues: list) -> None:
-    """对花对条后重新确保对称组/同形组内所有裁片 base 层参数一致。"""
+    """对花对条后重新确保对称组/同形组内所有裁片 base 层参数一致。
+    但尊重 intentional_asymmetry 声明——AI 有意不对称设计不强制同步。"""
     group_templates: dict[str, dict] = {}
     for entry in entries:
         group = entry.get("symmetry_group") or entry.get("same_shape_group")
         if not group:
+            continue
+        # 跳过 AI 声明的有意不对称设计
+        if entry.get("intentional_asymmetry"):
             continue
         base = entry.get("base")
         if not isinstance(base, dict):
@@ -706,6 +707,7 @@ def _resync_group_consistency(entries: list[dict], issues: list) -> None:
             if changed:
                 issues.append({
                     "type": "fixed_group_mismatch_post_matching",
+                    "severity": "high",
                     "piece_id": entry["piece_id"],
                     "group": group,
                     "message": "对花对条后重新同步同组裁片参数",

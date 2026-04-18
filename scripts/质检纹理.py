@@ -215,7 +215,9 @@ def main() -> int:
     }
     Path(args.out).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    return 0 if approved else 1
+    # 只有 fail（有 high severity issue）才返回非零退出码
+    # warn（只有 medium/low warning）不中断流水线，交给 AI/人工复核
+    return 1 if program_qc_status == "fail" else 0
 
 
 if __name__ == "__main__":

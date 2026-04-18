@@ -3,7 +3,7 @@
 端到端自动化：
 
 1. 生成或接收 Neo AI 3×3 面料看板。
-2. 裁剪为已批准的设计资产。
+2. 裁剪为待审批的设计候选资产。
 3. 构建面料组合.json。
 4. 从纸样 mask 提取服装裁片。
 5. 构建部位映射与艺术指导填充计划。
@@ -35,9 +35,21 @@ def write_json(path: Path, payload: dict) -> Path:
     return path
 
 
-def run_step(cmd: list[str], env: dict | None = None) -> None:
+def run_step(cmd: list[str], env: dict | None = None, check: bool = True) -> subprocess.CompletedProcess:
     print("运行:", " ".join(cmd))
-    subprocess.run(cmd, check=True, env=env)
+    return subprocess.run(cmd, check=check, env=env)
+
+
+def collect_texture_qc_issues(report: dict) -> list[dict]:
+    """收集 texture_qc_report.json 中所有资产级 issues。"""
+    issues = []
+    for item in report.get("textures", []) + report.get("motifs", []):
+        asset_id = item.get("texture_id") or item.get("motif_id") or item.get("role", "")
+        for issue in item.get("issues", []):
+            issues.append({**issue, "asset_id": asset_id, "asset_role": item.get("role", "")})
+    for issue in report.get("solid_issues", []):
+        issues.append({**issue, "asset_id": "solids", "asset_role": "solid"})
+    return issues
 
 
 def latest_collection_board(output_dir: Path) -> Path:
@@ -591,61 +603,67 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "texture_id": "main",
                 "path": str(paths["main"].resolve()),
                 "role": "main",
-                "approved": True,
+                "approved": False,
+                "candidate": True,
                 "prompt": "从 Neo AI 3×3 面料看板裁剪：主底纹",
                 "model": "neo-ai",
                 "seed": "",
-                "qc": {"approved": True},
+                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
             {
                 "texture_id": "secondary",
                 "path": str(paths["secondary"].resolve()),
                 "role": "secondary",
-                "approved": True,
+                "approved": False,
+                "candidate": True,
                 "prompt": "从 Neo AI 3×3 面料看板裁剪：辅纹理",
                 "model": "neo-ai",
                 "seed": "",
-                "qc": {"approved": True},
+                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
             {
                 "texture_id": "dark_base",
                 "path": str(paths["dark_base"].resolve()),
                 "role": "dark_base",
-                "approved": True,
+                "approved": False,
+                "candidate": True,
                 "prompt": "从 Neo AI 3×3 面料看板裁剪：深色底纹",
                 "model": "neo-ai",
                 "seed": "",
-                "qc": {"approved": True},
+                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
             {
                 "texture_id": "accent_light",
                 "path": str(paths["accent_light"].resolve()),
                 "role": "accent_light",
-                "approved": True,
+                "approved": False,
+                "candidate": True,
                 "prompt": "从 Neo AI 3×3 面料看板裁剪：浅色点缀纹理",
                 "model": "neo-ai",
                 "seed": "",
-                "qc": {"approved": True},
+                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
             {
                 "texture_id": "accent_mid",
                 "path": str(paths["accent_mid"].resolve()),
                 "role": "accent_mid",
-                "approved": True,
+                "approved": False,
+                "candidate": True,
                 "prompt": "从 Neo AI 3×3 面料看板裁剪：中调点缀纹理",
                 "model": "neo-ai",
                 "seed": "",
-                "qc": {"approved": True},
+                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
             {
                 "texture_id": "solid_quiet",
                 "path": str(paths["solid_quiet"].resolve()),
                 "role": "solid_quiet",
-                "approved": True,
+                "approved": False,
+                "candidate": True,
                 "prompt": "从 Neo AI 3×3 面料看板裁剪：安静纯色面板",
                 "model": "neo-ai",
                 "seed": "",
-                "qc": {"approved": True},
+                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
         ],
         "motifs": [
@@ -654,39 +672,42 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "texture_id": "hero_motif_1",
                 "path": str(paths["hero_motif_1"].resolve()),
                 "role": "hero",
-                "approved": True,
+                "approved": False,
+                "candidate": True,
                 "prompt": "从 Neo AI 3×3 面料看板裁剪：卖点定位图案 1",
                 "model": "neo-ai",
                 "seed": "",
-                "qc": {"approved": True},
+                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
             {
                 "motif_id": "hero_motif_2",
                 "texture_id": "hero_motif_2",
                 "path": str(paths["hero_motif_2"].resolve()),
                 "role": "hero",
-                "approved": True,
+                "approved": False,
+                "candidate": True,
                 "prompt": "从 Neo AI 3×3 面料看板裁剪：卖点定位图案 2",
                 "model": "neo-ai",
                 "seed": "",
-                "qc": {"approved": True},
+                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
             {
                 "motif_id": "trim_motif",
                 "texture_id": "trim_motif",
                 "path": str(paths["trim_motif"].resolve()),
                 "role": "trim",
-                "approved": True,
+                "approved": False,
+                "candidate": True,
                 "prompt": "从 Neo AI 3×3 面料看板裁剪：饰边定位图案",
                 "model": "neo-ai",
                 "seed": "",
-                "qc": {"approved": True},
+                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
         ],
         "solids": [
-            {"solid_id": "quiet_solid", "color": quiet_solid, "approved": True},
-            {"solid_id": "quiet_moss", "color": moss_color, "approved": True},
-            {"solid_id": "warm_ivory", "color": warm_ivory, "approved": True},
+            {"solid_id": "quiet_solid", "color": quiet_solid, "approved": False, "candidate": True},
+            {"solid_id": "quiet_moss", "color": moss_color, "approved": False, "candidate": True},
+            {"solid_id": "warm_ivory", "color": warm_ivory, "approved": False, "candidate": True},
         ],
     }
     return write_json(out_dir / "texture_set.json", texture_set)
@@ -697,6 +718,7 @@ def main() -> int:
     parser.add_argument("--pattern", required=True, help="透明纸样 mask PNG/WebP")
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument("--collection-board", default="", help="已有的 Neo AI 3×3 面料看板。若省略，则调用 Neo AI 生成。")
+    parser.add_argument("--texture-set", default="", help="已审批的 texture_set.json。提供后跳过看板生成/裁剪，直接使用该面料组合继续裁片映射、填充和渲染。")
     parser.add_argument("--theme-image", default="", help="主题/参考图像路径。若提供，会先进行视觉元素提取。")
     parser.add_argument("--visual-elements", default="", help="已完成的 visual_elements.json 路径。若提供，跳过视觉提取直接生成设计简报。")
     parser.add_argument("--prompt-file", default="", help="Neo AI 看板生成的提示词文件")
@@ -709,14 +731,19 @@ def main() -> int:
     parser.add_argument("--crop-inset", type=int, default=60, help="从每个象限裁剪的像素数，用于去除网格间隙和文字标签。默认 60。")
     parser.add_argument("--no-tile-repair", action="store_true", help="不将纹理裁剪镜像修复为无缝图块。")
     parser.add_argument("--brief", default="", help="商业设计简报 JSON 路径。若提供，校验 garment_type 必填；若未提供，尝试从输出目录自动读取。")
+    parser.add_argument("--garment-type", default="", help="服装类型（如'儿童外套套装'、'女装连衣裙'）。走主题图路径时必填，会写入设计简报并传给部位识别。")
     parser.add_argument("--ai-plan", default="", help="子 Agent 生成的 AI 填充计划 JSON 路径。若提供，优先使用 AI 审美决策。")
     parser.add_argument("--construct-ai-request", action="store_true", help="在部位映射后构造子 Agent 审美请求并退出，等待外部子 Agent 生成 ai_piece_fill_plan.json。")
     parser.add_argument("--selected-collection", default="", help="子Agent已选择的 selected_variants.json 路径。若提供，直接生成最终看板 prompt 并跳过选择请求构造。")
     parser.add_argument("--auto-retry", type=int, default=0, help="自动重试次数（0=不重试）。时尚QC发现 high severity issues 或商业复审未通过时，自动构造返工请求并重新渲染。")
-    parser.add_argument("--retry-agent-cmd", default="", help="子 Agent 自调用命令。当 auto-retry 需要修订计划但 rev 文件不存在时，脚本会尝试 subprocess 调用此命令自动生成修订计划。示例: \"kimi chat -p\" 或 \"claude -p\" 或 \"python3 /path/to/agent_runner.py\"")
+    parser.add_argument("--retry-agent-cmd", default="", help="子 Agent 自调用命令。当 auto-retry 需要修订计划但 rev 文件不存在时，脚本会尝试 subprocess 调用此命令自动生成修订计划。支持 {prompt_path} 和 {output_path} 占位符（如 \"claude -p --file {prompt_path} > {output_path}\"）。示例: \"kimi chat -p\" 或 \"claude -p\" 或 \"python3 /path/to/agent_runner.py\"")
     parser.add_argument("--ai-map", default="", help="AI子Agent输出的 ai_garment_map.json 路径。若提供，部位映射优先使用AI识别结果。")
-    parser.add_argument("--commercial-review", action="store_true", help="启用整体商业感复审。时尚质检后调用构造商业复审请求.py，生成 ai_commercial_review_prompt.txt 供子Agent审查。")
+    parser.add_argument("--commercial-review", action="store_true", default=True, help="启用整体商业感复审（默认开启）。时尚质检后调用构造商业复审请求.py，生成 ai_commercial_review_prompt.txt 供子Agent审查。")
+    parser.add_argument("--no-commercial-review", action="store_true", help="禁用整体商业感复审。生产环境建议保持默认开启。")
     args = parser.parse_args()
+    # 处理 --no-commercial-review 覆盖默认值
+    if args.no_commercial_review:
+        args.commercial_review = False
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -727,6 +754,7 @@ def main() -> int:
     if not brief_path and auto_brief.exists():
         brief_path = auto_brief
         args.brief = str(auto_brief)
+    effective_garment_type = args.garment_type.strip()
     if brief_path and brief_path.exists():
         try:
             brief_data = json.loads(brief_path.read_text(encoding="utf-8"))
@@ -734,11 +762,18 @@ def main() -> int:
             if not garment_type or garment_type.strip() == "":
                 print(f"[错误] {brief_path} 中 garment_type 为空，必须提供有效的服装类型（如'儿童外套套装'、'女装连衣裙'）", file=sys.stderr)
                 return 1
+            if not effective_garment_type:
+                effective_garment_type = garment_type.strip()
             print(f"[校验通过] garment_type='{garment_type}'")
         except Exception as exc:
             print(f"[警告] 无法读取 brief: {exc}")
     else:
         print("[警告] 未提供商业设计简报，后续步骤（部位识别、商业复审）可能缺少 garment_type 上下文")
+
+    if (args.theme_image or args.visual_elements) and not effective_garment_type:
+        print("[错误] 走主题图/视觉元素路径时必须提供 --garment-type，或提供包含 garment_type 的 --brief。", file=sys.stderr)
+        return 1
+    args.garment_type = effective_garment_type
 
     # ===== 视觉元素提取阶段 =====
     if args.theme_image and not args.visual_elements:
@@ -757,6 +792,8 @@ def main() -> int:
                 "--theme-image", str(theme_path),
                 "--out", str(out_dir),
             ]
+            if args.garment_type:
+                ve_cmd.extend(["--garment-type", args.garment_type])
             run_step(ve_cmd)
             print("\n[提示] 子 Agent 视觉分析请求已构造。请启动子 Agent 阅读以下文件并输出 visual_elements.json：")
             print(f"  主题图: {theme_path}")
@@ -776,6 +813,8 @@ def main() -> int:
             "--visual-elements", str(ve_path),
             "--out", str(out_dir),
         ]
+        if args.garment_type:
+            brief_cmd.extend(["--garment-type", args.garment_type])
         run_step(brief_cmd)
         # 构造看板候选选择请求（9 面板 × 3 候选 → 子Agent选择最优组合）
         if not args.selected_collection:
@@ -827,10 +866,21 @@ def main() -> int:
                 args.prompt_file = str(prompt_path)
                 print(f"[视觉提取] 已基于子Agent分析自动生成看板提示词: {prompt_path}")
 
-    board_path = Path(args.collection_board).resolve() if args.collection_board else generate_board(args, out_dir).resolve()
-    if not board_path.exists():
-        raise RuntimeError(f"面料看板未找到: {board_path}")
-    print(f"使用面料看板: {board_path}")
+    if args.texture_set:
+        texture_set_path = Path(args.texture_set)
+        if not texture_set_path.is_absolute():
+            texture_set_path = texture_set_path.resolve() if texture_set_path.exists() else (out_dir / texture_set_path).resolve()
+        if not texture_set_path.exists():
+            raise RuntimeError(f"面料组合不存在: {texture_set_path}")
+        texture_set_payload = load_json(texture_set_path)
+        source_board = texture_set_payload.get("source_collection_board", "")
+        board_path = Path(source_board).resolve() if source_board else Path(args.collection_board or texture_set_path).resolve()
+        print(f"使用已提供面料组合: {texture_set_path}")
+    else:
+        board_path = Path(args.collection_board).resolve() if args.collection_board else generate_board(args, out_dir).resolve()
+        if not board_path.exists():
+            raise RuntimeError(f"面料看板未找到: {board_path}")
+        print(f"使用面料看板: {board_path}")
 
     # 尝试读取 palette 以指导纯色提取和颜色校验
     palette = None
@@ -843,7 +893,7 @@ def main() -> int:
             pass
 
     # 看板颜色协调性校验
-    if palette:
+    if palette and not args.texture_set:
         color_warnings = validate_board_colors(board_path, palette)
         if color_warnings:
             print("[颜色校验警告] 以下面板颜色与 palette 偏差较大：")
@@ -855,7 +905,8 @@ def main() -> int:
         else:
             print("[颜色校验] 所有面板颜色与 palette 协调。")
 
-    texture_set_path = crop_collection_board(board_path, out_dir, args.crop_inset, not args.no_tile_repair, palette=palette)
+    if not args.texture_set:
+        texture_set_path = crop_collection_board(board_path, out_dir, args.crop_inset, not args.no_tile_repair, palette=palette)
 
     pieces_cmd = [
         sys.executable,
@@ -888,7 +939,44 @@ def main() -> int:
         "--out",
         str(out_dir / "texture_qc_report.json"),
     ]
-    run_step(qc_cmd)
+    qc_result = run_step(qc_cmd, check=False)
+    texture_qc_report_path = out_dir / "texture_qc_report.json"
+    if texture_qc_report_path.exists():
+        texture_qc = load_json(texture_qc_report_path)
+        texture_qc_issues = collect_texture_qc_issues(texture_qc)
+        high_issues = [issue for issue in texture_qc_issues if issue.get("severity") == "high"]
+        blocking_issues = [issue for issue in high_issues if issue.get("type") != "not_user_approved"]
+        if blocking_issues:
+            print("[错误] 面料质检存在 high severity 问题，停止渲染。请修复资产后重试：", file=sys.stderr)
+            for issue in blocking_issues[:10]:
+                print(f"  - {issue.get('asset_id')}: {issue.get('message', issue.get('type'))}", file=sys.stderr)
+            return 1
+        if high_issues:
+            approval_request = {
+                "request_id": "asset_approval_required_v1",
+                "texture_set": str(texture_set_path.resolve()),
+                "texture_qc_report": str(texture_qc_report_path.resolve()),
+                "message": "面料/图案/纯色仍为 candidate，必须经 AI 视觉 QC 或人工审批后才能继续渲染。",
+                "next_step": "审批后将 texture_set.json 中对应 assets 的 approved 设为 true，并使用 --texture-set 指向该文件重新运行。",
+                "assets": [
+                    {
+                        "asset_id": issue.get("asset_id", ""),
+                        "asset_role": issue.get("asset_role", ""),
+                        "issue": issue.get("message", ""),
+                    }
+                    for issue in high_issues
+                ],
+            }
+            approval_path = out_dir / "asset_approval_request.json"
+            write_json(approval_path, approval_request)
+            print("\n[暂停] 已生成候选面料组合，但资产尚未审批，按生产规则停止在渲染前。")
+            print(f"  面料组合: {texture_set_path.resolve()}")
+            print(f"  质检报告: {texture_qc_report_path.resolve()}")
+            print(f"  审批请求: {approval_path.resolve()}")
+            print("  审批后重新运行时传入 --texture-set 指向已审批的 texture_set.json。")
+            return 0
+    elif qc_result.returncode != 0:
+        return qc_result.returncode
 
     # 构造子 Agent 审美请求（如果启用）
     if args.construct_ai_request:
@@ -1040,8 +1128,13 @@ def main() -> int:
                 run_step(render_cmd)
                 # 重新QC
                 run_step(fashion_cmd)
-                # 若启用商业复审，重新调用（子Agent需重新输出 ai_commercial_review.json）
+                # 若启用商业复审，重新调用（必须清除旧结果，避免审批污染）
                 if args.commercial_review and Path(brief_for_review).exists():
+                    # 清除旧商业复审结果，防止新渲染被旧审批放行
+                    for stale in [out_dir / "ai_commercial_review.json", out_dir / "commercial_review_result.json"]:
+                        if stale.exists():
+                            stale.unlink()
+                            print(f"[自动重试] 清除旧商业复审结果: {stale.name}")
                     review_cmd = [
                         sys.executable,
                         str(SKILL_DIR / "scripts" / "构造商业复审请求.py"),
@@ -1051,9 +1144,6 @@ def main() -> int:
                         "--qc-report", str(out_dir / "fashion_qc_report.json"),
                         "--out", str(out_dir),
                     ]
-                    review_json_path = out_dir / "ai_commercial_review.json"
-                    if review_json_path.exists():
-                        review_cmd.extend(["--selected", str(review_json_path)])
                     run_step(review_cmd)
                     review_result_path = out_dir / "commercial_review_result.json"
                     if review_result_path.exists():
@@ -1071,50 +1161,83 @@ def main() -> int:
                         cmd_str = args.retry_agent_cmd
                         print(f"[自动重试] 尝试调用子 Agent: {cmd_str}")
                         try:
-                            # 读取 rework prompt 作为 stdin 输入
+                            import re
                             prompt_text = prompt_path.read_text(encoding="utf-8")
-                            # 构建输出文件路径，写入环境变量供子 Agent 使用
                             env = os.environ.copy()
                             env["AGENT_OUTPUT_PATH"] = str(revised_plan_path.resolve())
                             env["AGENT_TASK"] = "revise_fill_plan"
                             env["AGENT_PROMPT_PATH"] = str(prompt_path.resolve())
-                            # 支持两种模式：命令中引用 $AGENT_OUTPUT_PATH，或纯命令+stdin
-                            cmd_parts = shlex.split(cmd_str)
-                            proc = subprocess.run(
-                                cmd_parts,
-                                input=prompt_text,
-                                capture_output=True,
-                                text=True,
-                                env=env,
-                                timeout=300,
-                            )
-                            if proc.returncode == 0 and proc.stdout.strip():
-                                # 尝试把 stdout 解析为 JSON 写入修订计划
-                                try:
-                                    json.loads(proc.stdout)
-                                    revised_plan_path.write_text(proc.stdout, encoding="utf-8")
-                                    print(f"[自动重试] 子 Agent 成功生成修订计划: {revised_plan_path}")
-                                    # 继续循环（不 break），下一轮会检测到文件存在
-                                    continue
-                                except json.JSONDecodeError:
-                                    # stdout 不是纯 JSON，可能是自然语言+JSON 混合
-                                    # 尝试提取 JSON 块
-                                    stdout = proc.stdout
-                                    start = stdout.find("{")
-                                    end = stdout.rfind("}")
-                                    if start != -1 and end != -1 and end > start:
-                                        try:
-                                            json.loads(stdout[start:end+1])
-                                            revised_plan_path.write_text(stdout[start:end+1], encoding="utf-8")
-                                            print(f"[自动重试] 子 Agent 成功生成修订计划（提取 JSON）: {revised_plan_path}")
-                                            continue
-                                        except json.JSONDecodeError:
-                                            pass
-                                    print(f"[自动重试] 子 Agent 输出无法解析为 JSON，stdout 前 200 字:\n{proc.stdout[:200]}")
+
+                            # 支持占位符替换：{prompt_path} / {output_path}
+                            resolved_cmd = cmd_str.replace("{prompt_path}", str(prompt_path.resolve())).replace("{output_path}", str(revised_plan_path.resolve()))
+                            cmd_parts = shlex.split(resolved_cmd)
+
+                            # 判断命令是否包含文件重定向（> output_path），如果有则 stdin 不传 prompt_text
+                            has_file_redirection = ">" in resolved_cmd
+                            if has_file_redirection:
+                                proc = subprocess.run(
+                                    cmd_parts,
+                                    capture_output=True,
+                                    text=True,
+                                    env=env,
+                                    timeout=300,
+                                )
                             else:
+                                proc = subprocess.run(
+                                    cmd_parts,
+                                    input=prompt_text,
+                                    capture_output=True,
+                                    text=True,
+                                    env=env,
+                                    timeout=300,
+                                )
+                            stdout = proc.stdout if proc.returncode == 0 else ""
+                            if proc.returncode != 0:
                                 print(f"[自动重试] 子 Agent 调用失败 (rc={proc.returncode})")
                                 if proc.stderr:
                                     print(f"  stderr: {proc.stderr[:200]}")
+                            elif stdout.strip():
+                                # 尝试解析 stdout 为 JSON
+                                candidate_json = stdout.strip()
+                                extracted = None
+                                # 优先匹配 ```json ... ``` 代码块
+                                code_block = re.search(r"```json\s*(.*?)\s*```", candidate_json, re.DOTALL)
+                                if code_block:
+                                    extracted = code_block.group(1).strip()
+                                else:
+                                    #  fallback：找最外层 { ... }
+                                    start = candidate_json.find("{")
+                                    end = candidate_json.rfind("}")
+                                    if start != -1 and end != -1 and end > start:
+                                        extracted = candidate_json[start:end+1]
+
+                                if extracted:
+                                    try:
+                                        parsed = json.loads(extracted)
+                                        # 轻量 schema 校验：必须有 pieces 数组，每个 piece 有 piece_id 和 base
+                                        pieces = parsed.get("pieces")
+                                        if not isinstance(pieces, list) or len(pieces) == 0:
+                                            raise ValueError("缺少 pieces 数组")
+                                        for p in pieces:
+                                            if not p.get("piece_id"):
+                                                raise ValueError(f"piece 缺少 piece_id: {p}")
+                                            if "base" not in p:
+                                                raise ValueError(f"piece {p.get('piece_id')} 缺少 base 字段")
+                                        # schema 校验通过
+                                        revised_plan_path.write_text(extracted, encoding="utf-8")
+                                        print(f"[自动重试] 子 Agent 成功生成修订计划: {revised_plan_path}")
+                                        continue
+                                    except (json.JSONDecodeError, ValueError) as ve:
+                                        print(f"[自动重试] 子 Agent 输出 JSON schema 校验失败: {ve}")
+                                        print(f"  stdout 前 300 字:\n{proc.stdout[:300]}")
+                                        failed_path = revised_plan_path.with_suffix(".failed.txt")
+                                        failed_path.write_text(proc.stdout, encoding="utf-8")
+                                        print(f"  完整 stdout 已保存到: {failed_path}")
+                                else:
+                                    print(f"[自动重试] 子 Agent 输出无法解析为 JSON，stdout 前 200 字:\n{proc.stdout[:200]}")
+                                    failed_path = revised_plan_path.with_suffix(".failed.txt")
+                                    failed_path.write_text(proc.stdout, encoding="utf-8")
+                                    print(f"  完整 stdout 已保存到: {failed_path}")
                         except subprocess.TimeoutExpired:
                             print("[自动重试] 子 Agent 调用超时（300s）")
                         except Exception as exc:
