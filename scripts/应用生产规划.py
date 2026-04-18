@@ -187,16 +187,24 @@ def apply_multi_production_plan(plan_path: Path, out_dir: Path) -> list[dict]:
         fp_path = out_dir / f"ai_piece_fill_plan{suffix}.json"
         fp_path.write_text(json.dumps(fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        results.append({
+        scheme_meta = {
             "scheme_id": scheme_id,
             "suffix": suffix,
             "garment_map": str(gm_path.resolve()),
             "fill_plan": str(fp_path.resolve()),
-        })
+        }
+        for key in ("design_positioning", "strategy_note", "asset_mix_summary", "diversity_tags"):
+            if key in scheme:
+                scheme_meta[key] = scheme[key]
+        results.append(scheme_meta)
 
     # 写入 schemes 元数据索引
     meta_path = out_dir / "schemes_meta.json"
-    meta_path.write_text(json.dumps({"schemes": results}, ensure_ascii=False, indent=2), encoding="utf-8")
+    meta_payload = {"schemes": results}
+    for key in ("portfolio_notes", "asset_coverage", "risk_notes"):
+        if key in plan:
+            meta_payload[key] = plan[key]
+    meta_path.write_text(json.dumps(meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(f"[多方案拆解] 共 {len(results)} 套 scheme 已拆解:")
     for r in results:

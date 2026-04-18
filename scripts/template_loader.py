@@ -9,6 +9,7 @@
 4. 验证匹配质量，返回 garment_map 列表
 """
 import json
+import re
 from pathlib import Path
 
 
@@ -26,6 +27,147 @@ def load_index() -> dict:
     if INDEX_PATH.exists():
         return _load_json(INDEX_PATH)
     return {"templates": [], "version": "1.0.0"}
+
+
+def _find_index_entry_by_id(template_id: str) -> dict | None:
+    if not template_id:
+        return None
+    for entry in load_index().get("templates", []):
+        if entry.get("template_id") == template_id:
+            return entry
+    return None
+
+
+def _find_index_entry_by_garment_type(garment_type: str) -> dict | None:
+    gt_lower = garment_type.lower().strip()
+    if not gt_lower:
+        return None
+    for entry in load_index().get("templates", []):
+        if entry.get("garment_type", "").lower().strip() == gt_lower:
+            return entry
+        if entry.get("template_name", "").lower().strip() == gt_lower:
+            return entry
+        for alias in entry.get("aliases", []):
+            if alias.lower().strip() == gt_lower:
+                return entry
+    return None
+
+
+def _find_index_entry_by_pattern_path(pattern_path: str | Path) -> dict | None:
+    candidate_id = _template_id_from_pattern_path(pattern_path)
+    if not candidate_id:
+        return None
+
+    matches = []
+    for entry in load_index().get("templates", []):
+        tid = entry.get("template_id", "")
+        tname = entry.get("template_name", "")
+        if tid == candidate_id or tname == candidate_id:
+            matches.append((entry, 100))
+        elif candidate_id in tid or candidate_id in tname:
+            matches.append((entry, 50))
+        elif tid in candidate_id or tname in candidate_id:
+            matches.append((entry, 25))
+    if not matches:
+        return None
+    matches.sort(key=lambda x: x[1], reverse=True)
+    return matches[0][0]
+
+
+def _template_id_from_pattern_path(pattern_path: str | Path) -> str:
+    p = Path(pattern_path)
+    candidate_id = p.stem
+    for suffix in ("-S_mask", "-M_mask", "-L_mask", "-XL_mask", "-XXL_mask",
+                   "_S_mask", "_M_mask", "_L_mask", "_XL_mask", "_XXL_mask",
+                   "_mask", "-mask"):
+        if candidate_id.endswith(suffix):
+            return candidate_id[: -len(suffix)]
+    return candidate_id
+
+
+def _size_from_pattern_path(pattern_path: str | Path) -> str:
+    stem = Path(pattern_path).stem.lower()
+    match = re.search(r"[-_]([sml]|xl|xxl)_?mask$", stem)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def _resolve_asset_size(entry: dict, size_label: str = "base", pattern_path: str | Path = "") -> str:
+    sizes = {str(s).lower() for s in entry.get("sizes", [])}
+    requested = (size_label or "").lower().strip()
+    if requested and requested != "base":
+        return requested
+    pattern_size = _size_from_pattern_path(pattern_path) if pattern_path else ""
+    if pattern_size and (not sizes or pattern_size in sizes):
+        return pattern_size
+    return str(entry.get("default_size") or "s").lower()
+
+
+def resolve_template_assets(
+    template_id: str = "",
+    size_label: str = "base",
+    pattern_path: str | Path = "",
+    garment_type: str = "",
+) -> dict | None:
+    """解析可直接复用的内置模板资产。
+
+    仅当 pieces、overview、prepared pattern、garment_map 与 garment_map_overview
+    均存在且 pieces 内部引用的固定文件也存在时返回资产路径；否则返回 None，
+    由调用方回退到运行时提取流程。
+    """
+    entry = _find_index_entry_by_id(template_id)
+    if not entry and pattern_path:
+        entry = _find_index_entry_by_pattern_path(pattern_path)
+    if not entry and garment_type:
+        entry = _find_index_entry_by_garment_type(garment_type)
+    if not entry:
+        return None
+
+    tid = entry.get("template_id", "")
+    resolved_size = _resolve_asset_size(entry, size_label, pattern_path)
+    asset_dir = TEMPLATES_DIR / tid / resolved_size
+    pieces_path = asset_dir / f"pieces_{resolved_size}.json"
+    piece_overview_path = asset_dir / f"piece_overview_{resolved_size}.png"
+    prepared_pattern_path = asset_dir / f"prepared_pattern_{resolved_size}.png"
+    garment_map_path = asset_dir / f"garment_map_{resolved_size}.json"
+    garment_map_overview_path = asset_dir / f"garment_map_overview_{resolved_size}.jpg"
+
+    required = [
+        pieces_path,
+        piece_overview_path,
+        prepared_pattern_path,
+        garment_map_path,
+        garment_map_overview_path,
+    ]
+    if not all(p.exists() for p in required):
+        return None
+
+    try:
+        pieces_payload = _load_json(pieces_path)
+    except Exception:
+        return None
+
+    referenced = [
+        pieces_payload.get("prepared_pattern", ""),
+        pieces_payload.get("overview_image", ""),
+    ]
+    referenced.extend(piece.get("mask_path", "") for piece in pieces_payload.get("pieces", []))
+    for ref in referenced:
+        if not ref or not Path(ref).exists():
+            return None
+
+    return {
+        "template_id": tid,
+        "template_name": entry.get("template_name", ""),
+        "size_label": resolved_size,
+        "asset_dir": str(asset_dir.resolve()),
+        "pieces_path": str(pieces_path.resolve()),
+        "piece_overview_path": str(piece_overview_path.resolve()),
+        "prepared_pattern_path": str(prepared_pattern_path.resolve()),
+        "garment_map_path": str(garment_map_path.resolve()),
+        "garment_map_overview_path": str(garment_map_overview_path.resolve()),
+    }
 
 
 def find_template_by_id(template_id: str, size: str = "base") -> dict | None:

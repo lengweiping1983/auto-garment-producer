@@ -1516,7 +1516,7 @@ def main() -> int:
     parser.add_argument("--dual-prompts", default="", help="dual_collection_prompts.json 路径。若提供，跳过设计简报中的双提示词生成，直接使用该文件。")
     parser.add_argument("--max-retries", type=int, default=2, help="双源均失败时的最大重试次数")
     parser.add_argument("--multi-scheme", action="store_true", help="启用多方案渲染模式。双源模式下，合并 A/B 资产后由 AI 生成多套设计方案并分别渲染。")
-    parser.add_argument("--max-schemes", type=int, default=4, help="多方案模式下的最大方案数（默认4）")
+    parser.add_argument("--max-schemes", type=int, default=12, help="多方案模式下的最大方案数（默认12）")
     args = parser.parse_args()
     # fast 模式自动关闭商业复审和看板选择
     # fast 模式自动关闭商业复审和看板选择
@@ -1921,13 +1921,27 @@ def main() -> int:
             if failed_schemes:
                 print(f"  失败方案: {', '.join(failed_schemes)}")
 
+            scheme_summaries = []
+            for scheme in schemes:
+                item = {
+                    "scheme_id": scheme.get("scheme_id", ""),
+                    "suffix": scheme.get("suffix", ""),
+                }
+                for key in ("design_positioning", "strategy_note", "asset_mix_summary", "diversity_tags"):
+                    if key in scheme:
+                        item[key] = scheme[key]
+                scheme_summaries.append(item)
+
             summary = {
                 "面料看板": [str(r["path"]) for r in board_results],
-                "面料组合_A": str(ts_a["path"]),
-                "面料组合_B": str(ts_b["path"]),
+                "面料组合_A": str(ts_a["path"]) if ts_a else "",
+                "面料组合_B": str(ts_b["path"]) if ts_b else "",
                 "合并面料组合": str(merged_ts_path),
                 "多方案生产规划": str(multi_plan_path),
                 "方案元数据": str(schemes_meta_path),
+                "方案摘要": scheme_summaries,
+                "组合说明": schemes_meta.get("portfolio_notes", ""),
+                "资产覆盖": schemes_meta.get("asset_coverage", {}),
                 "成功方案": success_schemes,
                 "失败方案": failed_schemes,
                 "渲染目录": [str((out_dir / f"rendered{sc['suffix']}").resolve()) for sc in schemes],

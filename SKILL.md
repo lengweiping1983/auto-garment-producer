@@ -433,7 +433,7 @@ python3 /path/to/auto-garment-producer/scripts/端到端自动化.py \
 
 ### 多方案渲染模式（Multi-Scheme Rendering，推荐用于探索设计空间）
 
-让 AI 从可用资产中组合出多套不同的设计方案，每套独立渲染产出。支持**双源 18 资产组合**和**单源 9 资产内组合**两种场景。
+让 AI 从完整资产池中组合出多套不同的专业设计方案，每套独立渲染产出。支持**双源 18 资产全池探索**和**单源 9 资产全池探索**两种场景。默认生成 12 套探索组合，也可用 `--max-schemes 18` 扩大探索范围。
 
 ```bash
 # 前置步骤与双源模式相同（视觉提取 → 设计简报）
@@ -445,23 +445,24 @@ python3 /path/to/auto-garment-producer/scripts/端到端自动化.py \
   --mode standard \
   --dual-source \
   --multi-scheme \
-  --max-schemes 4 \
+  --max-schemes 12 \
   --token "$NEODOMAIN_ACCESS_TOKEN" \
   --libtv-key "$LIBTV_ACCESS_KEY" \
   --commercial-review
 # → 第一次运行：生成看板、准备资产、构造多方案生产规划请求后退出，等待子 Agent
 # → 子 Agent 输出 ai_multi_production_plan.json（含 schemes 数组）
 # → 第二次运行（相同命令）：拆解 schemes，逐套独立渲染
-# → 输出 rendered_scheme_01/ ~ rendered_scheme_04/ 四套结果
+# → 输出 rendered_scheme_01/ ~ rendered_scheme_12/ 十二套结果
 ```
 
 **多方案模式关键行为**：
 - **灵活资产池**：
   - **双源均成功**：A+B 合并为 `merged_texture_set.json`（18 个资产，ID 带 `_a` / `_b` 后缀），AI 从 18 个中自由组合。
   - **仅单源成功**：该源的 9 个资产也会自动加后缀（如 `_a`）并包装为 `merged_texture_set.json`，AI 从这 9 个面板中通过不同的分配策略（谁做 base、谁做 overlay、scale/rotation/anchor 变化）组合出多套方案。**不浪费任何成功生成的资产。**
-- **AI 自由组合**：构造生产规划请求时，提示词根据可用资产数量自动适配：
-  - 双源时：提供 4 种跨源组合策略（全 A 保守量产、全 B 视觉冲击、混搭、反向混搭）。
-  - 单源时：提供 5 种单源内组合策略（经典主调、深色反转、图案聚焦、纹理层次、点缀跳跃）。
+- **AI 全池探索**：构造生产规划请求时，AI 必须把所有可用资产视为一个完整素材库来判断，不得先选定少数候选资产后只在小范围内交换位置。
+  - 双源时：A+B 合并为完整 18 资产池；全 A、全 B、A/B 混合都允许，但只能作为 AI 从完整资产池审美判断后自然得出的结果，不能作为预设模板。
+  - 单源时：从完整 9 资产池生成多套差异化组合，不固定“经典主调/深色反转”等模板。
+  - 每套 scheme 需要说明 `design_positioning`、`asset_mix_summary`、`diversity_tags`；顶层需要说明 `portfolio_notes` 和 `asset_coverage`。
 - **独立渲染**：每套 scheme 拥有独立的 `garment_map` 和 `piece_fill_plan`，独立执行渲染 → 时尚质检 → 商业复审流水线。
 - **失败跳过**：单套 scheme 渲染失败不影响其他方案，调用方自动跳过并继续下一套。
 - **互为备份**：多套方案中任意一套成功即可交付，天然具有容错能力。
@@ -472,17 +473,37 @@ python3 /path/to/auto-garment-producer/scripts/端到端自动化.py \
   "schemes": [
     {
       "scheme_id": "scheme_01",
-      "strategy_note": "全部使用 A 源资产，保守量产方向",
+      "design_positioning": "量产安全款",
+      "strategy_note": "从完整资产池独立判断后的组合策略",
+      "asset_mix_summary": {
+        "body_base_assets": ["main_a"],
+        "secondary_assets": ["accent_mid_b"],
+        "hero_assets": ["hero_motif_1_a"],
+        "trim_assets": ["quiet_solid_b"],
+        "reason": "低噪大身结合更精致的 B 源饰边色，保持可穿性并增加层次"
+      },
+      "diversity_tags": ["quiet_body", "controlled_hero", "accent_trim"],
       "garment_map": { "map_id": "...", "parts": [...] },
       "piece_fill_plan": { "plan_id": "...", "pieces": [...] }
     },
     {
       "scheme_id": "scheme_02",
-      "strategy_note": "全部使用 B 源资产，视觉冲击方向",
+      "design_positioning": "精品陈列款",
+      "strategy_note": "从完整资产池独立判断后的另一种专业组合",
+      "asset_mix_summary": { "...": "..." },
+      "diversity_tags": ["dark_ground", "bold_hero"],
       "garment_map": { ... },
       "piece_fill_plan": { ... }
     }
-  ]
+  ],
+  "portfolio_notes": "整组方案覆盖量产安全、强视觉卖点、深色高级、轻量呼吸感、局部点缀等不同商业方向。",
+  "asset_coverage": {
+    "used_assets": ["main_a", "accent_mid_b", "hero_motif_1_a"],
+    "unused_assets": [
+      { "asset_id": "trim_motif_a", "reason": "trim 禁用 motif，且不适合大面积上身" }
+    ],
+    "coverage_strategy": "质量优先，不机械使用全部资产；但每套方案都从完整资产池出发判断。"
+  }
 }
 ```
 
@@ -491,8 +512,8 @@ python3 /path/to/auto-garment-producer/scripts/端到端自动化.py \
 |------|---------|-----------|
 | 资产池 | A 套 9 个 或 B 套 9 个（分别渲染） | 双源=18 个合并；单源=9 个内组合 |
 | 设计决策 | 每套独立做生产规划 | 一次生产规划输出多套方案 |
-| 输出数量 | 2 套（A/B 各一） | 默认 4 套（可配），失败跳过 |
-| 单源容错 | 仅一个源成功 → 只有 1 套 | 仅一个源成功 → 仍产出 4 套方案 |
+| 输出数量 | 2 套（A/B 各一） | 默认 12 套（可配，建议 12-18），失败跳过 |
+| 单源容错 | 仅一个源成功 → 只有 1 套 | 仅一个源成功 → 仍可产出 12 套探索方案 |
 | 使用场景 | 对比两种平台风格 | 最大化设计探索，不浪费任何资产 |
 
 ### Fast 模式（快速草稿预览，2 次 AI）

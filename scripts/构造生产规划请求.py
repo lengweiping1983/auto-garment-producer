@@ -278,42 +278,50 @@ def build_production_plan_prompt(
     # 多方案模式：插入策略指导和输出格式改造
     if multi_scheme:
         # 检测可用资产源数量（通过后缀 _a / _b 精确匹配）
-        all_assets = texture_set.get("textures", []) + texture_set.get("motifs", []) + texture_set.get("solids", [])
+        image_assets = texture_set.get("textures", []) + texture_set.get("motifs", [])
+        solid_assets = texture_set.get("solids", [])
+        all_assets = image_assets + solid_assets
         def _asset_id(a):
             return a.get("texture_id", a.get("motif_id", a.get("solid_id", "")))
         has_a = any(_asset_id(a).endswith("_a") for a in all_assets)
         has_b = any(_asset_id(a).endswith("_b") for a in all_assets)
         source_count = sum([has_a, has_b])
 
+        image_asset_count = len(image_assets)
+        solid_count = len(solid_assets)
         if source_count >= 2:
             strategy_lines = [
-                f"你需要生成 {max_schemes} 套不同的设计方案（schemes）。每套方案必须有明确的商业定位差异。",
+                f"你需要生成 {max_schemes} 套不同的设计方案（schemes）。每套方案必须有明确的商业定位差异，并且都达到专业成衣打样水准。",
                 "",
-                "当前拥有两套差异化资产（源A + 源B），请充分利用这 18 个资产的组合空间：",
-                "  - scheme_01 '保守量产方案'：全部使用 源A 资产（带 _a 后缀），低噪安全，适合大货量产。",
-                "  - scheme_02 '大胆秀场方案'：全部使用 源B 资产（带 _b 后缀），视觉冲击，适合提案或限量款。",
-                "  - scheme_03 '混搭对比方案'：主底纹/卖点图案用 源A，辅纹/点缀用 源B，形成材质对比。",
-                "  - scheme_04 '反向混搭方案'：主底纹用 源B（更大胆），卖点图案用 源A（更克制）。",
+                f"当前拥有两套差异化 3×3 看板资产（源A + 源B），合计 {image_asset_count} 个图片资产，另有 {solid_count} 个派生纯色。请把它们视为一个完整的可组合素材库，而不是两套互斥方案。",
+                "核心要求：每一套 scheme 都必须重新从完整资产池中判断 base、secondary、accent、hero、trim 的最佳组合。",
+                "严禁先选定 4 个或少数候选资产，再只在这个小范围内交换位置；这会损失多样性，不符合本任务目标。",
+                "允许出现全 A、全 B、A/B 混合、同源内变化等结果，但它们只能是你基于完整资产池审美判断后自然得出的组合，不能作为预设模板。",
                 "",
-                "每套方案的 piece_fill_plan 中，base.texture_id / overlay.motif_id / trim 必须使用带 _a 或 _b 后缀的 id。",
-                "例如：main_a, main_b, hero_motif_1_a, hero_motif_1_b, quiet_solid_a 等。",
+                "组合规则：",
+                "  - 方案之间必须有实质差异，不能只是交换袖口、下摆或小面积 trim。",
+                "  - portfolio 层面至少覆盖：安全量产、强视觉卖点、深色高级、轻量呼吸感、局部点缀、年轻化/秀场感等不同商业方向。",
+                "  - 不追求机械使用所有资产；低质、不适合上身或破坏系列感的资产可以不用，但必须在 asset_coverage.unused_assets 中说明原因。",
+                "  - 每套方案仍必须遵守硬规则：同 symmetry_group / same_shape_group 的 base 一致，最多 1 个 hero overlay，trim 禁用 motif，每个裁片必须有 reason。",
+                "  - piece_fill_plan 中的 base.texture_id / overlay.motif_id / solid_id 必须使用真实存在的资产 ID，例如 main_a、main_b、hero_motif_1_a、hero_motif_1_b、quiet_solid_a 等。",
             ]
         else:
             # 单源情况（1 套或 0 套有后缀都 fallback 为单源）：从 9 个资产中组合多套方案
             source_label = "源A" if has_a else "源B" if has_b else "当前可用"
             source_tag_note = "资产 ID 带 _a 后缀" if has_a else "资产 ID 带 _b 后缀" if has_b else "使用原始资产 ID（无后缀）"
             strategy_lines = [
-                f"你需要生成 {max_schemes} 套不同的设计方案（schemes）。虽然只有一套 3×3 看板的 9 个资产，但这 9 个面板仍有丰富的组合空间，请充分发挥创造力。",
+                f"你需要生成 {max_schemes} 套不同的设计方案（schemes）。每套方案必须有明确的商业定位差异，并且都达到专业成衣打样水准。",
                 "",
-                f"当前只有一套资产（{source_label}），{source_tag_note}，请从这 9 个面板中组合出多套差异化方案：",
-                "  - scheme_01 '经典主调方案'：主底纹 + 标准 hero 定位 + 安静饰边，稳妥可穿。",
-                "  - scheme_02 '深色反转方案'：使用 dark_base 作为主底纹，营造沉稳/高级感，hero 图案保持浅色对比。",
-                "  - scheme_03 '图案聚焦方案'：将 hero_motif 放大或改变位置（如偏左/偏下），其他区域极度安静，突出单品感。",
-                "  - scheme_04 '纹理层次方案'：body 用主底纹，secondary 用 accent_mid，trim 用 accent_light，形成同色系层次变化。",
-                "  - scheme_05 '点缀跳跃方案'：body 用 solid_quiet，仅在局部（如口袋、袖口）使用小面积 accent 纹理或 trim_motif，极简克制。",
+                f"当前只有一套 3×3 看板资产（{source_label}，{source_tag_note}），合计 {image_asset_count} 个图片资产，另有 {solid_count} 个派生纯色。请把所有资产视为一个完整素材库来探索组合。",
+                "核心要求：每一套 scheme 都必须重新从完整资产池中判断 base、secondary、accent、hero、trim 的最佳组合。",
+                "严禁先选定少数候选资产，再只在这个小范围内交换位置；这会损失多样性，不符合本任务目标。",
                 "",
-                "即使是同一套资产，不同的分配策略（谁做 base、谁做 overlay、scale/rotation/anchor 如何变化）也能产生截然不同的商业效果。",
-                "请尽可能给出多套有实质差异的方案，不要敷衍。",
+                "组合规则：",
+                "  - 方案之间必须有实质差异，不能只是交换袖口、下摆或小面积 trim。",
+                "  - portfolio 层面至少覆盖：安全量产、强视觉卖点、深色高级、轻量呼吸感、局部点缀、年轻化/秀场感等不同商业方向。",
+                "  - 不追求机械使用所有资产；低质、不适合上身或破坏系列感的资产可以不用，但必须在 asset_coverage.unused_assets 中说明原因。",
+                "  - 每套方案仍必须遵守硬规则：同 symmetry_group / same_shape_group 的 base 一致，最多 1 个 hero overlay，trim 禁用 motif，每个裁片必须有 reason。",
+                "  - 即使是同一套资产，不同的 base/overlay/scale/rotation/anchor/负空间策略也能产生截然不同的商业效果。",
             ]
 
         lines.extend(["", "===== 多方案策略指导 ====="] + strategy_lines + [""])
@@ -329,7 +337,16 @@ def build_production_plan_prompt(
             "schemes": [
                 {
                     "scheme_id": "scheme_01",
-                    "strategy_note": "描述策略",
+                    "design_positioning": "量产安全款 / 精品陈列款 / 年轻潮流款 / 度假系列款等",
+                    "strategy_note": "从完整资产池独立判断后的组合策略，不是预设模板",
+                    "asset_mix_summary": {
+                        "body_base_assets": ["main_a"],
+                        "secondary_assets": ["accent_mid_b"],
+                        "hero_assets": ["hero_motif_1_a"],
+                        "trim_assets": ["quiet_solid_b"],
+                        "reason": "说明为什么这些资产在本方案中形成专业组合"
+                    },
+                    "diversity_tags": ["quiet_body", "bold_hero", "accent_trim"],
                     "garment_map": {
                         "pieces": [
                             {
@@ -380,9 +397,21 @@ def build_production_plan_prompt(
                     }
                 }
             ],
+            "portfolio_notes": "说明整组方案如何覆盖不同商业方向，以及如何充分利用完整资产池的优势。",
+            "asset_coverage": {
+                "used_assets": ["main_a", "accent_mid_b", "hero_motif_1_a", "quiet_solid_b"],
+                "unused_assets": [
+                    {
+                        "asset_id": "trim_motif_a",
+                        "reason": "trim 禁用 motif，且该图案不适合大面积上身"
+                    }
+                ],
+                "coverage_strategy": "质量优先，不机械使用全部资产；但每套方案都从完整资产池出发判断。"
+            },
             "risk_notes": []
         }, ensure_ascii=False, indent=2))
         lines.append("")
+        lines.append("注：每个 scheme 必须包含 design_positioning、asset_mix_summary、diversity_tags。顶层必须包含 portfolio_notes 和 asset_coverage。")
         lines.append("注：art_direction 可额外包含 notes[] 和可选的 self_assessment（overall_score/wearability/cohesion/hero_clarity/trim_quality/season_fit/customer_match/production_safety/color_balance/negative_space/narrative_control）。")
     else:
         lines.append(json.dumps({
@@ -460,7 +489,7 @@ def main() -> int:
     parser.add_argument("--piece-overview", default="", help="piece_overview.png 路径。若省略，尝试从 pieces.json 所在目录推断。")
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument("--multi-scheme", action="store_true", help="启用多方案模式。要求 AI 输出多套不同的 piece_fill_plan。")
-    parser.add_argument("--max-schemes", type=int, default=4, help="最大方案数（默认 4）。")
+    parser.add_argument("--max-schemes", type=int, default=12, help="最大方案数（默认 12）。")
     args = parser.parse_args()
 
     out_dir = Path(args.out)
