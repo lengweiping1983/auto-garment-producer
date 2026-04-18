@@ -53,6 +53,59 @@ def latest_collection_board(output_dir: Path) -> Path:
     return candidates[-1]
 
 
+def _build_collection_prompt_from_visual_elements(out_dir: Path) -> str:
+    """基于子Agent视觉分析结果构造 3×3 面料看板综合 prompt。
+    读取 texture_prompts.json 和 visual_elements.json，生成适合 Neo AI 的 prompt 文本。"""
+    texture_prompts_path = out_dir / "texture_prompts.json"
+    visual_path = out_dir / "visual_elements.json"
+    if not texture_prompts_path.exists() or not visual_path.exists():
+        return ""
+
+    try:
+        tp = json.loads(texture_prompts_path.read_text(encoding="utf-8"))
+        ve = json.loads(visual_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+
+    prompts = {}
+    for p in tp.get("prompts", []):
+        prompts[p.get("texture_id", "")] = p.get("prompt", "")
+
+    style = ve.get("style", {})
+    palette = ve.get("palette", {})
+    primary = palette.get("primary", [])
+    accent = palette.get("accent", [])
+    dark = palette.get("dark", [])
+
+    lines = [
+        "Create a 3x3 commercial textile collection board, nine coordinated fabric panels arranged in a clean equal grid with thin white gutters between all panels, all inside one square image. Absolutely no text, no labels, no captions, no titles, no words, no letters, no typography, no descriptions anywhere in the image.",
+        "",
+        f"Overall art direction: {style.get('overall_impression', 'Elegant commercial textile collection')}. {style.get('mood', 'Quiet and wearable')}. {style.get('medium', 'Watercolor')}. Low contrast, highly wearable, refined hand-painted brush language, graceful breathing space, not busy, cohesive as one fashion print suite.",
+        "",
+        "Row 1 — Base textures for large garment panels (seamless tileable):",
+        f"Top-left: {prompts.get('main', 'pale base with faint pattern, very low noise, lots of negative space')}",
+        f"Top-center: {prompts.get('secondary', 'coordinated medium-density pattern on light ground')}",
+        f"Top-right: {prompts.get('dark', 'deep dark ground with very subtle texture, quiet and minimal')}",
+        "",
+        "Row 2 — Mid-scale accent textures (seamless tileable):",
+        f"Middle-left: {prompts.get('accent', 'tiny scattered small-scale pattern on light ground, charming but controlled')}",
+        "Middle-center: soft geometric or organic lattice on pale ground, same palette, seamless tileable texture for secondary panels.",
+        "Middle-right: quiet warm solid with only subtle paper grain, no pattern, calm and minimal, seamless tileable solid texture for quiet trim or lining.",
+        "",
+        "Row 3 — Placement motifs and hero elements (plain backgrounds for background removal):",
+        "Bottom-left: a single elegant main subject centered in a delicate decorative frame, plain light background, soft fading edges, balanced negative space, designed as a placement print element.",
+        "Bottom-center: a secondary accent subject, centered, plain light background, refined brushwork, designed as a placement accent motif.",
+        "Bottom-right: a small delicate decorative accent, minimal composition, plain warm background, designed as a trim detail placement element.",
+        "",
+        "All nine panels must look like one coordinated textile collection by the same fashion print designer, identical palette, identical paper texture, identical hand-painted brush style, identical commercial apparel mood.",
+        "",
+        "No animals other than approved subjects, no characters, no faces, no people, no text, no logo, no watermark, no house, no river, no full landscape scene, no poster composition, no sticker sheet, no harsh black outlines, no dense confetti, no neon colors, no muddy dark colors, no gradient backgrounds inside individual panels.",
+        "",
+        "Row 1 and Row 2 panels should be seamless tileable textile swatches usable as fabric repeats. Row 3 panels should be clean placement motifs with plain light backgrounds suitable for background removal.",
+    ]
+    return "\n".join(lines)
+
+
 def generate_board(args: argparse.Namespace, out_dir: Path) -> Path:
     """调用 Neo AI 生成面料看板。"""
     board_dir = out_dir / "neo_collection_board"
@@ -461,6 +514,8 @@ def main() -> int:
     parser.add_argument("--pattern", required=True, help="透明纸样 mask PNG/WebP")
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument("--collection-board", default="", help="已有的 Neo AI 3×3 面料看板。若省略，则调用 Neo AI 生成。")
+    parser.add_argument("--theme-image", default="", help="主题/参考图像路径。若提供，会先进行视觉元素提取。")
+    parser.add_argument("--visual-elements", default="", help="已完成的 visual_elements.json 路径。若提供，跳过视觉提取直接生成设计简报。")
     parser.add_argument("--prompt-file", default="", help="Neo AI 看板生成的提示词文件")
     parser.add_argument("--negative-prompt-file", default="", help="Neo AI 看板生成的反向提示词文件")
     parser.add_argument("--token", default="", help="Neodomain 访问令牌。优先使用 NEODOMAIN_ACCESS_TOKEN 环境变量。")
@@ -477,6 +532,52 @@ def main() -> int:
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ===== 视觉元素提取阶段 =====
+    if args.theme_image and not args.visual_elements:
+        theme_path = Path(args.theme_image)
+        if not theme_path.exists():
+            raise RuntimeError(f"主题图不存在: {theme_path}")
+        ve_out = out_dir / "visual_elements.json"
+        if ve_out.exists():
+            print(f"[视觉提取] 已存在视觉元素分析: {ve_out}，直接使用。")
+            args.visual_elements = str(ve_out)
+        else:
+            # 构造子Agent视觉分析请求
+            ve_cmd = [
+                sys.executable,
+                str(SKILL_DIR / "scripts" / "视觉元素提取.py"),
+                "--theme-image", str(theme_path),
+                "--out", str(out_dir),
+            ]
+            run_step(ve_cmd)
+            print("\n[提示] 子 Agent 视觉分析请求已构造。请启动子 Agent 阅读以下文件并输出 visual_elements.json：")
+            print(f"  主题图: {theme_path}")
+            print(f"  提示词文件: {out_dir / 'ai_vision_prompt.txt'}")
+            print(f"  预期输出: {ve_out}")
+            print("  完成后重新运行本脚本并传入 --visual-elements 参数。\n")
+            return 0
+
+    if args.visual_elements:
+        ve_path = Path(args.visual_elements)
+        if not ve_path.exists():
+            raise RuntimeError(f"visual_elements 不存在: {ve_path}")
+        # 基于视觉元素分析生成设计简报与纹理提示词
+        brief_cmd = [
+            sys.executable,
+            str(SKILL_DIR / "scripts" / "生成设计简报.py"),
+            "--visual-elements", str(ve_path),
+            "--out", str(out_dir),
+        ]
+        run_step(brief_cmd)
+        # 如果用户未显式提供 prompt-file，尝试从 texture_prompts.json 构造综合 prompt
+        if not args.prompt_file:
+            generated_prompt = _build_collection_prompt_from_visual_elements(out_dir)
+            if generated_prompt:
+                prompt_path = out_dir / "generated_collection_prompt.txt"
+                prompt_path.write_text(generated_prompt, encoding="utf-8")
+                args.prompt_file = str(prompt_path)
+                print(f"[视觉提取] 已基于子Agent分析自动生成看板提示词: {prompt_path}")
 
     board_path = Path(args.collection_board).resolve() if args.collection_board else generate_board(args, out_dir).resolve()
     if not board_path.exists():

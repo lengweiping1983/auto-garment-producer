@@ -12,6 +12,8 @@ import argparse
 import json
 from pathlib import Path
 
+from PIL import Image
+
 
 def load_json(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -367,7 +369,147 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
             entry["texture_direction"] = expected_dir
             issues.append({"type": "fixed_texture_direction", "piece_id": entry["piece_id"], "direction": expected_dir})
 
+    # 6. 对花对条修正（Pattern Matching）
+    # 使用相同 texture + 相同 direction 的裁片共享全局纹理坐标系，确保相邻裁片缝合处图案对齐
+    _apply_pattern_matching(entries, by_piece, texture_set, issues)
+
+    # 6b. 对花对条后重新同步同组一致性（防止对称组因对花被拆散）
+    _resync_group_consistency(entries, issues)
+
     return entries, issues
+
+
+def _resync_group_consistency(entries: list[dict], issues: list) -> None:
+    """对花对条后重新确保对称组/同形组内所有裁片 base 层参数一致。"""
+    group_templates: dict[str, dict] = {}
+    for entry in entries:
+        group = entry.get("symmetry_group") or entry.get("same_shape_group")
+        if not group:
+            continue
+        base = entry.get("base")
+        if not isinstance(base, dict):
+            continue
+        if group not in group_templates:
+            group_templates[group] = dict(base)
+        else:
+            template = group_templates[group]
+            changed = False
+            for key in ("texture_id", "scale", "rotation", "offset_x", "offset_y", "mirror_x", "mirror_y"):
+                if base.get(key) != template.get(key):
+                    base[key] = template[key]
+                    changed = True
+            if changed:
+                issues.append({
+                    "type": "fixed_group_mismatch_post_matching",
+                    "piece_id": entry["piece_id"],
+                    "group": group,
+                    "message": "对花对条后重新同步同组裁片参数",
+                })
+
+
+def _apply_pattern_matching(entries: list[dict], by_piece: dict, texture_set: dict, issues: list) -> None:
+    """对花对条：让使用相同纹理且方向一致的相邻裁片共享全局纹理相位。
+    注意：有 symmetry_group / same_shape_group 的裁片会跳过独立计算，
+    由 _resync_group_consistency 统一为组内第一个成员的参数。"""
+    # 读取纹理尺寸
+    texture_sizes: dict[str, tuple[int, int]] = {}
+    for tex in texture_set.get("textures", []):
+        tid = tex.get("texture_id", "")
+        path = tex.get("path", "")
+        if path and Path(path).exists():
+            try:
+                with Image.open(path) as img:
+                    texture_sizes[tid] = (img.width, img.height)
+            except Exception:
+                texture_sizes[tid] = (512, 512)
+        else:
+            texture_sizes[tid] = (512, 512)
+
+    # 按 texture_id + texture_direction 分组
+    groups: dict[str, list[dict]] = {}
+    for entry in entries:
+        base = entry.get("base")
+        if not base or base.get("fill_type") != "texture":
+            continue
+        tid = base.get("texture_id", "")
+        direction = entry.get("texture_direction", "transverse")
+        key = f"{tid}:{direction}"
+        groups.setdefault(key, []).append(entry)
+
+    for key, group_entries in groups.items():
+        if len(group_entries) <= 1:
+            continue
+
+        tid = key.split(":")[0]
+        tex_w, tex_h = texture_sizes.get(tid, (512, 512))
+
+        # 找到 anchor（最大面积，且无 group 优先）
+        # 优先选择没有 symmetry_group / same_shape_group 的裁片作为 anchor，
+        # 这样对称组不会被拆散
+        anchor_candidates = [
+            e for e in group_entries
+            if not e.get("symmetry_group") and not e.get("same_shape_group")
+        ]
+        if anchor_candidates:
+            anchor_entry = max(
+                anchor_candidates,
+                key=lambda e: by_piece.get(e["piece_id"], {}).get("area", 0)
+            )
+        else:
+            # 全部有 group，选面积最大的
+            anchor_entry = max(
+                group_entries,
+                key=lambda e: by_piece.get(e["piece_id"], {}).get("area", 0)
+            )
+        anchor_id = anchor_entry["piece_id"]
+        anchor_bbox = by_piece.get(anchor_id, {}).get("bbox", {})
+        if not anchor_bbox:
+            continue
+        anchor_ox = anchor_entry["base"].get("offset_x", 0)
+        anchor_oy = anchor_entry["base"].get("offset_y", 0)
+        anchor_scale = anchor_entry["base"].get("scale", 1.0)
+
+        # 对称组/同形组只处理一次代表成员
+        seen_groups: set[str] = set()
+
+        for entry in group_entries:
+            if entry["piece_id"] == anchor_id:
+                continue
+
+            group = entry.get("symmetry_group") or entry.get("same_shape_group")
+            if group:
+                if group in seen_groups:
+                    continue
+                seen_groups.add(group)
+
+            bbox = by_piece.get(entry["piece_id"], {}).get("bbox", {})
+            if not bbox:
+                continue
+
+            # pattern image 中的相对位移 → 纹理空间位移
+            dx = bbox.get("x", 0) - anchor_bbox.get("x", 0)
+            dy = bbox.get("y", 0) - anchor_bbox.get("y", 0)
+            tex_dx = dx / anchor_scale
+            tex_dy = dy / anchor_scale
+
+            new_x = (anchor_ox + tex_dx) % tex_w
+            new_y = (anchor_oy + tex_dy) % tex_h
+
+            old_x = entry["base"].get("offset_x", 0)
+            old_y = entry["base"].get("offset_y", 0)
+
+            if abs(new_x - old_x) > 1 or abs(new_y - old_y) > 1:
+                entry["base"]["offset_x"] = round(new_x)
+                entry["base"]["offset_y"] = round(new_y)
+                issues.append({
+                    "type": "fixed_pattern_matching",
+                    "piece_id": entry["piece_id"],
+                    "anchor": anchor_id,
+                    "texture_id": tid,
+                    "old_offset": [old_x, old_y],
+                    "new_offset": [round(new_x), round(new_y)],
+                    "message": f"对花对条：与锚点裁片 {anchor_id} 的纹理相位对齐，确保缝合处图案连续",
+                })
 
 
 def main() -> int:
