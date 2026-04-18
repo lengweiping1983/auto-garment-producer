@@ -12,6 +12,8 @@
 Neo AI 负责创作 artwork。本脚本仅准备已批准资产并以确定性方式渲染到裁片中。
 """
 import argparse
+import datetime
+import hashlib
 import json
 import os
 import subprocess
@@ -23,6 +25,167 @@ from PIL import Image, ImageColor, ImageEnhance, ImageFilter, ImageStat
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 NEO_AI_SCRIPT = Path("/Users/lengweiping/.agents/skills/neo-ai/scripts/generate_texture_collection_board.py")
+
+
+def file_sha256(path: str | Path) -> str:
+    """计算文件的 SHA256 哈希。"""
+    p = Path(path)
+    if not p.exists():
+        return ""
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def dict_sha256(data: dict) -> str:
+    """计算字典的确定性 SHA256 哈希。"""
+    canonical = json.dumps(data, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def cache_dir(out_dir: Path) -> Path:
+    """返回缓存目录路径。"""
+    return out_dir / ".cache"
+
+
+def cache_lookup(out_dir: Path, stage: str, input_hash: dict) -> Path | None:
+    """按 input_hash 查找缓存。命中时返回缓存文件路径，否则返回 None。"""
+    cd = cache_dir(out_dir)
+    if not cd.exists():
+        return None
+    key = dict_sha256(input_hash)
+    meta_path = cd / f"{stage}_{key}.meta.json"
+    if not meta_path.exists():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        stored_hash = meta.get("input_hash")
+        if stored_hash != input_hash:
+            return None
+        output_path = cd / meta.get("output_file", "")
+        if output_path.exists():
+            return output_path
+    except Exception:
+        pass
+    return None
+
+
+def cache_save(out_dir: Path, stage: str, input_hash: dict, output_path: Path) -> None:
+    """将输出文件保存到缓存。"""
+    cd = cache_dir(out_dir)
+    cd.mkdir(parents=True, exist_ok=True)
+    key = dict_sha256(input_hash)
+    cached_file = cd / f"{stage}_{key}{output_path.suffix}"
+    cached_file.write_bytes(output_path.read_bytes())
+    meta = {
+        "stage": stage,
+        "input_hash": input_hash,
+        "output_file": str(cached_file.name),
+        "created_at": datetime.datetime.now().isoformat(),
+    }
+    meta_path = cd / f"{stage}_{key}.meta.json"
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _build_geometry_hints(pieces_path: Path, out_path: Path) -> None:
+    """基于裁片几何数据生成 geometry_hints.json，供 AI 决策参考。"""
+    try:
+        data = json.loads(pieces_path.read_text(encoding="utf-8"))
+        pieces = data.get("pieces", [])
+        if not pieces:
+            return
+        largest_area = max(p.get("area", 0) for p in pieces)
+        # 计算中心点和对称性候选
+        xs = [p.get("x", 0) + p.get("width", 0) / 2 for p in pieces]
+        ys = [p.get("y", 0) + p.get("height", 0) / 2 for p in pieces]
+        cx = sum(xs) / len(xs) if xs else 0
+        cy = sum(ys) / len(ys) if ys else 0
+        hints = []
+        for p in sorted(pieces, key=lambda x: x.get("area", 0), reverse=True):
+            area = p.get("area", 0)
+            aspect = p.get("width", 1) / max(1, p.get("height", 1))
+            px = p.get("x", 0) + p.get("width", 0) / 2
+            py = p.get("y", 0) + p.get("height", 0) / 2
+            area_ratio = area / max(1, largest_area)
+            # 简单的几何角色推断（仅为 AI 提供候选，不强制）
+            geo_role = "unknown"
+            if area_ratio > 0.6:
+                geo_role = "body_large"
+            elif area_ratio > 0.3:
+                geo_role = "body_medium"
+            elif aspect >= 3 or aspect <= 0.34:
+                geo_role = "strip_or_trim"
+            elif area_ratio < 0.12:
+                geo_role = "small_detail"
+            else:
+                geo_role = "panel"
+            hints.append({
+                "piece_id": p["piece_id"],
+                "area": area,
+                "area_ratio": round(area_ratio, 3),
+                "width": p.get("width", 0),
+                "height": p.get("height", 0),
+                "aspect_ratio": round(aspect, 2),
+                "centroid": [round(px, 1), round(py, 1)],
+                "relative_to_center": [round(px - cx, 1), round(py - cy, 1)],
+                "geometry_role_hint": geo_role,
+            })
+        out_path.write_text(json.dumps({"pieces": hints, "center": [round(cx, 1), round(cy, 1)]}, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[几何推断] geometry_hints 已生成: {out_path}")
+    except Exception as exc:
+        print(f"[警告] geometry_hints 生成失败: {exc}")
+
+
+def build_production_context(args, out_dir: Path) -> Path:
+    """生成 production_context.json，统一索引所有输入和中间产物。"""
+    ctx = {
+        "input_hash": {},
+        "paths": {},
+        "computed": {},
+        "created_at": datetime.datetime.now().isoformat(),
+        "script_version": "2.0.0",
+    }
+    # 输入文件 hash
+    if args.theme_image:
+        ctx["input_hash"]["theme_image"] = file_sha256(args.theme_image)
+        ctx["paths"]["theme_image"] = str(Path(args.theme_image).resolve())
+    if args.pattern:
+        ctx["input_hash"]["pattern_image"] = file_sha256(args.pattern)
+        ctx["paths"]["pattern_image"] = str(Path(args.pattern).resolve())
+    ctx["input_hash"]["garment_type"] = args.garment_type
+    ctx["input_hash"]["user_prompt"] = getattr(args, "user_prompt", "")
+
+    # 中间产物路径
+    for name, fname in [
+        ("pieces_json", "pieces.json"),
+        ("piece_overview", "piece_overview.png"),
+        ("garment_map", "garment_map.json"),
+        ("texture_set", "texture_set.json"),
+        ("visual_elements", "visual_elements.json"),
+        ("brief", "commercial_design_brief.json"),
+        ("geometry_hints", "geometry_hints.json"),
+    ]:
+        p = out_dir / fname
+        if p.exists():
+            ctx["paths"][name] = str(p.resolve())
+
+    # 计算字段
+    pieces_path = out_dir / "pieces.json"
+    if pieces_path.exists():
+        try:
+            pieces = json.loads(pieces_path.read_text(encoding="utf-8"))
+            pc = pieces.get("pieces", [])
+            ctx["computed"]["piece_count"] = len(pc)
+            if pc:
+                ctx["computed"]["largest_piece_area"] = max(p.get("area", 0) for p in pc)
+        except Exception:
+            pass
+
+    ctx_path = out_dir / "production_context.json"
+    ctx_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
+    return ctx_path
 
 
 def load_json(path: str | Path) -> dict:
@@ -740,10 +903,22 @@ def main() -> int:
     parser.add_argument("--ai-map", default="", help="AI子Agent输出的 ai_garment_map.json 路径。若提供，部位映射优先使用AI识别结果。")
     parser.add_argument("--commercial-review", action="store_true", default=True, help="启用整体商业感复审（默认开启）。时尚质检后调用构造商业复审请求.py，生成 ai_commercial_review_prompt.txt 供子Agent审查。")
     parser.add_argument("--no-commercial-review", action="store_true", help="禁用整体商业感复审。生产环境建议保持默认开启。")
+    parser.add_argument("--mode", default="standard", choices=["fast", "standard", "production", "legacy"], help="运行模式。fast=跳过看板选择AI和商业复审（草稿预览），standard=默认完整流程，production=含资产审批gate和强制返工，legacy=旧分步脚本兼容模式。")
+    parser.add_argument("--reuse-cache", action="store_true", help="启用缓存复用。若输入未变化，跳过对应阶段的AI调用和程序计算。")
+    parser.add_argument("--production-plan", default="", help="已完成的 ai_production_plan.json 路径。若提供且缓存允许，跳过生产规划AI调用，直接应用该计划。")
+    parser.add_argument("--skip-collection-selection", action="store_true", help="跳过看板候选选择AI（等效fast模式行为），程序直接取每个panel第一个variant。")
     args = parser.parse_args()
     # 处理 --no-commercial-review 覆盖默认值
     if args.no_commercial_review:
         args.commercial_review = False
+    # fast 模式自动关闭商业复审和看板选择
+    if args.mode == "fast":
+        args.commercial_review = False
+        args.skip_collection_selection = True
+    if args.skip_collection_selection:
+        print(f"[模式] {args.mode} — 跳过看板选择AI")
+    if not args.commercial_review and args.mode != "fast":
+        print("[模式] 商业复审已关闭")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -775,34 +950,72 @@ def main() -> int:
         return 1
     args.garment_type = effective_garment_type
 
-    # ===== 视觉元素提取阶段 =====
+    # ============================================================
+    # Phase 1: 程序-only 准备层（与 AI 调用无关，可并行执行）
+    # ============================================================
+    # 1a. 裁片提取 —— 纯程序，不依赖任何 AI 输出，优先执行
+    pieces_path = out_dir / "pieces.json"
+    if not pieces_path.exists() or not args.reuse_cache:
+        pieces_cmd = [
+            sys.executable,
+            str(SKILL_DIR / "scripts" / "提取裁片.py"),
+            "--pattern", args.pattern,
+            "--out", str(out_dir),
+        ]
+        run_step(pieces_cmd)
+    else:
+        print(f"[缓存] pieces.json 已存在，跳过裁片提取")
+
+    # 1b. 程序几何推断 → geometry_hints.json（供后续 AI 参考）
+    geometry_hints_path = out_dir / "geometry_hints.json"
+    if pieces_path.exists() and (not geometry_hints_path.exists() or not args.reuse_cache):
+        _build_geometry_hints(pieces_path, geometry_hints_path)
+
+    # ============================================================
+    # Phase 2: 主题图/视觉元素路径（可能涉及 AI 调用，可能中途退出）
+    # ============================================================
+    # 注意：此阶段与 Phase 1 无依赖关系，理论上可并行
+    ve_handled = False
     if args.theme_image and not args.visual_elements:
         theme_path = Path(args.theme_image)
         if not theme_path.exists():
             raise RuntimeError(f"主题图不存在: {theme_path}")
         ve_out = out_dir / "visual_elements.json"
-        if ve_out.exists():
-            print(f"[视觉提取] 已存在视觉元素分析: {ve_out}，直接使用。")
-            args.visual_elements = str(ve_out)
-        else:
-            # 构造子Agent视觉分析请求
-            ve_cmd = [
-                sys.executable,
-                str(SKILL_DIR / "scripts" / "视觉元素提取.py"),
-                "--theme-image", str(theme_path),
-                "--out", str(out_dir),
-            ]
-            if args.garment_type:
-                ve_cmd.extend(["--garment-type", args.garment_type])
-            run_step(ve_cmd)
-            print("\n[提示] 子 Agent 视觉分析请求已构造。请启动子 Agent 阅读以下文件并输出 visual_elements.json：")
-            print(f"  主题图: {theme_path}")
-            print(f"  提示词文件: {out_dir / 'ai_vision_prompt.txt'}")
-            print(f"  预期输出: {ve_out}")
-            print("  完成后重新运行本脚本并传入 --visual-elements 参数。\n")
-            return 0
+        # 缓存检查
+        if args.reuse_cache:
+            ve_hash = {"theme_image": file_sha256(theme_path), "garment_type": args.garment_type}
+            cached = cache_lookup(out_dir, "visual_elements", ve_hash)
+            if cached:
+                print(f"[缓存复用] visual_elements: {cached}")
+                ve_out.write_bytes(cached.read_bytes())
+                args.visual_elements = str(ve_out)
+                ve_handled = True
+        if not ve_handled:
+            if ve_out.exists():
+                print(f"[视觉提取] 已存在视觉元素分析: {ve_out}，直接使用。")
+                args.visual_elements = str(ve_out)
+                ve_handled = True
+            else:
+                # 构造子Agent视觉分析请求
+                ve_cmd = [
+                    sys.executable,
+                    str(SKILL_DIR / "scripts" / "视觉元素提取.py"),
+                    "--theme-image", str(theme_path),
+                    "--out", str(out_dir),
+                ]
+                if args.garment_type:
+                    ve_cmd.extend(["--garment-type", args.garment_type])
+                run_step(ve_cmd)
+                if args.reuse_cache:
+                    cache_save(out_dir, "visual_elements", ve_hash, out_dir / "ai_vision_request.json")
+                print("\n[提示] 子 Agent 视觉分析请求已构造。请启动子 Agent 阅读以下文件并输出 visual_elements.json：")
+                print(f"  主题图: {theme_path}")
+                print(f"  提示词文件: {out_dir / 'ai_vision_prompt.txt'}")
+                print(f"  预期输出: {ve_out}")
+                print("  完成后重新运行本脚本并传入 --visual-elements 参数。\n")
+                return 0
 
-    if args.visual_elements:
+    if args.visual_elements and not ve_handled:
         ve_path = Path(args.visual_elements)
         if not ve_path.exists():
             raise RuntimeError(f"visual_elements 不存在: {ve_path}")
@@ -816,9 +1029,8 @@ def main() -> int:
         if args.garment_type:
             brief_cmd.extend(["--garment-type", args.garment_type])
         run_step(brief_cmd)
-        # 构造看板候选选择请求（9 面板 × 3 候选 → 子Agent选择最优组合）
-        if not args.selected_collection:
-            # 模式A：生成选择任务，等待子Agent
+        # 构造看板候选选择请求
+        if not args.skip_collection_selection and not args.selected_collection:
             selection_cmd = [
                 sys.executable,
                 str(SKILL_DIR / "scripts" / "构造看板选择请求.py"),
@@ -833,8 +1045,7 @@ def main() -> int:
             print(f"  预期输出: {out_dir / 'selected_variants.json'}")
             print("  完成后重新运行本脚本并传入 --selected-collection 参数。\n")
             return 0
-        else:
-            # 模式B：子Agent已选择，生成最终看板 prompt
+        elif args.selected_collection:
             selected_path = Path(args.selected_collection)
             if not selected_path.is_absolute():
                 selected_path = out_dir / selected_path
@@ -856,10 +1067,9 @@ def main() -> int:
             else:
                 print(f"[警告] 选择结果不存在: {selected_path}，回退到直接构造 prompt")
 
-        # 如果用户未显式提供 prompt-file 且未走选择流程，尝试直接构造综合 prompt
         if not args.prompt_file:
-            ve_path = Path(args.visual_elements) if args.visual_elements else None
-            generated_prompt = _build_collection_prompt_from_visual_elements(out_dir, ve_path)
+            ve_path_obj = Path(args.visual_elements) if args.visual_elements else None
+            generated_prompt = _build_collection_prompt_from_visual_elements(out_dir, ve_path_obj)
             if generated_prompt:
                 prompt_path = out_dir / "generated_collection_prompt.txt"
                 prompt_path.write_text(generated_prompt, encoding="utf-8")
@@ -907,16 +1117,6 @@ def main() -> int:
 
     if not args.texture_set:
         texture_set_path = crop_collection_board(board_path, out_dir, args.crop_inset, not args.no_tile_repair, palette=palette)
-
-    pieces_cmd = [
-        sys.executable,
-        str(SKILL_DIR / "scripts" / "提取裁片.py"),
-        "--pattern",
-        args.pattern,
-        "--out",
-        str(out_dir),
-    ]
-    run_step(pieces_cmd)
 
     pieces_path = out_dir / "pieces.json"
     garment_cmd = [
@@ -978,24 +1178,107 @@ def main() -> int:
     elif qc_result.returncode != 0:
         return qc_result.returncode
 
-    # 构造子 Agent 审美请求（如果启用）
-    if args.construct_ai_request:
-        request_cmd = [
-            sys.executable,
-            str(SKILL_DIR / "scripts" / "构造审美请求.py"),
-            "--pieces", str(pieces_path),
-            "--garment-map", str(out_dir / "garment_map.json"),
-            "--texture-set", str(texture_set_path),
-            "--out", str(out_dir),
-        ]
-        if args.brief:
-            request_cmd.extend(["--brief", args.brief])
-        run_step(request_cmd)
-        print("\n[提示] 子 Agent 审美请求已构造。请启动子 Agent 阅读以下文件并输出 ai_piece_fill_plan.json：")
-        print(f"  提示词文件: {out_dir / 'ai_fill_plan_prompt.txt'}")
-        print(f"  预期输出: {out_dir / 'ai_piece_fill_plan.json'}")
-        print("  完成后重新运行本脚本并传入 --ai-plan 参数。\n")
-        return 0
+    # ============================================================
+    # Phase 3: 生产规划（合并部位识别 + 审美决策）
+    # ============================================================
+    # 生成 production_context（用于缓存 key 和状态追踪）
+    ctx_path = build_production_context(args, out_dir)
+
+    # 根据模式选择路径
+    use_legacy = args.mode == "legacy"
+    production_plan_path = out_dir / "ai_production_plan.json"
+
+    if args.production_plan:
+        # 用户已提供生产规划，直接应用
+        provided = Path(args.production_plan)
+        if provided.exists():
+            apply_cmd = [
+                sys.executable,
+                str(SKILL_DIR / "scripts" / "应用生产规划.py"),
+                "--production-plan", str(provided),
+                "--out", str(out_dir),
+            ]
+            run_step(apply_cmd)
+            print(f"[生产规划] 已应用用户提供的规划: {provided}")
+        else:
+            print(f"[错误] 提供的生产规划不存在: {provided}", file=sys.stderr)
+            return 1
+    elif use_legacy:
+        # legacy 模式：保持旧流程（构造审美请求 → ai_plan → 填充计划）
+        if args.construct_ai_request:
+            request_cmd = [
+                sys.executable,
+                str(SKILL_DIR / "scripts" / "构造审美请求.py"),
+                "--pieces", str(pieces_path),
+                "--garment-map", str(out_dir / "garment_map.json"),
+                "--texture-set", str(texture_set_path),
+                "--out", str(out_dir),
+            ]
+            if args.brief:
+                request_cmd.extend(["--brief", args.brief])
+            run_step(request_cmd)
+            print("\n[提示] 子 Agent 审美请求已构造。请启动子 Agent 阅读以下文件并输出 ai_piece_fill_plan.json：")
+            print(f"  提示词文件: {out_dir / 'ai_fill_plan_prompt.txt'}")
+            print(f"  预期输出: {out_dir / 'ai_piece_fill_plan.json'}")
+            print("  完成后重新运行本脚本并传入 --ai-plan 参数。\n")
+            return 0
+    else:
+        # 新流程：构造合并生产规划请求
+        # 缓存检查
+        plan_loaded_from_cache = False
+        if args.reuse_cache:
+            plan_hash = {
+                "pattern_image": file_sha256(args.pattern),
+                "texture_set": file_sha256(texture_set_path),
+                "garment_type": args.garment_type,
+                "brief": file_sha256(args.brief) if args.brief else "",
+            }
+            cached = cache_lookup(out_dir, "production_plan", plan_hash)
+            if cached:
+                print(f"[缓存复用] 生产规划: {cached}")
+                production_plan_path.write_bytes(cached.read_bytes())
+                plan_loaded_from_cache = True
+
+        if not plan_loaded_from_cache:
+            if args.construct_ai_request or not production_plan_path.exists():
+                # 构造生产规划请求（合并部位识别 + 审美决策）
+                plan_request_cmd = [
+                    sys.executable,
+                    str(SKILL_DIR / "scripts" / "构造生产规划请求.py"),
+                    "--pieces", str(pieces_path),
+                    "--texture-set", str(texture_set_path),
+                    "--out", str(out_dir),
+                ]
+                if args.brief:
+                    plan_request_cmd.extend(["--brief", args.brief])
+                gh_path = out_dir / "geometry_hints.json"
+                if gh_path.exists():
+                    plan_request_cmd.extend(["--geometry-hints", str(gh_path)])
+                if args.visual_elements:
+                    plan_request_cmd.extend(["--visual-elements", args.visual_elements])
+                if args.ai_map:
+                    plan_request_cmd.extend(["--garment-map", args.ai_map])
+                run_step(plan_request_cmd)
+                print("\n[提示] 生产规划 AI 请求已构造。请启动子 Agent 阅读以下文件并输出 ai_production_plan.json：")
+                print(f"  提示词文件: {out_dir / 'ai_production_plan_prompt.txt'}")
+                print(f"  预期输出: {out_dir / 'ai_production_plan.json'}")
+                print("  该文件应包含 garment_map + piece_fill_plan 两部分。")
+                print("  完成后重新运行本脚本并传入 --production-plan 参数，或直接放入输出目录。\n")
+                return 0
+
+        # 应用生产规划（拆解为 garment_map + ai_piece_fill_plan）
+        if production_plan_path.exists():
+            apply_cmd = [
+                sys.executable,
+                str(SKILL_DIR / "scripts" / "应用生产规划.py"),
+                "--production-plan", str(production_plan_path),
+                "--out", str(out_dir),
+            ]
+            run_step(apply_cmd)
+            if args.reuse_cache and not plan_loaded_from_cache:
+                cache_save(out_dir, "production_plan", plan_hash, production_plan_path)
+        else:
+            print("[警告] ai_production_plan.json 不存在，将使用后端规则生成填充计划（draft preview only）。")
 
     plan_cmd = [
         sys.executable,
@@ -1085,7 +1368,10 @@ def main() -> int:
                 print("\n[提示] 商业复审请求已构造。请启动子Agent完成商业复审：")
                 print(f"  提示词文件: {out_dir / 'ai_commercial_review_prompt.txt'}")
                 print(f"  预期输出: {out_dir / 'ai_commercial_review.json'}")
-                print("  完成后重新运行本脚本并传入 --commercial-review --ai-plan <修订计划>")
+                if use_legacy:
+                    print("  完成后重新运行本脚本并传入 --commercial-review --ai-plan <修订计划>")
+                else:
+                    print("  完成后重新运行本脚本并传入 --commercial-review --production-plan <修订规划>")
 
     # 质检反馈闭环：自动重试模式
     if args.auto_retry > 0:
@@ -1108,19 +1394,43 @@ def main() -> int:
             total_blocks = len(high_issues) + (0 if commercial_approved else 1)
             print(f"\n[自动重试] 第 {retry_count}/{args.auto_retry} 轮：发现 {len(high_issues)} 个 high severity issues" + ("" if commercial_approved else " + 商业复审未通过"))
             # 使用返工提示词让子Agent修订
-            revised_plan_path = out_dir / f"ai_piece_fill_plan_rev{retry_count}.json"
+            # 新流程优先找 production_plan_rev，legacy 找 ai_piece_fill_plan_rev
+            revised_plan_path = out_dir / f"ai_production_plan_rev{retry_count}.json"
+            revised_is_production_plan = True
+            if not revised_plan_path.exists():
+                revised_plan_path = out_dir / f"ai_piece_fill_plan_rev{retry_count}.json"
+                revised_is_production_plan = False
             if revised_plan_path.exists():
                 print(f"[自动重试] 使用修订计划: {revised_plan_path}")
-                # 重新运行创建填充计划（使用修订后的ai-plan）
-                plan_cmd = [
-                    sys.executable,
-                    str(SKILL_DIR / "scripts" / "创建填充计划.py"),
-                    "--pieces", str(pieces_path),
-                    "--texture-set", str(texture_set_path),
-                    "--garment-map", str(out_dir / "garment_map.json"),
-                    "--out", str(out_dir),
-                    "--ai-plan", str(revised_plan_path),
-                ]
+                # 重新运行创建填充计划（使用修订后的 plan）
+                if revised_is_production_plan and not use_legacy:
+                    # 新流程：先应用生产规划，再跑填充计划
+                    apply_cmd = [
+                        sys.executable,
+                        str(SKILL_DIR / "scripts" / "应用生产规划.py"),
+                        "--production-plan", str(revised_plan_path),
+                        "--out", str(out_dir),
+                    ]
+                    run_step(apply_cmd)
+                    plan_cmd = [
+                        sys.executable,
+                        str(SKILL_DIR / "scripts" / "创建填充计划.py"),
+                        "--pieces", str(pieces_path),
+                        "--texture-set", str(texture_set_path),
+                        "--garment-map", str(out_dir / "garment_map.json"),
+                        "--out", str(out_dir),
+                        "--ai-plan", str(out_dir / "ai_piece_fill_plan.json"),
+                    ]
+                else:
+                    plan_cmd = [
+                        sys.executable,
+                        str(SKILL_DIR / "scripts" / "创建填充计划.py"),
+                        "--pieces", str(pieces_path),
+                        "--texture-set", str(texture_set_path),
+                        "--garment-map", str(out_dir / "garment_map.json"),
+                        "--out", str(out_dir),
+                        "--ai-plan", str(revised_plan_path),
+                    ]
                 if args.brief:
                     plan_cmd.extend(["--brief", args.brief])
                 run_step(plan_cmd)
