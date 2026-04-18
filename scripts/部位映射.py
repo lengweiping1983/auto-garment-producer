@@ -24,18 +24,41 @@ def direction_degrees(piece: dict) -> int:
     return 0
 
 
-def texture_direction(garment_role: str, zone: str, aspect: float) -> str:
-    """推断裁片的纹理方向：transverse（横向）或 longitudinal（纵向）。"""
+def _fallback_direction_hint(garment_role: str, zone: str, aspect: float) -> str:
+    """程序兜底的方向建议（hint 而非决定）。仅当 AI 未提供 texture_direction 时作为参考。
+    子 Agent 审美决策可完全覆盖此值。"""
     if garment_role in ("front_hero", "back_body", "secondary_body"):
         return "transverse"
     if garment_role in ("sleeve_pair", "sleeve_or_side_panel", "side_or_long_panel"):
         return "longitudinal"
     if zone == "trim" or garment_role in ("trim_strip", "collar_or_upper_trim", "hem_or_lower_trim"):
-        # 饰边沿长边方向
         return "longitudinal" if aspect >= 1.0 else "transverse"
     if zone == "secondary":
         return "longitudinal" if aspect >= 1.2 else "transverse"
     return "transverse"
+
+
+def _fallback_grain_direction(garment_role: str, zone: str, aspect: float) -> str:
+    """推断裁片的经向（grain direction）：基于服装设计学知识的兜底推断。
+    重要：grain 方向取决于服装部位的穿着方向，与画布上的宽高比无关。
+    """
+    # 袖类：grain 沿袖长方向（手臂上下）= vertical，无视画布 aspect
+    if garment_role in ("sleeve_pair", "sleeve_or_side_panel"):
+        return "vertical"
+    # 饰边类：腰带/袖口/领条沿条带长边方向
+    if garment_role in ("trim_strip", "waistband", "cuff", "neckline_rib"):
+        return "horizontal"
+    # 领/上饰边/下摆：通常 horizontal（沿服装宽度方向）
+    if garment_role in ("collar_or_upper_trim", "hem_or_lower_trim"):
+        return "horizontal"
+    # 口袋盖/育克：通常 horizontal
+    if garment_role in ("pocket_flap", "yoke"):
+        return "horizontal"
+    # body 区（前片/后片/侧片）：vertical（人体上下方向）
+    if zone == "body" or garment_role in ("front_hero", "back_body", "secondary_body", "side_or_long_panel"):
+        return "vertical"
+    # 其他默认 vertical
+    return "vertical"
 
 
 def infer_roles(pieces_payload: dict) -> list[dict]:
@@ -67,8 +90,9 @@ def infer_roles(pieces_payload: dict) -> list[dict]:
             role, zone, confidence = "trim_strip", "trim", 0.78
             reason.append("小型窄长饰边几何形状")
         elif piece["piece_id"] == largest_id:
-            role, zone, confidence = "front_hero", "body", 0.78
-            reason.append("最大裁片选为商业卖点区域")
+            # 最大裁片不一定是 hero——后片可能更大。hero 应由 AI 决策。
+            role, zone, confidence = "back_body", "body", 0.65
+            reason.append("最大裁片回退为 back_body；hero 由 AI 审美决策指定")
         elif piece["piece_id"] == second_id and area_ratio > 0.48:
             role, zone, confidence = "back_body", "body", 0.68
             reason.append("第二大身尺制裁片")
@@ -92,17 +116,23 @@ def infer_roles(pieces_payload: dict) -> list[dict]:
             role, zone, confidence = "small_detail", "detail", 0.52
             reason.append("小型或中型细节裁片")
 
-        role_by_id[piece["piece_id"]] = {
+        entry = {
             "piece_id": piece["piece_id"],
             "garment_role": role,
             "zone": zone,
             "symmetry_group": "",
             "same_shape_group": "",
             "direction_degrees": direction_degrees(piece),
-            "texture_direction": texture_direction(role, zone, aspect),
+            "texture_direction": "",  # fallback 路径不设默认值，由审美子 Agent 决定
+            "texture_direction_hint": _fallback_direction_hint(role, zone, aspect),
+            "grain_direction": _fallback_grain_direction(role, zone, aspect),
             "confidence": round(confidence, 2),
-            "reason": "；".join(reason),
+            "reason": "；".join(reason) + "；texture_direction 未设定，由 AI 审美决策决定",
         }
+        # 低置信度裁片标记为需 AI 重点审核
+        if confidence < 0.6:
+            entry["needs_ai_review"] = True
+        role_by_id[piece["piece_id"]] = entry
 
     # 将尺寸相近的偏心裁片配对为袖对/侧片对称组
     group_index = 1
@@ -232,6 +262,7 @@ def main() -> int:
                     aspect = piece["width"] / max(1, piece["height"])
                     role = ai.get("garment_role", "small_detail")
                     zone = ai.get("zone", "detail")
+                    ai_dir = ai.get("texture_direction", "")
                     entry = {
                         "piece_id": pid,
                         "garment_role": role,
@@ -239,7 +270,9 @@ def main() -> int:
                         "symmetry_group": ai.get("symmetry_group", ""),
                         "same_shape_group": ai.get("same_shape_group", ""),
                         "direction_degrees": direction_degrees(piece),
-                        "texture_direction": texture_direction(role, zone, aspect),
+                        "texture_direction": ai_dir if ai_dir in ("transverse", "longitudinal") else "",
+                        "texture_direction_hint": _fallback_direction_hint(role, zone, aspect) if ai_dir not in ("transverse", "longitudinal") else "",
+                        "grain_direction": ai.get("grain_direction", _fallback_grain_direction(role, zone, aspect)),
                         "confidence": ai.get("confidence", 0.7),
                         "reason": ai.get("reason", "AI识别"),
                     }
@@ -253,7 +286,9 @@ def main() -> int:
                         "symmetry_group": "",
                         "same_shape_group": "",
                         "direction_degrees": direction_degrees(piece),
-                        "texture_direction": texture_direction("small_detail", "detail", aspect),
+                        "texture_direction": "",
+                        "texture_direction_hint": _fallback_direction_hint("small_detail", "detail", aspect),
+                        "grain_direction": _fallback_grain_direction("small_detail", "detail", aspect),
                         "confidence": 0.5,
                         "reason": "AI未覆盖，回退",
                     }

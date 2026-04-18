@@ -57,6 +57,13 @@ def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, s
         "   - line_style：线条特征（如：无轮廓、淡墨勾线、硬笔轮廓、渐变边缘）",
         "   - overall_impression：一句话总体印象",
         "",
+        "6. 面料工艺推断（Fabric Engineering）",
+        "   根据主题图像的风格关键词和视觉特征，推断面料是否有方向性/绒毛：",
+        "   - has_nap: true/false —— 是否有倒顺毛（灯芯绒、丝绒、植绒、毛呢、法兰绒、麂皮、羊羔绒等）",
+        "   - nap_confidence: 0-1 —— 推断确信度",
+        "   - 触发关键词（中文/英文）：灯芯绒、丝绒、植绒、毛呢、法兰绒、麂皮、羊羔绒、corduroy、velvet、fleece、suede、plush、boiled wool",
+        "   - 如果有 nap，说明 nap_direction（vertical/horizontal）",
+        "",
         "5. 自动生成面料提示词（Generated Prompts）",
         "   基于以上分析，为每种面料资产生成英文 AI 图像生成提示词：",
         "   - main：大面积底纹提示词。要求 seamless tileable、low noise、lots of negative space",
@@ -107,6 +114,12 @@ def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, s
                 "pattern_density": "low",
                 "line_style": "淡墨勾线，无硬笔轮廓",
                 "overall_impression": "淡蓝与象牙白交织的东方洛可可水彩风格"
+            },
+            "fabric_hints": {
+                "has_nap": false,
+                "nap_confidence": 0.3,
+                "nap_direction": "",
+                "reason": "水彩纸张风格，无明显绒毛面料特征"
             },
             "generated_prompts": {
                 "main": "seamless tileable commercial textile texture, pale ivory ground with very faint blue peony scrolls, extremely low noise, abundant negative space, watercolor paper grain, no text, no watermark",

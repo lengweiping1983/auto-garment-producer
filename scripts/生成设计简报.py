@@ -4,6 +4,7 @@
 """
 import argparse
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -128,7 +129,7 @@ def main() -> int:
     parser.add_argument("--visual-elements", default="", help="视觉元素分析 JSON 路径（由 视觉元素提取.py 生成）。若提供，优先使用此文件，跳过图像分析。")
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument("--user-prompt", default="", help="用户美术指导或约束")
-    parser.add_argument("--garment-type", default="commercial apparel sample", help="服装类型（如已知）")
+    parser.add_argument("--garment-type", required=True, help="服装类型（如'儿童外套套装'、'女装连衣裙'），必填")
     parser.add_argument("--season", default="spring/summer", help="商业季节信号")
     args = parser.parse_args()
 
@@ -222,6 +223,12 @@ def _generate_outputs(
 
     hero_selling_point = motifs[0] if motifs else "主题核心元素"
 
+    # 从 visual_elements 读取面料工艺推断
+    fabric_hints = visual.get("fabric_hints", {}) if isinstance(visual, dict) else {}
+    has_nap = fabric_hints.get("has_nap", False) if isinstance(fabric_hints, dict) else False
+    nap_direction = fabric_hints.get("nap_direction", "") if isinstance(fabric_hints, dict) else ""
+    nap_confidence = fabric_hints.get("nap_confidence", 0.0) if isinstance(fabric_hints, dict) else 0.0
+
     brief = {
         "brief_id": style_id,
         "aesthetic_direction": style_details.get("mood", "商业畅销款打样") if style_details else "商业畅销款打样",
@@ -230,6 +237,12 @@ def _generate_outputs(
         "season": season,
         "price_tier_signal": "中端精致",
         "hero_selling_point": hero_selling_point,
+        "fabric": {
+            "has_nap": has_nap,
+            "nap_direction": nap_direction,
+            "nap_confidence": nap_confidence,
+            "notes": fabric_hints.get("reason", "") if isinstance(fabric_hints, dict) else "",
+        },
         "theme_image": theme_image,
         "user_prompt": user_prompt,
         "wearability_notes": [

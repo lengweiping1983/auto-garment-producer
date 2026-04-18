@@ -708,16 +708,36 @@ def main() -> int:
     parser.add_argument("--seed", type=int)
     parser.add_argument("--crop-inset", type=int, default=60, help="从每个象限裁剪的像素数，用于去除网格间隙和文字标签。默认 60。")
     parser.add_argument("--no-tile-repair", action="store_true", help="不将纹理裁剪镜像修复为无缝图块。")
-    parser.add_argument("--brief", default="", help="可选的商业设计简报 JSON 路径")
+    parser.add_argument("--brief", default="", help="商业设计简报 JSON 路径。若提供，校验 garment_type 必填；若未提供，尝试从输出目录自动读取。")
     parser.add_argument("--ai-plan", default="", help="子 Agent 生成的 AI 填充计划 JSON 路径。若提供，优先使用 AI 审美决策。")
     parser.add_argument("--construct-ai-request", action="store_true", help="在部位映射后构造子 Agent 审美请求并退出，等待外部子 Agent 生成 ai_piece_fill_plan.json。")
     parser.add_argument("--selected-collection", default="", help="子Agent已选择的 selected_variants.json 路径。若提供，直接生成最终看板 prompt 并跳过选择请求构造。")
-    parser.add_argument("--auto-retry", type=int, default=0, help="自动重试次数（0=不重试）。时尚QC发现issues时，自动构造返工请求并重新渲染。")
+    parser.add_argument("--auto-retry", type=int, default=0, help="自动重试次数（0=不重试）。时尚QC发现 high severity issues 或商业复审未通过时，自动构造返工请求并重新渲染。")
     parser.add_argument("--ai-map", default="", help="AI子Agent输出的 ai_garment_map.json 路径。若提供，部位映射优先使用AI识别结果。")
+    parser.add_argument("--commercial-review", action="store_true", help="启用整体商业感复审。时尚质检后调用构造商业复审请求.py，生成 ai_commercial_review_prompt.txt 供子Agent审查。")
     args = parser.parse_args()
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ===== brief 校验 =====
+    brief_path = Path(args.brief) if args.brief else None
+    auto_brief = out_dir / "commercial_design_brief.json"
+    if not brief_path and auto_brief.exists():
+        brief_path = auto_brief
+        args.brief = str(auto_brief)
+    if brief_path and brief_path.exists():
+        try:
+            brief_data = json.loads(brief_path.read_text(encoding="utf-8"))
+            garment_type = brief_data.get("garment_type", "")
+            if not garment_type or garment_type.strip() == "":
+                print(f"[错误] {brief_path} 中 garment_type 为空，必须提供有效的服装类型（如'儿童外套套装'、'女装连衣裙'）", file=sys.stderr)
+                return 1
+            print(f"[校验通过] garment_type='{garment_type}'")
+        except Exception as exc:
+            print(f"[警告] 无法读取 brief: {exc}")
+    else:
+        print("[警告] 未提供商业设计简报，后续步骤（部位识别、商业复审）可能缺少 garment_type 上下文")
 
     # ===== 视觉元素提取阶段 =====
     if args.theme_image and not args.visual_elements:
@@ -943,20 +963,61 @@ def main() -> int:
     ]
     run_step(fashion_cmd)
 
+    # ===== 商业复审 =====
+    commercial_approved = True
+    if args.commercial_review:
+        brief_for_review = args.brief or str(out_dir / "commercial_design_brief.json")
+        if not Path(brief_for_review).exists():
+            print(f"[警告] 未找到商业设计简报: {brief_for_review}，跳过商业复审")
+            args.commercial_review = False
+        else:
+            review_cmd = [
+                sys.executable,
+                str(SKILL_DIR / "scripts" / "构造商业复审请求.py"),
+                "--preview", str(rendered_dir / "preview.png"),
+                "--fill-plan", str(out_dir / "piece_fill_plan.json"),
+                "--brief", brief_for_review,
+                "--qc-report", str(out_dir / "fashion_qc_report.json"),
+                "--out", str(out_dir),
+            ]
+            # 如果子Agent已输出复审结果，进入验证模式
+            review_json_path = out_dir / "ai_commercial_review.json"
+            if review_json_path.exists():
+                review_cmd.extend(["--selected", str(review_json_path)])
+            run_step(review_cmd)
+
+            # 读取验证后的结果
+            review_result_path = out_dir / "commercial_review_result.json"
+            if review_result_path.exists():
+                review = json.loads(review_result_path.read_text(encoding="utf-8"))
+                commercial_approved = review.get("approved", False)
+            else:
+                commercial_approved = False
+                print("\n[提示] 商业复审请求已构造。请启动子Agent完成商业复审：")
+                print(f"  提示词文件: {out_dir / 'ai_commercial_review_prompt.txt'}")
+                print(f"  预期输出: {out_dir / 'ai_commercial_review.json'}")
+                print("  完成后重新运行本脚本并传入 --commercial-review --ai-plan <修订计划>")
+
     # 质检反馈闭环：自动重试模式
     if args.auto_retry > 0:
         qc_report_path = out_dir / "fashion_qc_report.json"
         retry_count = 0
         while retry_count < args.auto_retry and qc_report_path.exists():
             qc = json.loads(qc_report_path.read_text(encoding="utf-8"))
-            if qc.get("approved", False):
-                print(f"[自动重试] 第 {retry_count} 轮质检通过")
+            high_issues = [i for i in qc.get("issues", []) if i.get("severity") == "high"]
+            qc_fail = bool(high_issues)
+
+            if not qc_fail and commercial_approved:
+                print(f"[自动重试] 第 {retry_count} 轮全部通过（质检+商业复审）")
                 break
-            issues = qc.get("issues", [])
-            if not issues:
+
+            all_issues = qc.get("issues", [])
+            if not all_issues and commercial_approved:
                 break
+
             retry_count += 1
-            print(f"\n[自动重试] 第 {retry_count}/{args.auto_retry} 轮：发现 {len(issues)} 个问题")
+            total_blocks = len(high_issues) + (0 if commercial_approved else 1)
+            print(f"\n[自动重试] 第 {retry_count}/{args.auto_retry} 轮：发现 {len(high_issues)} 个 high severity issues" + ("" if commercial_approved else " + 商业复审未通过"))
             # 使用返工提示词让子Agent修订
             revised_plan_path = out_dir / f"ai_piece_fill_plan_rev{retry_count}.json"
             if revised_plan_path.exists():
@@ -978,9 +1039,32 @@ def main() -> int:
                 run_step(render_cmd)
                 # 重新QC
                 run_step(fashion_cmd)
+                # 若启用商业复审，重新调用（子Agent需重新输出 ai_commercial_review.json）
+                if args.commercial_review and Path(brief_for_review).exists():
+                    review_cmd = [
+                        sys.executable,
+                        str(SKILL_DIR / "scripts" / "构造商业复审请求.py"),
+                        "--preview", str(rendered_dir / "preview.png"),
+                        "--fill-plan", str(out_dir / "piece_fill_plan.json"),
+                        "--brief", brief_for_review,
+                        "--qc-report", str(out_dir / "fashion_qc_report.json"),
+                        "--out", str(out_dir),
+                    ]
+                    review_json_path = out_dir / "ai_commercial_review.json"
+                    if review_json_path.exists():
+                        review_cmd.extend(["--selected", str(review_json_path)])
+                    run_step(review_cmd)
+                    review_result_path = out_dir / "commercial_review_result.json"
+                    if review_result_path.exists():
+                        review = json.loads(review_result_path.read_text(encoding="utf-8"))
+                        commercial_approved = review.get("approved", False)
+                    else:
+                        commercial_approved = False
             else:
                 print(f"[自动重试] 等待子Agent生成修订计划: {revised_plan_path}")
                 print("  请启动子Agent，传入 rework_prompt.txt，输出 ai_piece_fill_plan_rev1.json")
+                if args.commercial_review:
+                    print(f"  同时更新商业复审: {out_dir / 'ai_commercial_review.json'}")
                 break
 
     summary = {
@@ -993,6 +1077,7 @@ def main() -> int:
         "预览图": str((rendered_dir / "preview.png").resolve()),
         "白底预览图": str((rendered_dir / "preview_white.jpg").resolve()),
         "成品质检报告": str((out_dir / "fashion_qc_report.json").resolve()),
+        "商业复审结果": str((out_dir / "commercial_review_result.json").resolve()) if args.commercial_review else "",
     }
     write_json(out_dir / "automation_summary.json", summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))

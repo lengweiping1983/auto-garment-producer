@@ -32,6 +32,35 @@ def build_agent_prompt(garment_map: dict, texture_set: dict, brief: dict, pieces
         if solid.get("approved", True):
             lines.append(f"- {solid.get('solid_id')}: 纯色 {solid.get('color', '')}")
 
+    # 显式列出相关图片路径，供子Agent使用 see_image 查看
+    image_paths = []
+    for tex in texture_set.get("textures", []):
+        p = tex.get("path", "")
+        if p:
+            image_paths.append(p)
+    for motif in texture_set.get("motifs", []):
+        p = motif.get("path", "")
+        if p:
+            image_paths.append(p)
+    # 尝试推断 overview 图路径
+    if pieces_payload:
+        pieces_path = pieces_payload.get("_source_path", "")
+        if pieces_path:
+            from pathlib import Path
+            base = Path(pieces_path).parent
+            for cand in ["piece_overview.png", "garment_map_overview.jpg"]:
+                cp = base / cand
+                if cp.exists():
+                    image_paths.append(str(cp))
+    if image_paths:
+        lines.extend([
+            "",
+            "===== 相关图片路径（请使用 see_image 查看后再做决策）=====",
+            "以下图片是本任务的视觉参考，你必须先查看它们，再结合文本数据做出审美判断：",
+        ])
+        for ip in image_paths:
+            lines.append(f"- {ip}")
+
     garment_type = brief.get("garment_type", "成衣")
     lines.extend([
         "",
@@ -47,20 +76,32 @@ def build_agent_prompt(garment_map: dict, texture_set: dict, brief: dict, pieces
     if palette:
         lines.append(f"色板: {palette}")
 
+    # 计算面积排名
+    by_id = {p["piece_id"]: p for p in garment_map.get("pieces", [])}
+    piece_lookup = {p["piece_id"]: p for p in pieces_payload.get("pieces", [])}
+    all_areas = sorted(
+        [(pid, piece_lookup.get(pid, {}).get("area", 0)) for pid in by_id.keys()],
+        key=lambda x: x[1], reverse=True
+    )
+    area_rank = {pid: idx + 1 for idx, (pid, _) in enumerate(all_areas)}
+
     lines.extend([
         "",
         "===== 裁片列表 =====",
-        "（已按部位角色、对称组、同形组整理）",
+        "【重要声明】以下所有程序推断（role、zone、symmetry_group、same_shape_group、texture_direction）均为基于几何特征的候选建议，不是事实。",
+        "你必须结合 piece_overview.png 裁片总览图和 garment_map_overview.jpg 部位映射图，重新确认每个裁片的实际部位。",
+        "标记为 [需 AI 重点审核] 的裁片 confidence < 0.6，几何推断可靠性低，必须重新确认。",
     ])
-
-    by_id = {p["piece_id"]: p for p in garment_map.get("pieces", [])}
-    piece_lookup = {p["piece_id"]: p for p in pieces_payload.get("pieces", [])}
 
     for piece_id in sorted(by_id.keys()):
         gm = by_id[piece_id]
         geo = piece_lookup.get(piece_id, {})
+        default_dir = gm.get('texture_direction', '') or gm.get('texture_direction_hint', 'transverse')
+        review_flag = " [需 AI 重点审核]" if gm.get("needs_ai_review") else ""
+        rank = area_rank.get(piece_id, 0)
         lines.append(
             f"- {piece_id}: "
+            f"面积排名#{rank}, "
             f"role={gm.get('garment_role')}, "
             f"zone={gm.get('zone')}, "
             f"size={geo.get('width',0)}x{geo.get('height',0)}, "
@@ -69,8 +110,8 @@ def build_agent_prompt(garment_map: dict, texture_set: dict, brief: dict, pieces
             f"symmetry={gm.get('symmetry_group','无')}, "
             f"same_shape={gm.get('same_shape_group','无')}, "
             f"direction={gm.get('direction_degrees',0)}°, "
-            f"texture_direction={gm.get('texture_direction','')}, "
-            f"confidence={gm.get('confidence',0)}"
+            f"默认方向={default_dir}（程序推断，你可覆盖）, "
+            f"confidence={gm.get('confidence',0)}{review_flag}"
         )
 
     # 如果提供了 visual_elements，注入元素几何特征和适配度参考
@@ -148,13 +189,31 @@ def build_agent_prompt(garment_map: dict, texture_set: dict, brief: dict, pieces
         "===== 硬性约束（不可违反） =====",
         "1. 同 symmetry_group 或 same_shape_group 的裁片，base 层必须使用完全相同的参数（texture_id、scale、rotation、offset_x、offset_y、mirror_x、mirror_y）。",
         "2. 仅允许 1 个 hero 裁片（通常是 front_hero），base 使用 main 纹理，overlay 使用 hero_motif 居中放置。",
-        "3. body zone（front_hero, back_body, secondary_body）使用低噪底纹（main 或 secondary），方向横向（transverse）。",
-        "4. secondary zone（sleeve_pair, sleeve_or_side_panel, side_or_long_panel, matched_panel）使用协调纹理（secondary），方向纵向（longitudinal）。",
-        "5. trim zone（trim_strip, collar, hem）使用安静纯色（quiet solid 或 dark texture），绝不使用 motif 或 accent texture。",
+        "3. body zone（front_hero, back_body, secondary_body）使用低噪底纹（main 或 secondary）。",
+        "4. secondary zone（sleeve_pair, sleeve_or_side_panel, side_or_long_panel, matched_panel）使用协调纹理（secondary）。",
+        "5. trim zone（trim_strip, collar, hem）优先使用 dark texture 或 quiet solid，但允许使用 subtle accent texture（如小碎花、细条纹等低复杂度纹理）。禁用 motif overlay（防止切割）。",
         "6. detail zone 使用点缀纹理（accent），但保持克制。",
         "7. 每个裁片必须提供 reason（设计理由，中文）。",
-        "8. 【新增】motif 的 scale 和 rotation 必须考虑元素方向与裁片方向的匹配：竖向元素放纵向裁片时 rotation=0°，放横向裁片时 rotation=90°；横向元素反之。",
-        "9. 【新增】motif 不应被裁片边界切断；如果元素尺寸明显大于裁片，应缩小 scale 或更换为更小的元素。",
+        "8. motif 的 scale 和 rotation 必须考虑元素方向与裁片方向的匹配：竖向元素放纵向裁片时 rotation=0°，放横向裁片时 rotation=90°；横向元素反之。",
+        "9. motif 不应被裁片边界切断；如果元素尺寸明显大于裁片，应缩小 scale 或更换为更小的元素。",
+        "10. 如果你认为左右裁片应有不对称设计（如有意深浅呼应、镜像错位），请在对应裁片声明 `\"intentional_asymmetry\": true`。声明后程序不会强制修正为一致，但会记录为 warning 供人工审批。",
+        "11. 标记为 [需 AI 重点审核] 的裁片，confidence 偏低，请结合图片重新确认其部位角色和纹理方向。",
+        "12. 如果你有意在大身裁片使用 solid（极简设计等），请确保已提供明确的设计理由。程序会对大身 solid 发出 high severity 返工请求，需要你确认意图。"
+        "",
+        "===== 纹理方向决策（AI 决定，非硬性约束） =====",
+        "【强制】你必须先使用 see_image 查看上方列出的每个 texture 和 motif 缩略图，判断其图案的方向语义（无方向 / 上下方向 / 左右方向 / 斜向），然后再为每个裁片决定 texture_direction。",
+        "每个裁片的 texture_direction 默认为程序推断值（可能为空），但你可以根据以下因素覆盖：",
+        "- 如果纹理本身有方向性（竖条纹、定向花朵、斜纹等），请让裁片方向与纹理方向一致。",
+        "- 条纹衬衫前片常用竖纹（显瘦），苏格兰格必须正向（不能斜），灯芯绒必须同向。",
+        "- 同 symmetry_group / same_shape_group 的裁片方向必须一致（镜像除外）。",
+        "- 如果你决定覆盖默认值，请在 reason 中说明为什么。",
+        "- 如果程序未提供默认值（为空），请基于纹理图案的方向性自行决定。",
+        "",
+        "===== 经向约束（纸样工艺） =====",
+        "grain_direction 已在部位映射中推断（基于服装设计学知识）。",
+        "- body 区通常为 vertical（人体上下方向）。",
+        "- 如果面料有绒毛（has_nap=true），所有裁片的 base.rotation 必须同向（不允许 mix 不同角度），以确保成衣下水后不变形。",
+        "- 如果 brief 中未声明 has_nap，默认按无绒毛处理。"
         "",
         "===== 输出格式 =====",
         "请返回严格的 JSON，格式如下（不要任何解释文字，只返回 JSON）：",
@@ -189,6 +248,23 @@ def build_agent_prompt(garment_map: dict, texture_set: dict, brief: dict, pieces
             "art_direction": {
                 "strategy": "单一卖点定位，低噪身片，协调副片，安静饰边",
                 "hero_piece_ids": ["piece_001"],
+                "self_assessment": {
+                    "overall_score": 8.5,
+                    "criteria": {
+                        "hero_clarity": 9.0,
+                        "body_wearability": 8.0,
+                        "texture_hierarchy": 8.0,
+                        "trim_restraint": 9.0,
+                        "pair_coordination": 8.0,
+                        "palette_control": 8.5,
+                        "motif_integrity": 9.0,
+                        "distant_view": 8.5,
+                        "close_up_detail": 8.0,
+                        "production_risk": 9.0
+                    },
+                    "below_threshold": ["body_wearability"],
+                    "revision_notes": "如有任何单项低于 8.5，请说明具体原因并给出修改方案"
+                },
                 "notes": [],
             }
         }, ensure_ascii=False, indent=2),

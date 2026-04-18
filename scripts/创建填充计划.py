@@ -301,11 +301,22 @@ def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: d
             piece_scale = params.get("scale") or 1.18
             if group_key and params.get("scale") is None:
                 params["scale"] = piece_scale
+            # trim 优先使用 dark 纹理，但允许 subtle accent texture（不再强制降级到 solid）
             if dark_id:
                 entry["base"] = make_layer(
                     "texture",
-                    "真正饰边使用安静协调纹理，避免不匹配的纯色块",
+                    "饰边优先使用深色协调纹理",
                     texture_id=dark_id,
+                    scale=piece_scale,
+                    rotation=0,
+                    offset_x=params["offset_x"],
+                    offset_y=params["offset_y"],
+                )
+            elif accent_id:
+                entry["base"] = make_layer(
+                    "texture",
+                    "无 dark 纹理时饰边可使用 subtle accent texture",
+                    texture_id=accent_id,
                     scale=piece_scale,
                     rotation=0,
                     offset_x=params["offset_x"],
@@ -314,10 +325,10 @@ def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: d
             elif trim_solid_id:
                 entry["base"] = make_layer(
                     "solid",
-                    "仅小型真正饰边在没有饰边纹理时使用调色板纯色",
+                    "仅小型饰边在无纹理可用时使用调色板纯色",
                     solid_id=trim_solid_id,
                 )
-            entry["reason"] = "小型饰边框定服装，但大型长条面板绝不能变成纯色块"
+            entry["reason"] = "饰边使用协调纹理或 subtle accent，保持视觉边界感"
         elif is_hero:
             hero_count += 1
             hero_ids.append(piece["piece_id"])
@@ -437,7 +448,7 @@ def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: d
     return art_direction, fill_plan
 
 
-def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: dict, motif_geometries: dict = None) -> tuple[list[dict], list[dict]]:
+def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: dict, motif_geometries: dict = None, brief: dict = None) -> tuple[list[dict], list[dict]]:
     """后端强制校验修正填充计划。"""
     issues = []
     by_piece = {p["piece_id"]: p for p in pieces_payload.get("pieces", [])}
@@ -450,7 +461,7 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
     dark_id = choose(texture_ids, ["dark_base", "dark", "secondary", "accent_light", "main"])
     trim_solid_id = choose(solid_ids, ["quiet_solid", "quiet_moss", "moss_green", "forest_green", "dark", "solid"])
 
-    # 1. 同组一致性修正
+    # 1. 同组一致性修正（安全修正：支持 intentional_asymmetry 声明时跳过）
     group_templates: dict[str, dict] = {}
     for entry in entries:
         group = entry.get("symmetry_group") or entry.get("same_shape_group")
@@ -458,6 +469,16 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
             continue
         base = entry.get("base")
         if not isinstance(base, dict):
+            continue
+        # AI 声明了有意不对称设计，程序不强制修正
+        if entry.get("intentional_asymmetry"):
+            issues.append({
+                "type": "intentional_asymmetry_declared",
+                "severity": "low",
+                "piece_id": entry["piece_id"],
+                "group": group,
+                "message": "裁片声明了有意不对称设计，程序跳过同组一致性强制修正",
+            })
             continue
         if group not in group_templates:
             group_templates[group] = dict(base)
@@ -471,6 +492,7 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
             if changed:
                 issues.append({
                     "type": "fixed_group_mismatch",
+                    "severity": "high",
                     "piece_id": entry["piece_id"],
                     "group": group,
                     "message": "修正为与同组裁片一致的 base 层参数",
@@ -479,47 +501,30 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
     # 2. Hero 数量修正
     hero_entries = [e for e in entries if e.get("garment_role") == "front_hero" or (e.get("overlay") or {}).get("fill_type") == "motif"]
     if len(hero_entries) == 0:
-        # 强制指定最大 body 裁片为 hero
+        # 程序不做 hero 决策——留给 AI 子Agent判断哪个裁片最适合做 hero
         body_entries = [e for e in entries if e.get("zone") == "body"]
         if body_entries:
-            largest_body = max(body_entries, key=lambda e: by_piece.get(e["piece_id"], {}).get("area", 0))
-            # 动态 scale
-            forced_motif_id = choose(motif_ids, ["hero_motif", "hero"])
-            forced_scale = 0.72
-            forced_rotation = 0
-            if motif_geometries:
-                geo = motif_geometries.get(forced_motif_id)
-                if not geo:
-                    mid_lower = forced_motif_id.lower()
-                    if "hero" in mid_lower:
-                        geo = motif_geometries.get("hero_motif")
-                    elif "accent" in mid_lower:
-                        geo = motif_geometries.get("accent_motif")
-                if not geo:
-                    geo = next((g for n, g in motif_geometries.items() if n in forced_motif_id or forced_motif_id in n), None)
-                if not geo:
-                    geo = max(motif_geometries.values(), key=lambda g: g.get("pixel_width", 0) * g.get("pixel_height", 0))
-                if geo:
-                    fit = compute_motif_fit_score(geo, largest_body_piece, "front_hero")
-                    forced_scale = fit["recommended_scale"]
-                    forced_rotation = fit["recommended_rotation"]
-            largest_body["overlay"] = make_layer(
-                "motif",
-                f"强制指定为 hero 裁片，动态缩放 scale={forced_scale}",
-                motif_id=forced_motif_id,
-                anchor="center",
-                scale=forced_scale,
-                rotation=forced_rotation,
-                opacity=0.92,
-            )
-            issues.append({"type": "fixed_missing_hero", "piece_id": largest_body["piece_id"]})
+            # 列出候选 body 裁片信息供 AI 参考，但不强制指定
+            candidates = [
+                {
+                    "piece_id": e["piece_id"],
+                    "garment_role": e.get("garment_role", ""),
+                    "area": by_piece.get(e["piece_id"], {}).get("area", 0),
+                }
+                for e in body_entries
+            ]
+            issues.append({
+                "type": "missing_hero_decision",
+                "message": "当前没有 hero 裁片，需要 AI 决策指定。候选 body 裁片如下（按面积排序）：",
+                "candidates": sorted(candidates, key=lambda c: c["area"], reverse=True),
+            })
     elif len(hero_entries) > 2:
         # 取消多余的 hero
         for extra in hero_entries[2:]:
             extra["overlay"] = None
             issues.append({"type": "fixed_excess_hero", "piece_id": extra["piece_id"]})
 
-    # 3. Trim 安全修正
+    # 3. Trim 安全修正：禁用 motif overlay（防切割风险），但允许 subtle accent texture
     for entry in entries:
         zone = entry.get("zone", "")
         role = entry.get("garment_role", "")
@@ -529,18 +534,23 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
         overlay = entry.get("overlay")
         if overlay and overlay.get("fill_type") == "motif":
             entry["overlay"] = None
-            issues.append({"type": "fixed_trim_motif", "piece_id": entry["piece_id"]})
+            issues.append({"type": "fixed_trim_motif", "piece_id": entry["piece_id"], "message": "trim 禁用 motif overlay"})
+        # 不再强制把 accent texture 降级为 dark/solid——允许 subtle accent
+        # 如果 accent 变化度过高（>50），才建议降级为 soft warning
         base = entry.get("base")
-        if base and base.get("fill_type") == "texture" and base.get("texture_id") == "accent":
-            if dark_id:
-                base["texture_id"] = dark_id
-            elif trim_solid_id:
-                base["fill_type"] = "solid"
-                base["solid_id"] = trim_solid_id
-                del base["texture_id"]
-            issues.append({"type": "fixed_trim_accent", "piece_id": entry["piece_id"]})
+        if base and base.get("fill_type") == "texture" and "accent" in (base.get("texture_id") or ""):
+            piece = by_piece.get(entry["piece_id"], {})
+            # 这里无法直接读取纹理变化度，用 scale 作为代理指标
+            scale = base.get("scale", 1.0)
+            if scale > 1.5:
+                issues.append({
+                    "type": "trim_accent_may_be_too_busy",
+                    "piece_id": entry["piece_id"],
+                    "message": "trim 使用 accent texture 且 scale 较大，可能过于繁忙，建议 AI 审阅",
+                    "severity": "warning",
+                })
 
-    # 4. 大身纯色修正
+    # 4. 大身纯色检查（审美修正 → 只记录 issue，不强制替换）
     for entry in entries:
         zone = entry.get("zone", "")
         piece = by_piece.get(entry["piece_id"], {})
@@ -548,28 +558,30 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
         if zone == "body" and area_ratio >= 0.15:
             base = entry.get("base")
             if base and base.get("fill_type") == "solid":
-                base["fill_type"] = "texture"
-                base["texture_id"] = main_id
-                for key in ("solid_id",):
-                    base.pop(key, None)
-                issues.append({"type": "fixed_large_body_solid", "piece_id": entry["piece_id"]})
+                issues.append({
+                    "type": "large_body_solid_not_recommended",
+                    "severity": "high",
+                    "piece_id": entry["piece_id"],
+                    "message": "大身裁片使用纯色通常不推荐（缺乏纹理层次），建议改用 texture 或确认设计意图",
+                })
 
-    # 5. 方向对齐修正
+    # 5. 方向一致性检查（AI 决定 texture_direction，程序只兜底检查同组一致性）
+    group_directions: dict[str, set[str]] = {}
     for entry in entries:
-        piece = by_piece.get(entry["piece_id"], {})
-        role = entry.get("garment_role", "")
-        aspect = piece.get("width", 1) / max(1, piece.get("height", 1))
-        base = entry.get("base")
-        if not base:
+        group = entry.get("symmetry_group") or entry.get("same_shape_group")
+        if not group:
             continue
-        expected_dir = ""
-        if role in ("front_hero", "back_body", "secondary_body"):
-            expected_dir = "transverse"
-        elif role in ("sleeve_pair", "sleeve_or_side_panel", "side_or_long_panel"):
-            expected_dir = "longitudinal"
-        if expected_dir and entry.get("texture_direction") != expected_dir:
-            entry["texture_direction"] = expected_dir
-            issues.append({"type": "fixed_texture_direction", "piece_id": entry["piece_id"], "direction": expected_dir})
+        direction = entry.get("texture_direction", "")
+        if direction:
+            group_directions.setdefault(group, set()).add(direction)
+    for group, directions in group_directions.items():
+        if len(directions) > 1:
+            issues.append({
+                "type": "group_direction_mismatch",
+                "group": group,
+                "directions": list(directions),
+                "message": f"同组裁片 texture_direction 不一致: {directions}，请AI统一方向",
+            })
 
     # 6. 对花对条修正（Pattern Matching）
     # 使用相同 texture + 相同 direction 的裁片共享全局纹理坐标系，确保相邻裁片缝合处图案对齐
@@ -578,7 +590,51 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
     # 6b. 对花对条后重新同步同组一致性（防止对称组因对花被拆散）
     _resync_group_consistency(entries, issues)
 
-    # 7. Motif 方向对齐修正
+    # 7. Nap（绒毛方向）一致性检查
+    fabric_has_nap = brief.get("fabric", {}).get("has_nap", False) if brief else False
+    nap_direction = brief.get("fabric", {}).get("nap_direction", "") if brief else ""
+    if fabric_has_nap:
+        # 根据 nap_direction 决定目标 rotation；nap_direction 为空时用最常见值兜底
+        if nap_direction == "vertical":
+            target_rotation = 0
+        elif nap_direction == "horizontal":
+            target_rotation = 90
+        else:
+            rotations = set()
+            for entry in entries:
+                base = entry.get("base", {})
+                if base and base.get("fill_type") == "texture":
+                    rotations.add(base.get("rotation", 0) % 180)
+            from collections import Counter
+            target_rotation = Counter(rotations).most_common(1)[0][0] if rotations else 0
+
+        for entry in entries:
+            base = entry.get("base", {})
+            if base and base.get("fill_type") == "texture":
+                old = base.get("rotation", 0)
+                if old % 180 != target_rotation % 180:
+                    base["rotation"] = target_rotation
+                    fix_issues.append({
+                        "type": "fixed_nap_rotation",
+                        "severity": "high",
+                        "piece_id": entry["piece_id"],
+                        "old_rotation": old,
+                        "new_rotation": target_rotation,
+                        "message": f"绒毛面料(nap_direction={nap_direction or '未指定'})要求所有裁片 rotation 一致，已强制统一为 {target_rotation}°",
+                    })
+        # 禁止 mirror_y（会翻转绒毛方向）
+        for entry in entries:
+            base = entry.get("base", {})
+            if base and base.get("mirror_y"):
+                base["mirror_y"] = False
+                fix_issues.append({
+                    "type": "fixed_nap_mirror_y",
+                    "severity": "high",
+                    "piece_id": entry["piece_id"],
+                    "message": "绒毛面料禁止 mirror_y（会翻转绒毛方向）",
+                })
+
+    # 8. Motif 方向对齐检查（审美修正 → 只记录 warning/issue，不静默修改 rotation）
     for entry in entries:
         overlay = entry.get("overlay")
         if not overlay or overlay.get("fill_type") != "motif":
@@ -604,25 +660,25 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
         recommended = compute_motif_rotation(geo.get("orientation", "irregular"), texture_dir, piece)
         current = overlay.get("rotation", 0)
         if abs(current - recommended) > 15:
-            overlay["rotation"] = recommended
             issues.append({
-                "type": "fixed_motif_orientation",
+                "type": "motif_orientation_mismatch",
+                "severity": "medium",
                 "piece_id": entry["piece_id"],
-                "old_rotation": current,
-                "new_rotation": recommended,
-                "reason": f"motif 方向({geo.get('orientation')}) 与裁片方向({texture_dir}) 不匹配，自动对齐",
+                "current_rotation": current,
+                "suggested_rotation": recommended,
+                "message": f"motif 方向({geo.get('orientation')}) 与裁片方向({texture_dir}) 可能不匹配，建议 AI 审阅 rotation",
             })
-        # 同时修正 scale：如果 visibility 过低，增大 scale
+        # scale 建议（不强制修改）：如果 visibility 过低，给出建议
         fit = compute_motif_fit_score(geo, piece, entry.get("garment_role", ""))
         current_scale = overlay.get("scale", 0.72)
-        if fit["visibility_score"] < 0.7 and current_scale < fit["recommended_scale"]:
-            overlay["scale"] = fit["recommended_scale"]
+        if fit["visibility_score"] < 0.5 and current_scale < fit["recommended_scale"]:
             issues.append({
-                "type": "fixed_motif_scale",
+                "type": "motif_scale_too_small",
+                "severity": "medium",
                 "piece_id": entry["piece_id"],
-                "old_scale": current_scale,
-                "new_scale": fit["recommended_scale"],
-                "reason": f"motif 在裁片内可见度({fit['visibility_score']})不足，自动调整 scale",
+                "current_scale": current_scale,
+                "suggested_scale": fit["recommended_scale"],
+                "message": f"motif 在裁片内可见度({fit['visibility_score']:.2f})偏低，建议增大 scale 或更换 motif",
             })
 
     return entries, issues
@@ -826,7 +882,7 @@ def main() -> int:
         entries = fill_plan.get("pieces", [])
 
     # 阶段 2：强制校验修正
-    entries, fix_issues = enforce_validation(entries, pieces_payload, texture_set, motif_geometries)
+    entries, fix_issues = enforce_validation(entries, pieces_payload, texture_set, motif_geometries, brief)
 
     # 重新组装 art_direction
     hero_ids = [e["piece_id"] for e in entries if (e.get("overlay") or {}).get("fill_type") == "motif"]
@@ -837,6 +893,8 @@ def main() -> int:
     if ai_plan_used and art_direction:
         art_direction["hero_piece_ids"] = hero_ids
         art_direction["validation_fixes"] = fix_issues
+        art_direction["draft_preview_only"] = False
+        art_direction["production_ready"] = True
     else:
         art_direction = {
             "plan_id": "commercial_art_direction_v1",
@@ -847,7 +905,9 @@ def main() -> int:
             "trim_piece_ids": trim_ids,
             "strategy": "单一卖点定位，低噪身片，协调副片，安静饰边",
             "validation_fixes": fix_issues,
-            "risk_notes": ["使用后端规则生成"] if not ai_plan_used else [],
+            "risk_notes": ["使用后端规则生成，仅作草稿预览，不得作为生产审批稿"] if not ai_plan_used else [],
+            "draft_preview_only": True,
+            "production_ready": False,
         }
 
     fill_plan = {
@@ -867,6 +927,8 @@ def main() -> int:
             "艺术指导方案": str(art_path.resolve()),
             "裁片填充计划": str(fill_path.resolve()),
             "使用AI计划": ai_plan_used,
+        "草稿预览": not ai_plan_used,
+        "生产就绪": ai_plan_used,
             "校验修正": len(fix_issues),
             "卖点裁片": art_direction["hero_piece_ids"],
         },

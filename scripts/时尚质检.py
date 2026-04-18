@@ -195,8 +195,9 @@ def main() -> int:
         if ve_path.exists():
             visual_elements = load_json(str(ve_path))
 
-    issues = []
-    warnings = []
+    # severity 定义：high=必须修复，medium=建议修复，low=参考
+    issues = []      # high severity
+    warnings = []    # medium / low severity
     hero_entries = []
     texture_usage: dict[str, int] = {}
     missing_reasons = []
@@ -208,10 +209,16 @@ def main() -> int:
     piece_lookup = {piece["piece_id"]: piece for piece in pieces_payload.get("pieces", [])}
     largest_area = max((piece.get("area", 0) for piece in pieces_payload.get("pieces", [])), default=1)
 
-    # 同组一致性检查
+    # 同组一致性检查（base 层参数 + texture_direction）
     group_base_layers: dict[str, dict] = {}
+    group_directions: dict[str, set[str]] = {}
     for entry in fill_plan.get("pieces", []):
         group = entry.get("symmetry_group") or entry.get("same_shape_group")
+        if group:
+            # 检查 texture_direction 一致性
+            direction = entry.get("texture_direction", "")
+            if direction:
+                group_directions.setdefault(group, set()).add(direction)
         if not group:
             continue
         base = entry.get("base")
@@ -237,6 +244,17 @@ def main() -> int:
                     "message": f"同组裁片 base 层参数不一致: {mismatches}",
                 })
             group_base_layers[group]["pieces"].append(entry["piece_id"])
+
+    # 检查同组 texture_direction 一致性
+    for group, directions in group_directions.items():
+        if len(directions) > 1:
+            warnings.append({
+                "type": "group_texture_direction_mismatch",
+                "severity": "medium",
+                "group": group,
+                "directions": list(directions),
+                "message": f"同组裁片 texture_direction 不一致: {directions}",
+            })
 
     for entry in fill_plan.get("pieces", []):
         piece_id = entry.get("piece_id", "")
@@ -276,35 +294,38 @@ def main() -> int:
             # motif 级检查
             motif_cut = check_motif_cut(piece_id, image_path, entry)
             if motif_cut:
+                motif_cut["severity"] = "medium"
                 warnings.append(motif_cut)
             for layer in collect_layer_refs(entry):
                 if layer.get("fill_type") == "motif":
                     motif_scale_issue = check_motif_scale(piece_id, image_path, piece_lookup.get(piece_id, {}), layer)
                     if motif_scale_issue:
+                        motif_scale_issue["severity"] = "medium"
                         warnings.append(motif_scale_issue)
                     if visual_elements:
                         motif_ori_issue = check_motif_orientation(piece_id, layer, entry, visual_elements)
                         if motif_ori_issue:
+                            motif_ori_issue["severity"] = "medium"
                             warnings.append(motif_ori_issue)
         else:
-            issues.append({"type": "missing_rendered_piece", "piece_id": piece_id, "message": f"缺失渲染裁片: {image_path}"})
+            issues.append({"type": "missing_rendered_piece", "severity": "high", "piece_id": piece_id, "message": f"缺失渲染裁片: {image_path}"})
 
     if len(hero_entries) == 0:
-        warnings.append({"type": "missing_hero_piece", "message": "未找到卖点裁片或图案定位。"})
+        warnings.append({"type": "missing_hero_piece", "severity": "low", "message": "未找到卖点裁片或图案定位。"})
     if len(hero_entries) > 2:
-        issues.append({"type": "too_many_hero_pieces", "message": f"卖点裁片过多（{len(hero_entries)} 个）: {hero_entries}"})
+        issues.append({"type": "too_many_hero_pieces", "severity": "high", "message": f"卖点裁片过多（{len(hero_entries)} 个）: {hero_entries}"})
     if len(texture_usage) <= 1 and len(fill_plan.get("pieces", [])) > 3:
-        warnings.append({"type": "flat_texture_hierarchy", "message": "大部分裁片使用相同面料族；输出可能感觉均匀填充。"})
+        warnings.append({"type": "flat_texture_hierarchy", "severity": "low", "message": "大部分裁片使用相同面料族；输出可能感觉均匀填充。"})
     if missing_reasons:
-        issues.append({"type": "missing_plan_reasons", "piece_ids": missing_reasons})
+        warnings.append({"type": "missing_plan_reasons", "severity": "medium", "piece_ids": missing_reasons, "message": "部分裁片缺少决策理由。"})
     if busy_trim:
-        issues.append({"type": "busy_trim_motif", "piece_ids": busy_trim, "message": "饰边/窄条裁片使用了复杂图案。"})
+        issues.append({"type": "busy_trim_motif", "severity": "high", "piece_ids": busy_trim, "message": "饰边/窄条裁片使用了复杂图案。"})
     if unapproved_refs:
-        issues.append({"type": "unapproved_asset_reference", "refs": unapproved_refs})
+        issues.append({"type": "unapproved_asset_reference", "severity": "high", "refs": unapproved_refs, "message": "引用了未审批的面料/图案/纯色资产。"})
     if alpha_failures:
-        issues.append({"type": "missing_transparency", "piece_ids": alpha_failures, "message": "渲染后 PNG 缺少透明通道。"})
+        issues.append({"type": "missing_transparency", "severity": "high", "piece_ids": alpha_failures, "message": "渲染后 PNG 缺少透明通道。"})
     if large_solid_pieces:
-        issues.append({"type": "large_piece_uses_flat_solid", "piece_ids": large_solid_pieces, "message": "大面板需要协调纹理或工程化图案，而非不匹配的纯色块。"})
+        issues.append({"type": "large_piece_uses_flat_solid", "severity": "high", "piece_ids": large_solid_pieces, "message": "大面板需要协调纹理或工程化图案，而非不匹配的纯色块。"})
 
     # Hero 裁片 overlay 透明度检查（检查原始 motif 资产，而非渲染后的合成裁片）
     for entry in fill_plan.get("pieces", []):
@@ -342,7 +363,7 @@ def main() -> int:
             rotation = 360 - rotation
         is_trim = entry.get("zone") == "trim" or "trim" in role
         if is_trim and rotation > 30:
-            warnings.append({"type": "trim_rotation_unusual", "piece_id": piece_id, "rotation": rotation, "message": "饰边裁片纹理旋转角度较大，可能影响生产对齐。"})
+            warnings.append({"type": "trim_rotation_unusual", "severity": "low", "piece_id": piece_id, "rotation": rotation, "message": "饰边裁片纹理旋转角度较大，可能影响生产对齐。"})
 
     # 标记饰边裁片变化度过高作为商业可穿性风险
     for entry in fill_plan.get("pieces", []):
@@ -351,15 +372,20 @@ def main() -> int:
         aspect = piece.get("width", 1) / max(1, piece.get("height", 1))
         is_trim = entry.get("zone") == "trim" or "trim" in entry.get("garment_role", "") or aspect >= 3 or aspect <= 0.34
         if is_trim and variation_by_piece.get(piece_id, 0) > 42:
-            warnings.append({"type": "trim_may_be_too_busy", "piece_id": piece_id, "variation": variation_by_piece[piece_id], "message": "饰边裁片可能过于繁忙。"})
+            warnings.append({"type": "trim_may_be_too_busy", "severity": "low", "piece_id": piece_id, "variation": variation_by_piece[piece_id], "message": "饰边裁片可能过于繁忙。"})
 
-    approved = not issues
+    # 程序质检状态：fail=有 high severity issue，warn=只有 medium/low，pass=全空
+    high_issues = [i for i in issues if i.get("severity") == "high"]
+    program_qc_status = "fail" if high_issues else ("warn" if (issues or warnings) else "pass")
+
     report = {
-        "approved": approved,
+        "program_qc_status": program_qc_status,
+        "approved": program_qc_status == "pass",  # 向后兼容：只有全通过才 true
         "summary": {
             "pieces": len(fill_plan.get("pieces", [])),
             "hero_piece_count": len(hero_entries),
             "texture_usage": texture_usage,
+            "high_issues": len(high_issues),
             "issues": len(issues),
             "warnings": len(warnings),
         },
@@ -371,16 +397,41 @@ def main() -> int:
     out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
-    # 质检反馈闭环：发现 issues 时自动构造返工请求
-    if issues:
-        _build_rework_request(issues, warnings, fill_plan, out_path.parent)
+    # 质检反馈闭环：发现 high severity issues 时自动构造返工请求
+    if high_issues:
+        _build_rework_request(high_issues, warnings, fill_plan, out_path.parent)
 
     # 质检报告生成成功即返回 0；issues/warnings 供人工/子 Agent 审阅
     return 0
 
 
 def _build_rework_request(issues: list, warnings: list, fill_plan: dict, out_dir: Path) -> None:
-    """构造返工请求，供子Agent修订填充计划。"""
+    """构造返工请求，供子Agent修订填充计划。
+    自动合并商业复审 issues（如果 commercial_review_result.json 存在）。
+    """
+    # 尝试读取商业复审结果
+    commercial_issues = []
+    review_result_path = out_dir / "commercial_review_result.json"
+    if review_result_path.exists():
+        try:
+            review = json.loads(review_result_path.read_text(encoding="utf-8"))
+            # 优先从 ai_commercial_review.json 读原始 issues（更详细）
+            ai_review_path = out_dir / "ai_commercial_review.json"
+            if ai_review_path.exists():
+                ai_review = json.loads(ai_review_path.read_text(encoding="utf-8"))
+                commercial_issues = ai_review.get("issues", [])
+            else:
+                # fallback：从 result 中无法获取详细 issues，只标记未通过
+                if not review.get("approved", True):
+                    commercial_issues = [{
+                        "severity": "high",
+                        "category": "commercial_review",
+                        "description": review.get("assessment", "商业复审未通过"),
+                        "suggested_fix": review.get("priority_fix", "请参考商业复审报告"),
+                    }]
+        except Exception:
+            pass
+
     lines = [
         "你是一位高级服装印花艺术指导。当前填充计划存在以下问题，请修订。",
         "",
@@ -388,10 +439,25 @@ def _build_rework_request(issues: list, warnings: list, fill_plan: dict, out_dir
         f"总裁片数: {len(fill_plan.get('pieces', []))}",
         f"Hero裁片: {[p['piece_id'] for p in fill_plan.get('pieces', []) if (p.get('overlay') or {}).get('fill_type') == 'motif']}",
         "",
-        "===== 必须修复的问题 =====",
+        "===== 必须修复的问题（程序质检） =====",
     ]
     for issue in issues:
         lines.append(f"- [{issue.get('type')}] {issue.get('piece_id', '')}: {issue.get('message', '')}")
+
+    if commercial_issues:
+        lines.extend([
+            "",
+            "===== 商业复审发现的问题（AI 终审） =====",
+            "以下问题来自商业买手视角的整体审美判断，优先级高于程序质检：",
+        ])
+        for ci in commercial_issues:
+            severity = ci.get("severity", "medium")
+            category = ci.get("category", "")
+            desc = ci.get("description", "")
+            fix = ci.get("suggested_fix", "")
+            lines.append(f"- [{severity}] {category}: {desc}")
+            if fix:
+                lines.append(f"  建议修改: {fix}")
 
     if warnings:
         lines.extend([
@@ -404,10 +470,11 @@ def _build_rework_request(issues: list, warnings: list, fill_plan: dict, out_dir
     lines.extend([
         "",
         "===== 修订要求 =====",
-        "1. 针对每个 issue 给出具体修正：修改哪个裁片的哪个参数",
-        "2. 保持已有的正确决策不变",
-        "3. 输出完整的 ai_piece_fill_plan.json 格式（与之前相同）",
-        "4. 每个修改必须附带 reason",
+        "1. 优先处理商业复审问题（卖点、和谐度、可穿性）",
+        "2. 针对每个 issue 给出具体修正：修改哪个裁片的哪个参数",
+        "3. 保持已有的正确决策不变",
+        "4. 输出完整的 ai_piece_fill_plan.json 格式（与之前相同）",
+        "5. 每个修改必须附带 reason",
         "",
         "===== 输出格式 =====",
         "请返回严格的 JSON，格式与之前的 piece_fill_plan.json 完全一致。",
@@ -420,10 +487,12 @@ def _build_rework_request(issues: list, warnings: list, fill_plan: dict, out_dir
         "request_id": "rework_request_v1",
         "issue_count": len(issues),
         "warning_count": len(warnings),
+        "commercial_issue_count": len(commercial_issues),
         "prompt_path": str(prompt_path.resolve()),
         "expected_output": str((out_dir / "ai_piece_fill_plan_revised.json").resolve()),
         "issues": issues,
         "warnings": warnings,
+        "commercial_issues": commercial_issues,
     }
     req_path = out_dir / "ai_rework_request.json"
     req_path.write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")

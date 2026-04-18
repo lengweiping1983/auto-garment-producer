@@ -31,20 +31,42 @@ def load_json(path: str | Path) -> dict:
 def build_identification_prompt(pieces: list[dict], garment_type: str, overview_path: str) -> str:
     """构造面向子Agent的部位识别 prompt。"""
     type_hints = {
+        # 英文 key
         "shirt": "衬衫/上衣类：通常有前片、后片、2个袖子、领、袖口。前片可能有口袋。",
         "dress": "连衣裙：前片、后片、袖子（或无袖）、裙摆、可能有育克或拼接。",
         "jacket": "外套：前片、后片、2个袖子、领、门襟、可能有口袋盖。trim较宽。",
         "coat": "大衣：前片、后片、2个袖子、领、下摆。body区比例大。",
         "pants": "裤装：前片、后片、腰头、裤脚。无袖子。可能有口袋。",
         "children": "童装：部位较小，比例紧凑。hero通常在胸口。",
+        "children outerwear set": "儿童外套套装：通常有前片、后片、2个袖子、领、门襟、下摆。",
         "commercial apparel": "通用成衣：根据几何特征判断部位。",
+        # 中文 key（常见输入）
+        "衬衫": "衬衫/上衣类：通常有前片、后片、2个袖子、领、袖口。前片可能有口袋。",
+        "上衣": "衬衫/上衣类：通常有前片、后片、2个袖子、领、袖口。前片可能有口袋。",
+        "连衣裙": "连衣裙：前片、后片、袖子（或无袖）、裙摆、可能有育克或拼接。",
+        "外套": "外套：前片、后片、2个袖子、领、门襟、可能有口袋盖。trim较宽。",
+        "大衣": "大衣：前片、后片、2个袖子、领、下摆。body区比例大。",
+        "裤装": "裤装：前片、后片、腰头、裤脚。无袖子。可能有口袋。",
+        "裤子": "裤装：前片、后片、腰头、裤脚。无袖子。可能有口袋。",
+        "童装": "童装：部位较小，比例紧凑。hero通常在胸口。",
+        "儿童外套套装": "儿童外套套装：通常有前片、后片、2个袖子、领、门襟、下摆。",
+        "儿童外套": "儿童外套套装：通常有前片、后片、2个袖子、领、门襟、下摆。",
+        "套装": "套装：可能包含上衣+下装，或外套+裤子组合。",
+        "女装": "女装通用：根据几何特征判断部位。",
+        "男装": "男装通用：根据几何特征判断部位。",
+        "通用成衣": "通用成衣：根据几何特征判断部位。",
     }
-    type_hint = type_hints.get(garment_type.lower(), f"{garment_type}类服装，请根据裁片形状和上下文推断")
+    gt_lower = garment_type.lower().strip()
+    type_hint = type_hints.get(gt_lower, f"{garment_type}类服装，请根据裁片形状和上下文推断")
 
     lines = [
         "你是一位专业服装打版师，精通从纸样总览图识别每个裁片的服装部位。",
         f"以下是一个 {garment_type} 的纸样排版图，共有 {len(pieces)} 个裁片。",
+        f"预览图路径: {overview_path}",
+        "【强制要求】你必须先使用 see_image 查看上述预览图，再进行任何判断。未看图直接输出的识别结果无效。",
+        "",
         "请为每个裁片标注其服装部位角色、所属区域、对称关系。",
+        "注意：看图时关注裁片的实际形状、大小、位置关系，不要仅依赖下方几何数据。"
         "",
         "===== 服装类型指导 =====",
         f"类型: {garment_type}",
@@ -87,6 +109,15 @@ def build_identification_prompt(pieces: list[dict], garment_type: str, overview_
         "3. 窄长条不一定是 trim——可能是腰带、袖头、侧缝装饰。",
         "4. 同尺寸+镜像位置可能是袖对，也可能是口袋对、装饰条对。",
         "5. 服装类型决定部位集合：裤装无袖子，童装部位较小。",
+        "6. 纹理方向（texture_direction）由你根据裁片形状 + 服装类型 + 面料方向性判断：",
+        "   - 条纹衬衫前片常用竖纹（显瘦），body 区可设为 longitudinal",
+        "   - 苏格兰格必须正向（不能斜），所有裁片应同向",
+        "   - 印花面料有方向性主体（花朵向上）时，相关裁片应同向",
+        "   - 同 symmetry_group / same_shape_group 的裁片方向必须一致",
+        "7. 经向（grain_direction）基于服装设计学知识判断：",
+        "   - body 区裁片（前片、后片）通常 vertical（人体上下方向）",
+        "   - 袖子通常 vertical（手臂方向）",
+        "   - 饰边/腰带沿长边方向（窄长条=horizontal，短宽条=vertical）",
         "",
         "===== 输出格式 =====",
         "请返回严格的 JSON，不要任何解释文字：",
@@ -99,6 +130,8 @@ def build_identification_prompt(pieces: list[dict], garment_type: str, overview_
                     "zone": "body",
                     "symmetry_group": "",
                     "same_shape_group": "",
+                    "texture_direction": "transverse",
+                    "grain_direction": "vertical",
                     "confidence": 0.85,
                     "reason": "最大裁片，位于左侧，判断为前片",
                     "alternatives": ["back_body"]
@@ -125,16 +158,29 @@ def merge_ai_map(pieces_payload: dict, ai_map: dict) -> dict:
 
     result = []
     issues = []
+    total_pieces = len(pieces)
+    ai_pieces_list = ai_map.get("pieces", [])
+    ai_ids = {p["piece_id"] for p in ai_pieces_list}
 
-    # 1. 必须有 body 区裁片
-    body_count = sum(1 for p in ai_map.get("pieces", []) if p.get("zone") == "body")
+    # 1. 未识别比例检查：>20% 时报错
+    unrecognized_count = total_pieces - len(ai_ids)
+    unrecognized_ratio = unrecognized_count / max(1, total_pieces)
+    if unrecognized_ratio > 0.20:
+        issues.append({
+            "type": "too_many_unrecognized",
+            "severity": "high",
+            "message": f"AI 未识别裁片比例过高：{unrecognized_count}/{total_pieces} ({round(unrecognized_ratio*100)}%)。请重新启动子Agent，明确要求查看图片后输出所有裁片。",
+        })
+
+    # 2. 必须有 body 区裁片
+    body_count = sum(1 for p in ai_pieces_list if p.get("zone") == "body")
     if body_count == 0:
-        issues.append({"type": "missing_body", "message": "AI识别结果缺少 body 区裁片，请检查"})
+        issues.append({"type": "missing_body", "severity": "high", "message": "AI识别结果缺少 body 区裁片，请检查"})
 
-    # 2. 不允许两个及以上 hero
-    hero_count = sum(1 for p in ai_map.get("pieces", []) if p.get("garment_role") == "front_hero")
+    # 3. 不允许两个及以上 hero
+    hero_count = sum(1 for p in ai_pieces_list if p.get("garment_role") == "front_hero")
     if hero_count > 2:
-        issues.append({"type": "too_many_heroes", "message": f"发现 {hero_count} 个 hero，建议保留1-2个"})
+        issues.append({"type": "too_many_heroes", "severity": "medium", "message": f"发现 {hero_count} 个 hero，建议保留1-2个"})
 
     for piece in pieces:
         pid = piece["piece_id"]
@@ -166,20 +212,33 @@ def merge_ai_map(pieces_payload: dict, ai_map: dict) -> dict:
                 "alternatives": [],
             }
 
-        # 推断 texture_direction
-        role = entry["garment_role"]
-        zone = entry["zone"]
-        aspect = piece["width"] / max(1, piece["height"])
-        if role in ("front_hero", "back_body", "secondary_body"):
-            entry["texture_direction"] = "transverse"
-        elif role in ("sleeve_pair", "sleeve_or_side_panel", "side_or_long_panel"):
-            entry["texture_direction"] = "longitudinal"
-        elif zone == "trim" or role in ("trim_strip", "collar_or_upper_trim", "hem_or_lower_trim"):
-            entry["texture_direction"] = "longitudinal" if aspect >= 1.0 else "transverse"
-        elif zone == "secondary":
-            entry["texture_direction"] = "longitudinal" if aspect >= 1.2 else "transverse"
+        # texture_direction：优先使用AI输出；AI未提供时留空，不设程序硬编码默认值
+        ai_dir = ai.get("texture_direction", "")
+        if ai_dir in ("transverse", "longitudinal"):
+            entry["texture_direction"] = ai_dir
         else:
-            entry["texture_direction"] = "transverse"
+            entry["texture_direction"] = ""
+
+        # grain_direction：优先使用AI输出；AI未提供时程序兜底推断
+        grain = ai.get("grain_direction", "")
+        if grain in ("vertical", "horizontal", "bias_45"):
+            entry["grain_direction"] = grain
+        else:
+            # 基于 garment_role 的设计学知识兜底（与画布 aspect 无关）
+            if role in ("sleeve_pair", "sleeve_or_side_panel"):
+                entry["grain_direction"] = "vertical"  # 袖子 grain 沿手臂方向
+            elif role in ("trim_strip", "waistband", "cuff", "neckline_rib"):
+                entry["grain_direction"] = "horizontal"
+            elif role in ("collar_or_upper_trim", "hem_or_lower_trim", "pocket_flap", "yoke"):
+                entry["grain_direction"] = "horizontal"
+            elif zone == "body" or role in ("front_hero", "back_body", "secondary_body", "side_or_long_panel"):
+                entry["grain_direction"] = "vertical"
+            else:
+                entry["grain_direction"] = "vertical"
+
+        # 低置信度裁片标记为需 AI 重点审核
+        if entry.get("confidence", 0.7) < 0.6:
+            entry["needs_ai_review"] = True
 
         result.append(entry)
 

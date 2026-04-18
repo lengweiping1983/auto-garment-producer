@@ -59,16 +59,19 @@ def text_residual_score(img: Image.Image) -> float:
 
 
 def validate_texture(texture: dict, base_dir: Path) -> dict:
-    """验证单个面料资产。"""
-    issues = []
+    """验证单个面料资产。issues=high severity，warnings=medium/low。"""
+    issues = []      # high severity
+    warnings = []    # medium / low severity
     path = Path(texture.get("path", ""))
     if not path.is_absolute():
         path = base_dir / path
     if not path.exists():
         return {
             "texture_id": texture.get("texture_id", ""),
+            "program_qc_status": "fail",
             "approved": False,
-            "issues": [{"type": "missing_file", "message": f"文件不存在: {path}"}],
+            "issues": [{"type": "missing_file", "severity": "high", "message": f"文件不存在: {path}"}],
+            "warnings": [],
         }
     try:
         with Image.open(path) as img:
@@ -78,46 +81,68 @@ def validate_texture(texture: dict, base_dir: Path) -> dict:
     except Exception as exc:
         return {
             "texture_id": texture.get("texture_id", ""),
+            "program_qc_status": "fail",
             "approved": False,
-            "issues": [{"type": "open_failed", "message": f"无法打开: {exc}"}],
+            "issues": [{"type": "open_failed", "severity": "high", "message": f"无法打开: {exc}"}],
+            "warnings": [],
         }
     text_score = text_residual_score(img)
-    if width < 512 or height < 512:
-        issues.append({"type": "too_small", "message": f"尺寸过小: {width}x{height}"})
-    if tileable < 0.55:
-        issues.append({"type": "low_tileable_score", "message": f"可平铺分数过低: {tileable:.3f}"})
-    # 纯色面板允许低变化度
     role = texture.get("role", "")
-    if variation < 0.06 and "solid" not in role.lower():
-        issues.append({"type": "low_variation", "message": f"变化度过低: {variation:.3f}"})
-    if text_score > 0.50:
-        issues.append({"type": "text_residual_detected", "message": f"检测到文字残留特征: {text_score:.3f}，看板可能含有文字标签"})
+    is_solid = "solid" in role.lower()
+
+    if width < 512 or height < 512:
+        issues.append({"type": "too_small", "severity": "high", "message": f"尺寸过小: {width}x{height}"})
+
+    # 可平铺分数：水彩/有机纹理可能天然不平铺，分两级
+    if tileable < 0.35:
+        issues.append({"type": "low_tileable_score", "severity": "high", "message": f"可平铺分数严重过低: {tileable:.3f}"})
+    elif tileable < 0.55 and not is_solid:
+        warnings.append({"type": "low_tileable_score", "severity": "medium", "message": f"可平铺分数偏低: {tileable:.3f}（水彩/有机纹理可能误报，请人工复核）"})
+
+    # 变化度：纯色面板允许低变化度
+    if variation < 0.03 and not is_solid:
+        issues.append({"type": "low_variation", "severity": "high", "message": f"变化度过低: {variation:.3f}"})
+    elif variation < 0.06 and not is_solid:
+        warnings.append({"type": "low_variation", "severity": "medium", "message": f"变化度偏低: {variation:.3f}"})
+
+    # 文字残留
+    if text_score > 0.70:
+        issues.append({"type": "text_residual_detected", "severity": "high", "message": f"检测到严重文字残留: {text_score:.3f}"})
+    elif text_score > 0.50:
+        warnings.append({"type": "text_residual_detected", "severity": "medium", "message": f"可能检测到文字残留: {text_score:.3f}，请人工复核"})
+
     if not texture.get("approved", False):
-        issues.append({"type": "not_user_approved", "message": "texture.approved 不为 true"})
-    approved = not issues
+        issues.append({"type": "not_user_approved", "severity": "high", "message": "texture.approved 不为 true"})
+
+    program_qc_status = "fail" if issues else ("warn" if warnings else "pass")
     return {
         "texture_id": texture.get("texture_id", ""),
         "role": texture.get("role", ""),
         "path": str(path.resolve()),
-        "approved": approved,
+        "program_qc_status": program_qc_status,
+        "approved": program_qc_status == "pass",
         "tileable_score": round(tileable, 3),
         "variation_score": round(variation, 3),
         "text_residual_score": round(text_score, 3),
         "issues": issues,
+        "warnings": warnings,
     }
 
 
 def validate_motif(motif: dict, base_dir: Path) -> dict:
     """验证单个图案资产。"""
     issues = []
+    warnings = []
     path = Path(motif.get("path", ""))
     if not path.is_absolute():
         path = base_dir / path
     if not path.exists():
         return {
             "motif_id": motif.get("motif_id", ""),
+            "program_qc_status": "fail",
             "approved": False,
-            "issues": [{"type": "missing_file", "message": f"文件不存在: {path}"}],
+            "issues": [{"type": "missing_file", "severity": "high", "message": f"文件不存在: {path}"}],
+            "warnings": [],
         }
     try:
         with Image.open(path).convert("RGBA") as img:
@@ -127,21 +152,26 @@ def validate_motif(motif: dict, base_dir: Path) -> dict:
     except Exception as exc:
         return {
             "motif_id": motif.get("motif_id", ""),
+            "program_qc_status": "fail",
             "approved": False,
-            "issues": [{"type": "open_failed", "message": f"无法打开: {exc}"}],
+            "issues": [{"type": "open_failed", "severity": "high", "message": f"无法打开: {exc}"}],
+            "warnings": [],
         }
     if width < 128 or height < 128:
-        issues.append({"type": "too_small", "message": f"尺寸过小: {width}x{height}"})
+        issues.append({"type": "too_small", "severity": "high", "message": f"尺寸过小: {width}x{height}"})
     if alpha_min == 255 and alpha_max == 255:
-        issues.append({"type": "missing_transparency", "message": "定位图案资产通常应有透明背景"})
+        issues.append({"type": "missing_transparency", "severity": "high", "message": "定位图案资产通常应有透明背景"})
     if not motif.get("approved", False):
-        issues.append({"type": "not_user_approved", "message": "motif.approved 不为 true"})
+        issues.append({"type": "not_user_approved", "severity": "high", "message": "motif.approved 不为 true"})
+    program_qc_status = "fail" if issues else ("warn" if warnings else "pass")
     return {
         "motif_id": motif.get("motif_id", ""),
         "role": motif.get("role", ""),
         "path": str(path.resolve()),
-        "approved": not issues,
+        "program_qc_status": program_qc_status,
+        "approved": program_qc_status == "pass",
         "issues": issues,
+        "warnings": warnings,
     }
 
 
@@ -159,10 +189,26 @@ def main() -> int:
     solid_issues = []
     if not payload.get("solids"):
         solid_issues.append({"type": "missing_solids", "message": "建议至少提供一种已批准纯色。"})
-    approved = all(item["approved"] for item in results) and all(item["approved"] for item in motif_results) and not solid_issues
+    all_issues = []
+    all_warnings = []
+    for item in results + motif_results:
+        all_issues.extend(item.get("issues", []))
+        all_warnings.extend(item.get("warnings", []))
+
+    high_issues = [i for i in all_issues if i.get("severity") == "high"]
+    program_qc_status = "fail" if high_issues else ("warn" if (all_issues or all_warnings or solid_issues) else "pass")
+    approved = program_qc_status == "pass"
+
     report = {
         "texture_set_id": payload.get("texture_set_id", ""),
+        "program_qc_status": program_qc_status,
         "approved": approved,
+        "summary": {
+            "high_issues": len(high_issues),
+            "issues": len(all_issues),
+            "warnings": len(all_warnings),
+            "solid_issues": len(solid_issues),
+        },
         "textures": results,
         "motifs": motif_results,
         "solid_issues": solid_issues,
