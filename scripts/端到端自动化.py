@@ -705,10 +705,11 @@ def clean_internal_text_strip(image: Image.Image, min_strip_height: int = 5, dif
     return image
 
 
-def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_tiles: bool, palette: dict = None) -> Path:
+def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_tiles: bool, palette: dict = None, suffix: str = "") -> Path:
     """将 3×3 面料看板裁剪为九种资产，并生成面料组合.json。
-    支持智能分隔带检测，自动扩大安全边距，并清理面板内部文字。"""
-    assets_dir = out_dir / "assets"
+    支持智能分隔带检测，自动扩大安全边距，并清理面板内部文字。
+    suffix 参数用于区分双源输出（如 "_A" / "_B"）。"""
+    assets_dir = out_dir / f"assets{suffix}"
     assets_dir.mkdir(parents=True, exist_ok=True)
     board = Image.open(board_path).convert("RGBA")
     width, height = board.size
@@ -722,7 +723,7 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
     max_inset = min(div_x1, width - div_x2, div_y1, height - div_y2) - 64
     effective_inset = min(effective_inset, max_inset)
     if effective_inset > inset:
-        print(f"[智能裁剪] 检测到分隔带文字，边距从 {inset} 扩大到 {effective_inset}")
+        print(f"[智能裁剪{suffix}] 检测到分隔带文字，边距从 {inset} 扩大到 {effective_inset}")
 
     boxes = {
         # Row 1: Base textures
@@ -775,8 +776,9 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
             brightest = max(primary_colors, key=_brightness)
             warm_ivory = brightest
 
+    source_name = "dual-source" if suffix else "neo-ai"
     texture_set = {
-        "texture_set_id": f"{out_dir.name}_neo_collection_texture_set",
+        "texture_set_id": f"{out_dir.name}_{source_name}_collection_texture_set{suffix}",
         "locked": False,
         "source_collection_board": str(board_path.resolve()),
         "textures": [
@@ -786,8 +788,8 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "role": "main",
                 "approved": False,
                 "candidate": True,
-                "prompt": "从 Neo AI 3×3 面料看板裁剪：主底纹",
-                "model": "neo-ai",
+                "prompt": f"从 {source_name} 3×3 面料看板裁剪：主底纹",
+                "model": source_name,
                 "seed": "",
                 "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
@@ -797,8 +799,8 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "role": "secondary",
                 "approved": False,
                 "candidate": True,
-                "prompt": "从 Neo AI 3×3 面料看板裁剪：辅纹理",
-                "model": "neo-ai",
+                "prompt": f"从 {source_name} 3×3 面料看板裁剪：辅纹理",
+                "model": source_name,
                 "seed": "",
                 "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
@@ -808,8 +810,8 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "role": "dark_base",
                 "approved": False,
                 "candidate": True,
-                "prompt": "从 Neo AI 3×3 面料看板裁剪：深色底纹",
-                "model": "neo-ai",
+                "prompt": f"从 {source_name} 3×3 面料看板裁剪：深色底纹",
+                "model": source_name,
                 "seed": "",
                 "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
@@ -819,8 +821,8 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "role": "accent_light",
                 "approved": False,
                 "candidate": True,
-                "prompt": "从 Neo AI 3×3 面料看板裁剪：浅色点缀纹理",
-                "model": "neo-ai",
+                "prompt": f"从 {source_name} 3×3 面料看板裁剪：浅色点缀纹理",
+                "model": source_name,
                 "seed": "",
                 "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
@@ -830,8 +832,8 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "role": "accent_mid",
                 "approved": False,
                 "candidate": True,
-                "prompt": "从 Neo AI 3×3 面料看板裁剪：中调点缀纹理",
-                "model": "neo-ai",
+                "prompt": f"从 {source_name} 3×3 面料看板裁剪：中调点缀纹理",
+                "model": source_name,
                 "seed": "",
                 "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
@@ -841,8 +843,8 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "role": "solid_quiet",
                 "approved": False,
                 "candidate": True,
-                "prompt": "从 Neo AI 3×3 面料看板裁剪：安静纯色面板",
-                "model": "neo-ai",
+                "prompt": f"从 {source_name} 3×3 面料看板裁剪：安静纯色面板",
+                "model": source_name,
                 "seed": "",
                 "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
@@ -855,8 +857,8 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "role": "hero",
                 "approved": False,
                 "candidate": True,
-                "prompt": "从 Neo AI 3×3 面料看板裁剪：卖点定位图案 1",
-                "model": "neo-ai",
+                "prompt": f"从 {source_name} 3×3 面料看板裁剪：卖点定位图案 1",
+                "model": source_name,
                 "seed": "",
                 "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
@@ -867,8 +869,8 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "role": "hero",
                 "approved": False,
                 "candidate": True,
-                "prompt": "从 Neo AI 3×3 面料看板裁剪：卖点定位图案 2",
-                "model": "neo-ai",
+                "prompt": f"从 {source_name} 3×3 面料看板裁剪：卖点定位图案 2",
+                "model": source_name,
                 "seed": "",
                 "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
@@ -879,8 +881,8 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "role": "trim",
                 "approved": False,
                 "candidate": True,
-                "prompt": "从 Neo AI 3×3 面料看板裁剪：饰边定位图案",
-                "model": "neo-ai",
+                "prompt": f"从 {source_name} 3×3 面料看板裁剪：饰边定位图案",
+                "model": source_name,
                 "seed": "",
                 "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
@@ -891,10 +893,252 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
             {"solid_id": "warm_ivory", "color": warm_ivory, "approved": False, "candidate": True},
         ],
     }
-    return write_json(out_dir / "texture_set.json", texture_set)
+    return write_json(out_dir / f"texture_set{suffix}.json", texture_set)
 
 
-def _render_size_variants(args, out_dir: Path, texture_set_path: Path) -> None:
+def run_garment_mapping(args, pieces_path: Path, out_dir: Path) -> None:
+    """执行部位映射。提取为独立函数以便与看板生成并行执行。"""
+    garment_cmd = [
+        sys.executable,
+        str(SKILL_DIR / "scripts" / "部位映射.py"),
+        "--pieces", str(pieces_path),
+        "--out", str(out_dir),
+    ]
+    if args.ai_map:
+        garment_cmd.extend(["--ai-map", args.ai_map])
+    if args.template:
+        garment_cmd.extend(["--template", args.template])
+    if args.template_size and args.template_size != "base":
+        garment_cmd.extend(["--template-size", args.template_size])
+    if args.template_file:
+        garment_cmd.extend(["--template-file", args.template_file])
+    if args.garment_type:
+        garment_cmd.extend(["--garment-type", args.garment_type])
+    if args.no_template:
+        garment_cmd.append("--no-template")
+    run_step(garment_cmd)
+
+
+def _run_render_pipeline(args, out_dir: Path, texture_set_path: Path, suffix: str, pieces_path: Path) -> int:
+    """基于指定 texture_set 执行剩余流水线：质检 → 生产规划 → 渲染 → 时尚质检 → 商业复审。
+    suffix 用于区分双源输出（如 "_A" / "_B" / ""）。
+    返回 exit code（0=成功）。
+    """
+    print(f"\n{'='*60}")
+    print(f"[渲染流水线{suffix}] 基于 texture_set: {texture_set_path}")
+    print(f"{'='*60}")
+
+    # ---- 质检纹理 ----
+    qc_out = out_dir / f"texture_qc_report{suffix}.json"
+    qc_cmd = [
+        sys.executable,
+        str(SKILL_DIR / "scripts" / "质检纹理.py"),
+        "--texture-set", str(texture_set_path),
+        "--out", str(qc_out),
+    ]
+    qc_result = run_step(qc_cmd, check=False)
+    if qc_out.exists():
+        texture_qc = load_json(qc_out)
+        texture_qc_issues = collect_texture_qc_issues(texture_qc)
+        high_issues = [issue for issue in texture_qc_issues if issue.get("severity") == "high"]
+        blocking_issues = [issue for issue in high_issues if issue.get("type") != "not_user_approved"]
+        if blocking_issues:
+            print(f"[错误{suffix}] 面料质检存在 high severity 问题，停止渲染：", file=sys.stderr)
+            for issue in blocking_issues[:10]:
+                print(f"  - {issue.get('asset_id')}: {issue.get('message', issue.get('type'))}", file=sys.stderr)
+            return 1
+        if high_issues:
+            approval_request = {
+                "request_id": f"asset_approval_required{suffix}_v1",
+                "texture_set": str(texture_set_path.resolve()),
+                "texture_qc_report": str(qc_out.resolve()),
+                "message": "面料/图案/纯色仍为 candidate，必须经 AI 视觉 QC 或人工审批后才能继续渲染。",
+                "next_step": f"审批后将 texture_set{suffix}.json 中对应 assets 的 approved 设为 true，并使用 --texture-set 指向该文件重新运行。",
+                "assets": [
+                    {"asset_id": issue.get("asset_id", ""), "asset_role": issue.get("asset_role", ""), "issue": issue.get("message", "")}
+                    for issue in high_issues
+                ],
+            }
+            approval_path = out_dir / f"asset_approval_request{suffix}.json"
+            write_json(approval_path, approval_request)
+            print(f"\n[暂停{suffix}] 已生成候选面料组合，但资产尚未审批，按生产规则停止在渲染前。")
+            print(f"  面料组合: {texture_set_path.resolve()}")
+            print(f"  质检报告: {qc_out.resolve()}")
+            print(f"  审批请求: {approval_path.resolve()}")
+            return 0
+    elif qc_result.returncode != 0:
+        return qc_result.returncode
+
+    # ---- 生产规划 ----
+    use_legacy = args.mode == "legacy"
+    production_plan_path = out_dir / "ai_production_plan.json"
+
+    if args.production_plan:
+        provided = Path(args.production_plan)
+        if provided.exists():
+            apply_cmd = [
+                sys.executable,
+                str(SKILL_DIR / "scripts" / "应用生产规划.py"),
+                "--production-plan", str(provided),
+                "--out", str(out_dir),
+            ]
+            run_step(apply_cmd)
+        else:
+            print(f"[错误{suffix}] 提供的生产规划不存在: {provided}", file=sys.stderr)
+            return 1
+    elif use_legacy:
+        if args.construct_ai_request:
+            request_cmd = [
+                sys.executable,
+                str(SKILL_DIR / "scripts" / "构造审美请求.py"),
+                "--pieces", str(pieces_path),
+                "--garment-map", str(out_dir / "garment_map.json"),
+                "--texture-set", str(texture_set_path),
+                "--out", str(out_dir),
+            ]
+            if args.brief:
+                request_cmd.extend(["--brief", args.brief])
+            run_step(request_cmd)
+            print(f"\n[提示{suffix}] 子 Agent 审美请求已构造。请启动子 Agent 阅读以下文件并输出 ai_piece_fill_plan.json：")
+            print(f"  提示词文件: {out_dir / 'ai_fill_plan_prompt.txt'}")
+            print(f"  预期输出: {out_dir / 'ai_piece_fill_plan.json'}")
+            return 0
+    else:
+        plan_loaded_from_cache = False
+        if args.reuse_cache:
+            plan_hash = {
+                "pattern_image": file_sha256(args.pattern),
+                "texture_set": file_sha256(texture_set_path),
+                "garment_type": args.garment_type,
+                "brief": file_sha256(args.brief) if args.brief else "",
+            }
+            cached = cache_lookup(out_dir, "production_plan", plan_hash)
+            if cached:
+                print(f"[缓存复用{suffix}] 生产规划: {cached}")
+                production_plan_path.write_bytes(cached.read_bytes())
+                plan_loaded_from_cache = True
+
+        if not plan_loaded_from_cache:
+            if args.construct_ai_request or not production_plan_path.exists():
+                plan_request_cmd = [
+                    sys.executable,
+                    str(SKILL_DIR / "scripts" / "构造生产规划请求.py"),
+                    "--pieces", str(pieces_path),
+                    "--texture-set", str(texture_set_path),
+                    "--out", str(out_dir),
+                ]
+                if args.brief:
+                    plan_request_cmd.extend(["--brief", args.brief])
+                gh_path = out_dir / "geometry_hints.json"
+                if gh_path.exists():
+                    plan_request_cmd.extend(["--geometry-hints", str(gh_path)])
+                if args.visual_elements:
+                    plan_request_cmd.extend(["--visual-elements", args.visual_elements])
+                if args.ai_map:
+                    plan_request_cmd.extend(["--garment-map", args.ai_map])
+                run_step(plan_request_cmd)
+                print(f"\n[提示{suffix}] 生产规划 AI 请求已构造。请启动子 Agent 阅读以下文件并输出 ai_production_plan.json：")
+                print(f"  提示词文件: {out_dir / 'ai_production_plan_prompt.txt'}")
+                print(f"  预期输出: {out_dir / 'ai_production_plan.json'}")
+                return 0
+
+        if production_plan_path.exists():
+            apply_cmd = [
+                sys.executable,
+                str(SKILL_DIR / "scripts" / "应用生产规划.py"),
+                "--production-plan", str(production_plan_path),
+                "--out", str(out_dir),
+            ]
+            run_step(apply_cmd)
+            if args.reuse_cache and not plan_loaded_from_cache:
+                cache_save(out_dir, "production_plan", plan_hash, production_plan_path)
+        else:
+            print(f"[警告{suffix}] ai_production_plan.json 不存在，将使用后端规则生成填充计划（draft preview only）。")
+
+    # ---- 创建填充计划 ----
+    plan_cmd = [
+        sys.executable,
+        str(SKILL_DIR / "scripts" / "创建填充计划.py"),
+        "--pieces", str(pieces_path),
+        "--texture-set", str(texture_set_path),
+        "--garment-map", str(out_dir / "garment_map.json"),
+        "--out", str(out_dir),
+    ]
+    if args.brief:
+        plan_cmd.extend(["--brief", args.brief])
+    if args.ai_plan:
+        ai_plan_path = Path(args.ai_plan)
+        if not ai_plan_path.is_absolute():
+            ai_plan_path = out_dir / ai_plan_path
+        if ai_plan_path.exists():
+            plan_cmd.extend(["--ai-plan", str(ai_plan_path)])
+        else:
+            print(f"[警告{suffix}] AI 计划不存在: {ai_plan_path}，将使用后端规则生成。")
+    run_step(plan_cmd)
+
+    # ---- 渲染裁片 ----
+    rendered_dir = out_dir / f"rendered{suffix}"
+    render_cmd = [
+        sys.executable,
+        str(SKILL_DIR / "scripts" / "渲染裁片.py"),
+        "--pieces", str(pieces_path),
+        "--texture-set", str(texture_set_path),
+        "--fill-plan", str(out_dir / "piece_fill_plan.json"),
+        "--out", str(rendered_dir),
+    ]
+    run_step(render_cmd)
+
+    # ---- 多尺寸自动渲染 ----
+    if HAS_TEMPLATE_LOADER:
+        _render_size_variants(args, out_dir, texture_set_path, suffix=suffix)
+
+    # ---- 时尚质检 ----
+    fashion_cmd = [
+        sys.executable,
+        str(SKILL_DIR / "scripts" / "时尚质检.py"),
+        "--pieces", str(pieces_path),
+        "--texture-set", str(texture_set_path),
+        "--fill-plan", str(out_dir / "piece_fill_plan.json"),
+        "--rendered", str(rendered_dir),
+        "--out", str(out_dir / f"fashion_qc_report{suffix}.json"),
+    ]
+    run_step(fashion_cmd)
+
+    # ---- 备份本套中间产物（便于双源模式区分） ----
+    if suffix:
+        for src_name, dst_name in [
+            ("piece_fill_plan.json", f"piece_fill_plan{suffix}.json"),
+            ("garment_map.json", f"garment_map{suffix}.json"),
+        ]:
+            src = out_dir / src_name
+            dst = out_dir / dst_name
+            if src.exists():
+                dst.write_bytes(src.read_bytes())
+
+    # ---- 商业复审 ----
+    if args.commercial_review:
+        brief_for_review = args.brief or str(out_dir / "commercial_design_brief.json")
+        if not Path(brief_for_review).exists():
+            print(f"[警告{suffix}] 未找到商业设计简报: {brief_for_review}，跳过商业复审")
+        else:
+            review_cmd = [
+                sys.executable,
+                str(SKILL_DIR / "scripts" / "构造商业复审请求.py"),
+                "--preview", str(rendered_dir / "preview.png"),
+                "--fill-plan", str(out_dir / "piece_fill_plan.json"),
+                "--brief", brief_for_review,
+                "--qc-report", str(out_dir / f"fashion_qc_report{suffix}.json"),
+                "--out", str(out_dir),
+            ]
+            review_json_path = out_dir / "ai_commercial_review.json"
+            if review_json_path.exists():
+                review_cmd.extend(["--selected", str(review_json_path)])
+            run_step(review_cmd)
+
+    return 0
+
+
+def _render_size_variants(args, out_dir: Path, texture_set_path: Path, suffix: str = "") -> None:
     """基于-S渲染结果，纯程序生成其他尺寸的渲染输出（无AI）。"""
     pattern_path = getattr(args, "pattern", "")
     if not pattern_path:
@@ -1016,6 +1260,10 @@ def main() -> int:
     parser.add_argument("--reuse-cache", action="store_true", help="启用缓存复用。若输入未变化，跳过对应阶段的AI调用和程序计算。")
     parser.add_argument("--production-plan", default="", help="已完成的 ai_production_plan.json 路径。若提供且缓存允许，跳过生产规划AI调用，直接应用该计划。")
     parser.add_argument("--skip-collection-selection", action="store_true", help="跳过看板候选选择AI（等效fast模式行为），程序直接取每个panel第一个variant。")
+    parser.add_argument("--dual-source", action="store_true", help="启用双源并行看板生成（Neo AI + libtv）")
+    parser.add_argument("--libtv-key", default="", help="libtv Access Key。优先使用 LIBTV_ACCESS_KEY 环境变量。")
+    parser.add_argument("--dual-prompts", default="", help="dual_collection_prompts.json 路径。若提供，跳过设计简报中的双提示词生成，直接使用该文件。")
+    parser.add_argument("--max-retries", type=int, default=2, help="双源均失败时的最大重试次数")
     args = parser.parse_args()
     # 处理 --no-commercial-review 覆盖默认值
     if args.no_commercial_review:
@@ -1185,6 +1433,112 @@ def main() -> int:
                 args.prompt_file = str(prompt_path)
                 print(f"[视觉提取] 已基于子Agent分析自动生成看板提示词: {prompt_path}")
 
+    # ============================================================
+    # 尝试读取 palette（供颜色校验和纯色提取使用）
+    # ============================================================
+    palette = None
+    style_profile_path = out_dir / "style_profile.json"
+    if style_profile_path.exists():
+        try:
+            sp = json.loads(style_profile_path.read_text(encoding="utf-8"))
+            palette = sp.get("palette")
+        except Exception:
+            pass
+
+    pieces_path = out_dir / "pieces.json"
+
+    # ============================================================
+    # 双源模式（Neo AI + libtv 并行生成）
+    # ============================================================
+    if args.dual_source and not args.texture_set:
+        # 1. 确保 dual_collection_prompts.json 存在
+        dual_prompts_path = out_dir / "dual_collection_prompts.json"
+        if args.dual_prompts:
+            dual_prompts_path = Path(args.dual_prompts)
+        if not dual_prompts_path.exists():
+            print(f"[错误] 双源模式需要 dual_collection_prompts.json。请先运行生成设计简报.py，或传入 --dual-prompts。", file=sys.stderr)
+            return 1
+
+        # 2. 初始化双源生成器
+        sys.path.insert(0, str(SKILL_DIR / "scripts"))
+        from 双源看板生成器 import DualBoardGenerator
+
+        generator = DualBoardGenerator(
+            out_dir=out_dir,
+            neo_token=args.token,
+            libtv_key=args.libtv_key or os.environ.get("LIBTV_ACCESS_KEY", ""),
+            max_retries=args.max_retries,
+            timeout=300,
+            neo_model=args.neo_model,
+            neo_size=args.neo_size,
+        )
+
+        # 3. 并行：双源看板生成 + 部位映射（部位映射不依赖 texture_set）
+        from concurrent.futures import ThreadPoolExecutor
+        try:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                boards_future = executor.submit(generator.generate, dual_prompts_path)
+                mapping_future = executor.submit(run_garment_mapping, args, pieces_path, out_dir)
+
+                board_results = boards_future.result()
+                mapping_future.result()
+        except Exception as exc:
+            print(f"[错误] 双源看板生成失败: {exc}", file=sys.stderr)
+            return 1
+
+        # 4. 处理结果
+        if not board_results:
+            print("[错误] 双源看板生成全部失败", file=sys.stderr)
+            return 1
+
+        # 5. 分别裁剪每套看板为 texture_set
+        texture_sets = []
+        for result in board_results:
+            suffix = "_A" if result["style"] == "style_a" else "_B"
+            board_path = result["path"]
+
+            # 颜色校验
+            if palette:
+                color_warnings = validate_board_colors(board_path, palette)
+                if color_warnings:
+                    print(f"[颜色校验警告{suffix}] 以下面板颜色与 palette 偏差较大：")
+                    for w in color_warnings:
+                        print(f"  {w['panel']}: 实际 RGB{w['actual_rgb']} vs 预期 {w['expected_hex']} (偏差 {w['distance']})")
+                    warn_path = out_dir / f"board_color_warnings{suffix}.json"
+                    warn_path.write_text(json.dumps(color_warnings, ensure_ascii=False, indent=2), encoding="utf-8")
+                    print(f"  详细报告: {warn_path}")
+                else:
+                    print(f"[颜色校验{suffix}] 所有面板颜色与 palette 协调。")
+
+            ts_path = crop_collection_board(board_path, out_dir, args.crop_inset, not args.no_tile_repair, palette=palette, suffix=suffix)
+            texture_sets.append({"source": result["source"], "path": ts_path, "style": result["style"], "suffix": suffix})
+
+        # 6. 分别执行后续渲染流水线
+        if len(texture_sets) == 2:
+            print(f"\n[双源模式] 两套看板均成功，将分别渲染两种风格")
+            for ts in texture_sets:
+                rc = _run_render_pipeline(args, out_dir, ts["path"], ts["suffix"], pieces_path)
+                if rc != 0:
+                    print(f"[警告] 风格 {ts['suffix']} 的渲染流水线返回非零: {rc}")
+        else:
+            print(f"\n[双源模式] 仅一套看板成功 ({texture_sets[0]['source']})，使用该套继续")
+            rc = _run_render_pipeline(args, out_dir, texture_sets[0]["path"], texture_sets[0]["suffix"], pieces_path)
+            if rc != 0:
+                return rc
+
+        # 双源模式下，后续渲染已在 _run_render_pipeline 中完成，直接返回
+        summary = {
+            "面料看板": [str(r["path"]) for r in board_results],
+            "面料组合": [str(ts["path"]) for ts in texture_sets],
+            "渲染目录": [str((out_dir / f"rendered{ts['suffix']}").resolve()) for ts in texture_sets],
+        }
+        write_json(out_dir / "automation_summary.json", summary)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
+
+    # ============================================================
+    # 单源模式（原有逻辑）
+    # ============================================================
     if args.texture_set:
         texture_set_path = Path(args.texture_set)
         if not texture_set_path.is_absolute():
@@ -1200,16 +1554,6 @@ def main() -> int:
         if not board_path.exists():
             raise RuntimeError(f"面料看板未找到: {board_path}")
         print(f"使用面料看板: {board_path}")
-
-    # 尝试读取 palette 以指导纯色提取和颜色校验
-    palette = None
-    style_profile_path = out_dir / "style_profile.json"
-    if style_profile_path.exists():
-        try:
-            sp = json.loads(style_profile_path.read_text(encoding="utf-8"))
-            palette = sp.get("palette")
-        except Exception:
-            pass
 
     # 看板颜色协调性校验
     if palette and not args.texture_set:
@@ -1227,28 +1571,8 @@ def main() -> int:
     if not args.texture_set:
         texture_set_path = crop_collection_board(board_path, out_dir, args.crop_inset, not args.no_tile_repair, palette=palette)
 
-    pieces_path = out_dir / "pieces.json"
-    garment_cmd = [
-        sys.executable,
-        str(SKILL_DIR / "scripts" / "部位映射.py"),
-        "--pieces",
-        str(pieces_path),
-        "--out",
-        str(out_dir),
-    ]
-    if args.ai_map:
-        garment_cmd.extend(["--ai-map", args.ai_map])
-    if args.template:
-        garment_cmd.extend(["--template", args.template])
-    if args.template_size and args.template_size != "base":
-        garment_cmd.extend(["--template-size", args.template_size])
-    if args.template_file:
-        garment_cmd.extend(["--template-file", args.template_file])
-    if args.garment_type:
-        garment_cmd.extend(["--garment-type", args.garment_type])
-    if args.no_template:
-        garment_cmd.append("--no-template")
-    run_step(garment_cmd)
+    # 部位映射（单源模式下执行；双源模式下已在并行线程中完成）
+    run_garment_mapping(args, pieces_path, out_dir)
 
     qc_cmd = [
         sys.executable,

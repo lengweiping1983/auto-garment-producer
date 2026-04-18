@@ -204,6 +204,7 @@ def _generate_from_visual_elements(visual: dict, ve_path: Path, out_dir: Path, u
         out_dir=out_dir,
         style_details=style,
         generated_prompts=prompts,
+        fabric_hints=visual.get("fabric_hints", {}),
     )
 
 
@@ -218,6 +219,7 @@ def _generate_outputs(
     out_dir: Path,
     style_details: dict = None,
     generated_prompts: dict = None,
+    fabric_hints: dict = None,
 ) -> dict:
     """生成所有设计输出文件的核心逻辑。"""
     # 统一 palette 格式
@@ -237,7 +239,7 @@ def _generate_outputs(
     hero_selling_point = motifs[0] if motifs else "主题核心元素"
 
     # 从 visual_elements 读取面料工艺推断
-    fabric_hints = visual.get("fabric_hints", {}) if isinstance(visual, dict) else {}
+    fabric_hints = fabric_hints or {}
     has_nap = fabric_hints.get("has_nap", False) if isinstance(fabric_hints, dict) else False
     nap_direction = fabric_hints.get("nap_direction", "") if isinstance(fabric_hints, dict) else ""
     nap_confidence = fabric_hints.get("nap_confidence", 0.0) if isinstance(fabric_hints, dict) else 0.0
@@ -426,6 +428,15 @@ def _generate_outputs(
             "variants": variants,
         })
 
+    # ==================== 双源提示词生成 ====================
+    dual_prompts = generate_dual_collection_prompts_programmatic(
+        style_id=style_id,
+        prompts=prompts,
+        style_details=style_details,
+        palette=palette,
+        out_dir=out_dir,
+    )
+
     outputs = {
         "商业设计简报": str(write_json(out_dir / "commercial_design_brief.json", brief).resolve()),
         "风格档案": str(write_json(out_dir / "style_profile.json", style_profile).resolve()),
@@ -433,8 +444,157 @@ def _generate_outputs(
         "图案提示词": str(write_json(out_dir / "motif_prompts.json", motif_prompts).resolve()),
         "候选提示词": str(write_json(out_dir / "collection_prompt_candidates.json", candidates).resolve()),
         "资产生成清单": str(write_json(out_dir / "asset_generation_manifest.json", asset_generation_manifest).resolve()),
+        "双源提示词": str(write_json(out_dir / "dual_collection_prompts.json", dual_prompts).resolve()),
     }
     return outputs
+
+
+def _build_collection_prompt_from_prompts(prompts: list[dict], style: dict) -> str:
+    """基于 9 面板提示词列表构造完整的英文 3x3 看板 prompt。
+    逻辑与端到端自动化.py 的 _build_collection_prompt_from_visual_elements 类似。"""
+    panel_map = {p.get("texture_id", ""): p.get("prompt", "") for p in prompts}
+
+    lines = [
+        "Create a 3x3 commercial textile collection board, nine coordinated fabric panels arranged in a clean equal grid with thin white gutters between all panels, all inside one square image. Absolutely no text, no labels, no captions, no titles, no words, no letters, no typography, no descriptions anywhere in the image.",
+        "",
+        f"Overall art direction: {style.get('overall_impression', 'Elegant commercial textile collection')}. {style.get('mood', 'Quiet and wearable')}. {style.get('medium', 'Watercolor')}. Low contrast, highly wearable, refined hand-painted brush language, graceful breathing space, not busy, cohesive as one fashion print suite.",
+        "",
+        "Row 1 — Base textures for large garment panels (seamless tileable):",
+        f"Top-left: {panel_map.get('main', 'pale base with faint pattern, very low noise, lots of negative space, no text')}",
+        f"Top-center: {panel_map.get('secondary', 'coordinated medium-density pattern on light ground, same palette, no text')}",
+        f"Top-right: {panel_map.get('dark_base', 'deep dark ground with very subtle texture, quiet and minimal, no text')}",
+        "",
+        "Row 2 — Mid-scale accent textures (seamless tileable):",
+        f"Middle-left: {panel_map.get('accent_light', 'tiny scattered small-scale pattern on light ground, charming but controlled, no text')}",
+        f"Middle-center: {panel_map.get('accent_mid', 'soft geometric or organic lattice on pale ground, same palette, seamless tileable texture for secondary panels, no text')}",
+        f"Middle-right: {panel_map.get('solid_quiet', 'quiet warm solid with only subtle paper grain, no pattern, calm and minimal, seamless tileable solid texture for quiet trim or lining, no text')}",
+        "",
+        "Row 3 — Placement motifs and hero elements (plain backgrounds for background removal):",
+        f"Bottom-left: {panel_map.get('hero_motif_1', 'a single elegant main subject centered in a delicate decorative frame, plain light background, soft fading edges, balanced negative space, designed as a placement print element, no text')}",
+        f"Bottom-center: {panel_map.get('hero_motif_2', 'a secondary accent subject, centered, plain light background, refined brushwork, designed as a placement accent motif, no text')}",
+        f"Bottom-right: {panel_map.get('trim_motif', 'a small delicate decorative accent, minimal composition, plain warm background, designed as a trim detail placement element, no text')}",
+        "",
+        "All nine panels must look like one coordinated textile collection by the same fashion print designer, identical palette, identical paper texture, identical hand-painted brush style, identical commercial apparel mood.",
+        "",
+        "No animals other than approved subjects, no characters, no faces, no people, no text, no logo, no watermark, no house, no river, no full landscape scene, no poster composition, no sticker sheet, no harsh black outlines, no dense confetti, no neon colors, no muddy dark colors, no gradient backgrounds inside individual panels.",
+        "",
+        "Row 1 and Row 2 panels should be seamless tileable textile swatches usable as fabric repeats. Row 3 panels should be clean placement motifs with plain light backgrounds suitable for background removal.",
+    ]
+    return "\n".join(lines)
+
+
+def _make_style_b_variant(prompt: str) -> str:
+    """基于 Set A 的 prompt 生成 Set B 的变体。
+    使用不同的替换词表，保持同一主题但改变表现手法。"""
+    swaps = [
+        ("watercolor", "hand-painted gouache"),
+        ("seamless tileable", "continuous repeat fabric"),
+        ("soft fading edges", "gentle blurred boundaries"),
+        ("low noise", "barely visible texture"),
+        ("abundant negative space", "generous breathing room"),
+        ("delicate", "refined"),
+        ("pale", "soft muted"),
+        ("quiet", "subdued"),
+        ("tiny scattered", "sparsely placed"),
+        ("medium density", "light airy density"),
+    ]
+    variant = prompt
+    for old, new in swaps:
+        if old.lower() in variant.lower():
+            variant = variant.replace(old, new)
+            break  # 每轮只替换一个词，避免过度改写
+    return variant
+
+
+def _build_libtv_description_from_prompts(prompts: list[dict], style: dict) -> str:
+    """将 9 面板提示词转换为适合 libtv create_session 的中文自然语言描述。
+    描述中包含明确的 3x3 布局要求和各面板内容。"""
+    panel_map = {p.get("texture_id", ""): p.get("prompt", "") for p in prompts}
+    medium = style.get("medium", "水彩")
+    mood = style.get("mood", "优雅安静")
+    impression = style.get("overall_impression", "商业畅销款打样")
+
+    lines = [
+        f"请帮我生成一张3x3商业面料看板图片。整体艺术方向：{impression}，{mood}，{medium}风格。低对比度、高可穿性、优雅的手绘笔触、充足的呼吸感，不拥挤，整体协调统一。",
+        "",
+        "要求九宫格等分布局，白色细间隔，所有面板在一个正方形图片内。图片中绝对不要出现任何文字、标签、标题、字母、排版。",
+        "",
+        "第一行 — 大身底纹（可平铺无缝纹理）：",
+        f"左上：{panel_map.get('main', '淡色底极低噪底纹')}",
+        f"中上：{panel_map.get('secondary', '协调中密度图案')}",
+        f"右上：{panel_map.get('dark_base', '深底微纹理')}",
+        "",
+        "第二行 — 中调点缀纹理（可平铺无缝纹理）：",
+        f"左中：{panel_map.get('accent_light', '浅色小图案点缀')}",
+        f"中中：{panel_map.get('accent_mid', '中调几何/有机格子')}",
+        f"右中：{panel_map.get('solid_quiet', '安静纯色/衬里')}",
+        "",
+        "第三行 — 定位图案（浅色干净背景，方便后期去背景）：",
+        f"左下：{panel_map.get('hero_motif_1', '主卖点定位图案')}",
+        f"中下：{panel_map.get('hero_motif_2', '次卖点定位图案')}",
+        f"右下：{panel_map.get('trim_motif', '小型饰边装饰图案')}",
+        "",
+        "所有9个面板必须是同一个设计师的同一个系列作品，完全相同的调色板、纸质纹理、手绘风格、商业成衣氛围。",
+        "",
+        "不要动物（除非明确批准的主题元素）、不要人物、不要人脸、不要文字、不要商标、不要水印、不要房屋、不要河流、不要完整风景场景、不要海报构图、不要贴纸页、不要粗黑轮廓、不要密集纸屑、不要霓虹色、不要浑浊深色、不要单个面板内的渐变背景。",
+        "",
+        "第一行和第二行面板应该是可平铺无缝的面料小样。第三行面板应该是干净背景的定位图案，适合背景去除。",
+    ]
+    return "\n".join(lines)
+
+
+def generate_dual_collection_prompts_programmatic(
+    style_id: str,
+    prompts: list[dict],
+    style_details: dict | None,
+    palette: dict,
+    out_dir: Path,
+) -> dict:
+    """程序化生成两套不同但风格一致的看板提示词。
+
+    Set A（Style A）：给 Neo AI 的英文结构化 prompt。
+    Set B（Style B）：给 libtv 的中文自然语言描述，基于同一主题但使用不同表现手法。
+    """
+    style = style_details or {}
+
+    # ---- Set A：直接使用现有的 9 面板提示词构建英文看板 prompt ----
+    prompt_a = _build_collection_prompt_from_prompts(prompts, style)
+    negative_prompt_a = "animals, characters, faces, people, text, labels, captions, titles, typography, words, letters, logo, watermark, house, full landscape, poster, sticker, harsh black outline, dense confetti, neon colors, muddy colors"
+
+    # 将 Set A prompt 写入文件
+    prompt_a_file = out_dir / "style_a_collection_prompt.txt"
+    prompt_a_file.write_text(prompt_a, encoding="utf-8")
+
+    # ---- Set B：为每个面板生成变体，然后构建中文描述 ----
+    variant_prompts = []
+    for p in prompts:
+        original = p.get("prompt", "")
+        variant = _make_style_b_variant(original)
+        variant_prompts.append({
+            "texture_id": p.get("texture_id", ""),
+            "purpose": p.get("purpose", ""),
+            "prompt": variant,
+            "panel": p.get("panel", ""),
+            "role": p.get("role", ""),
+        })
+
+    description_b = _build_libtv_description_from_prompts(variant_prompts, style)
+
+    dual_prompts = {
+        "dual_prompt_id": f"{style_id}_dual_v1",
+        "style_a": {
+            "source": "neo",
+            "prompt": prompt_a,
+            "negative_prompt": negative_prompt_a,
+            "prompt_file": str(prompt_a_file.resolve()),
+        },
+        "style_b": {
+            "source": "libtv",
+            "description": description_b,
+            "note": "由后端 Agent 自主选模型和写 prompt，用户侧仅传需求描述",
+        },
+    }
+    return dual_prompts
 
 
 if __name__ == "__main__":

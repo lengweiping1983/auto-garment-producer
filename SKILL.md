@@ -384,6 +384,52 @@ python3 /path/to/auto-garment-producer/scripts/端到端自动化.py \
   --commercial-review --auto-retry 3
 ```
 
+### 双源并行模式（Neo AI + libtv，推荐用于生产）
+
+同时调用 Neo AI 和 libtv-skills 并行生成两套风格一致但表现不同的看板，增加输出多样性并降低单点失败风险。
+
+```bash
+# 前置：确保 LIBTV_ACCESS_KEY 已设置
+export LIBTV_ACCESS_KEY="sk-libtv-6179c6adce8e4c3f9b28ef74839b5246"
+
+# 步骤 0-1：视觉元素提取 + 生成设计简报（与标准模式相同）
+python3 /path/to/auto-garment-producer/scripts/视觉元素提取.py \
+  --theme-image /path/to/theme.png \
+  --out /path/to/output
+# → 启动子 Agent 分析图像
+
+python3 /path/to/auto-garment-producer/scripts/生成设计简报.py \
+  --visual-elements /path/to/output/visual_elements.json \
+  --out /path/to/output \
+  --garment-type "儿童外套套装"
+# → 自动生成 dual_collection_prompts.json（两套差异化提示词）
+
+# 步骤 2：双源并行看板生成 + 部位映射（并行执行）
+python3 /path/to/auto-garment-producer/scripts/端到端自动化.py \
+  --pattern /path/to/pattern.png \
+  --out /path/to/output \
+  --visual-elements /path/to/output/visual_elements.json \
+  --mode standard \
+  --dual-source \
+  --token "$NEODOMAIN_ACCESS_TOKEN" \
+  --libtv-key "$LIBTV_ACCESS_KEY" \
+  --commercial-review --auto-retry 3
+# → 同时启动 Neo AI 和 libtv 生成看板
+# → 看板生成与部位映射并行执行，互不阻塞
+# → 任一源成功即继续；双源均失败则自动重试（默认 2 次）
+# → 若双源均成功，输出 rendered_A/ 和 rendered_B/ 两套结果
+```
+
+**双源模式关键行为**：
+- **并行生成**：Neo AI（Set A / 英文结构化 prompt）和 libtv（Set B / 中文自然语言描述）同时提交。
+- **并行不阻塞**：看板生成与部位映射在独立线程中并行执行。
+- **失败容错**：只要一个源成功，流程继续；两个都失败则重试。
+- **两套结果**：若双源均成功，分别裁剪为 `texture_set_A.json` 和 `texture_set_B.json`，并分别渲染为 `rendered_A/` 和 `rendered_B/`。
+
+**环境变量**：
+- `NEODOMAIN_ACCESS_TOKEN`：Neo AI 鉴权令牌
+- `LIBTV_ACCESS_KEY`：libtv 鉴权令牌
+
 ### Fast 模式（快速草稿预览，2 次 AI）
 
 ```bash
@@ -499,26 +545,45 @@ python3 /path/to/auto-garment-producer/scripts/创建填充计划.py \
 商业设计简报.json
 纹理提示词.json
 图案提示词.json
+dual_collection_prompts.json     ← 双源模式：两套差异化看板提示词（Set A / Set B）
+style_a_collection_prompt.txt    ← 双源模式：Neo AI 的英文结构化看板 prompt
 ai_vision_prompt.txt             ← 子Agent视觉分析请求提示词
 ai_vision_request.json           ← 子Agent视觉分析请求结构化摘要
 visual_elements.json             ← 子Agent输出的视觉元素分析（由子Agent生成）
 visual_elements_cv.json          ← 纯CV提取的视觉元素分析（零LLM，由纯CV脚本生成）
 generated_collection_prompt.txt  ← 自动生成的3×3面料看板综合提示词
+selected_collection_prompt.txt   ← 子Agent选择后的最终看板 prompt
 面料组合.json
+texture_set_A.json               ← 双源模式：Set A（Neo AI）裁剪后的面料组合
+texture_set_B.json               ← 双源模式：Set B（libtv）裁剪后的面料组合
 纹理质检报告.json
+texture_qc_report_A.json         ← 双源模式：Set A 质检报告
+texture_qc_report_B.json         ← 双源模式：Set B 质检报告
 裁片清单.json
 部位映射.json
+garment_map_A.json               ← 双源模式：Set A 部位映射备份
+garment_map_B.json               ← 双源模式：Set B 部位映射备份
 ai_fill_plan_prompt.txt          ← 子Agent审美请求提示词
 ai_fill_plan_request.json        ← 子Agent请求结构化摘要
 ai_piece_fill_plan.json          ← 子Agent输出的填充计划（由子Agent生成）
+piece_fill_plan_A.json           ← 双源模式：Set A 填充计划备份
+piece_fill_plan_B.json           ← 双源模式：Set B 填充计划备份
 艺术指导方案.json
 裁片填充计划.json
-渲染结果/                ← -S 基准尺寸输出
+渲染结果/                ← -S 基准尺寸输出（单源模式）
   裁片/*.png
   preview_s.png
   preview_white_s.jpg
   piece_contact_sheet_s.jpg
   texture_fill_manifest_s.json
+渲染结果_A/              ← 双源模式：Set A 渲染输出
+  裁片/*.png
+  preview_s.png
+  ...
+渲染结果_B/              ← 双源模式：Set B 渲染输出
+  裁片/*.png
+  preview_s.png
+  ...
 渲染结果_m/              ← M 尺寸（纯程序映射）
   裁片/*.png
   preview_m.png
@@ -530,6 +595,8 @@ ai_piece_fill_plan.json          ← 子Agent输出的填充计划（由子Agent
 渲染结果_xxl/            ← XXL 尺寸
   ...
 成品质检报告.json
+fashion_qc_report_A.json         ← 双源模式：Set A 时尚质检报告
+fashion_qc_report_B.json         ← 双源模式：Set B 时尚质检报告
 ```
 
 ## 参考阅读
