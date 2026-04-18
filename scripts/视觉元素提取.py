@@ -116,7 +116,7 @@ def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, s
                 "overall_impression": "淡蓝与象牙白交织的东方洛可可水彩风格"
             },
             "fabric_hints": {
-                "has_nap": false,
+                "has_nap": False,
                 "nap_confidence": 0.3,
                 "nap_direction": "",
                 "reason": "水彩纸张风格，无明显绒毛面料特征。若 has_nap=true，nap_direction 必须提供 vertical 或 horizontal，不允许留空。"
