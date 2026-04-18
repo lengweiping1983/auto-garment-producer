@@ -4,9 +4,25 @@
 """
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
+
+# 导入模板加载器
+sys.path.insert(0, str(Path(__file__).parent))
+try:
+    from template_loader import (
+        find_template_by_id,
+        find_template_by_garment_type,
+        find_template_by_pattern_path,
+        load_template_file,
+        match_pieces_to_template,
+        format_template_garment_map,
+    )
+    HAS_TEMPLATE_LOADER = True
+except Exception as _exc:
+    HAS_TEMPLATE_LOADER = False
 
 
 def load_json(path: str | Path) -> dict:
@@ -237,22 +253,74 @@ def draw_overview(pieces_payload: dict, garment_map: dict, out_path: Path) -> Pa
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="从裁片清单推断服装部位角色与对称性。优先使用AI识别结果。")
+    parser = argparse.ArgumentParser(description="从裁片清单推断服装部位角色与对称性。优先模板匹配，其次AI识别，最后几何启发。")
     parser.add_argument("--pieces", required=True, help="裁片清单 JSON 路径（pieces.json）")
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument("--ai-map", default="", help="AI子Agent输出的 ai_garment_map.json 路径。若提供，优先使用。")
+    parser.add_argument("--template", default="", help="模板ID。如 children_outerwear_set。优先于 garment_type 自动匹配。")
+    parser.add_argument("--template-size", default="base", help="模板尺寸变体。默认 base。")
+    parser.add_argument("--template-file", default="", help="用户自定义模板 JSON 文件路径。优先于内置模板。")
+    parser.add_argument("--garment-type", default="", help="服装类型。若未指定模板，尝试按 garment_type 匹配内置模板。")
+    parser.add_argument("--no-template", action="store_true", help="禁用模板匹配，强制走 AI/几何推断路径。")
     args = parser.parse_args()
 
     pieces_payload = load_json(args.pieces)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 双路径：优先AI识别，无则几何启发
+    roles = []
+    method = "geometry_inference"
+    template_used = None
+
+    # ===================== 路径1: 模板匹配（最高优先级）=====================
+    if not args.no_template and HAS_TEMPLATE_LOADER:
+        template = None
+        # 1a. 用户自定义模板文件
+        if args.template_file:
+            template = load_template_file(Path(args.template_file))
+            if template:
+                print(f"[模板] 加载用户自定义模板: {args.template_file}")
+        # 1b. 内置模板（按ID）
+        if not template and args.template:
+            template = find_template_by_id(args.template, args.template_size)
+            if template:
+                print(f"[模板] 加载内置模板: {args.template}/{args.template_size}")
+        # 1c. 按 pattern 文件名自动发现已初始化模板
+        if not template:
+            pattern_path = pieces_payload.get("pattern_image", "")
+            if pattern_path:
+                template = find_template_by_pattern_path(pattern_path)
+                if template:
+                    print(f"[模板] 按 pattern 文件名自动匹配到模板: {template.get('template_id', '?')}")
+        # 1d. 内置模板（按 garment_type 自动匹配）
+        if not template and args.garment_type:
+            template = find_template_by_garment_type(args.garment_type)
+            if template:
+                print(f"[模板] 按 garment_type='{args.garment_type}' 匹配到模板: {template.get('template_id', '?')}")
+
+        if template:
+            pieces = pieces_payload.get("pieces", [])
+            matched, avg_conf = match_pieces_to_template(pieces, template)
+            if matched and avg_conf >= 0.75:
+                payload = format_template_garment_map(matched, template)
+                map_path = out_dir / "garment_map.json"
+                map_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                overview = draw_overview(pieces_payload, payload, out_dir / "garment_map_overview.jpg")
+                print(json.dumps(
+                    {"部位映射": str(map_path.resolve()), "总览图": str(overview.resolve()),
+                     "平均置信度": payload["confidence"], "方法": "template_match"},
+                    ensure_ascii=False,
+                ))
+                return 0
+            else:
+                print(f"[模板] 匹配失败 (avg_conf={avg_conf:.2f} < 0.75)，回退到 AI/几何推断")
+                template_used = template
+
+    # ===================== 路径2: AI识别 =====================
     ai_map_path = Path(args.ai_map) if args.ai_map else None
     if ai_map_path and ai_map_path.exists():
         try:
             ai_map = load_json(ai_map_path)
-            # 简单合并：AI输出 piece_id/garment_role/zone/symmetry_group/same_shape_group
             roles = []
             ai_by_id = {p["piece_id"]: p for p in ai_map.get("pieces", [])}
             for piece in pieces_payload.get("pieces", []):
@@ -277,7 +345,6 @@ def main() -> int:
                         "reason": ai.get("reason", "AI识别"),
                     }
                 else:
-                    # 单个裁片fallback
                     aspect = piece["width"] / max(1, piece["height"])
                     entry = {
                         "piece_id": pid,

@@ -1,0 +1,144 @@
+{
+  "base_size": "s",
+  "sizes": {
+    "m": {
+      "scale_factor": {
+        "width": 1.0209,
+        "height": 1.0181,
+        "area_sqrt": 1.0203
+      },
+      "piece_map": {
+        "piece_001_s": "piece_001_m",
+        "piece_002_s": "piece_002_m",
+        "piece_003_s": "piece_003_m",
+        "piece_004_s": "piece_004_m",
+        "piece_005_s": "piece_005_m",
+        "piece_006_s": "piece_006_m",
+        "piece_007_s": "piece_007_m",
+        "piece_008_s": "piece_008_m",
+        "piece_009_s": "piece_009_m"
+      },
+      "piece_count": 9,
+      "aspect_warnings": []
+    },
+    "l": {
+      "scale_factor": {
+        "width": 1.0919,
+        "height": 1.0037,
+        "area_sqrt": 1.0426
+      },
+      "piece_map": {
+        "piece_001_s": "piece_001_l",
+        "piece_002_s": "piece_002_l",
+        "piece_003_s": "piece_003_l",
+        "piece_004_s": "piece_004_l",
+        "piece_005_s": "piece_005_l",
+        "piece_006_s": "piece_006_l",
+        "piece_007_s": "piece_007_l",
+        "piece_008_s": "piece_008_l",
+        "piece_009_s": "piece_009_l"
+      },
+      "piece_count": 9,
+      "aspect_warnings": [
+        {
+          "rank": 6,
+          "base_id": "piece_006_s",
+          "target_id": "piece_006_l",
+          "base_aspect": 0.709,
+          "target_aspect": 1.403,
+          "delta": 0.495
+        }
+      ]
+    },
+    "xl": {
+      "scale_factor": {
+        "width": 1.4917,
+        "height": 0.902,
+        "area_sqrt": 1.0643
+      },
+      "piece_map": {
+        "piece_001_s": "piece_001_xl",
+        "piece_002_s": "piece_002_xl",
+        "piece_003_s": "piece_003_xl",
+        "piece_004_s": "piece_004_xl",
+        "piece_005_s": "piece_005_xl",
+        "piece_006_s": "piece_006_xl",
+        "piece_007_s": "piece_007_xl",
+        "piece_008_s": "piece_008_xl",
+        "piece_009_s": "piece_009_xl"
+      },
+      "piece_count": 9,
+      "aspect_warnings": [
+        {
+          "rank": 6,
+          "base_id": "piece_006_s",
+          "target_id": "piece_006_xl",
+          "base_aspect": 0.709,
+          "target_aspect": 1.398,
+          "delta": 0.493
+        },
+        {
+          "rank": 7,
+          "base_id": "piece_007_s",
+          "target_id": "piece_007_xl",
+          "base_aspect": 0.707,
+          "target_aspect": 1.398,
+          "delta": 0.494
+        },
+        {
+          "rank": 8,
+          "base_id": "piece_008_s",
+          "target_id": "piece_008_xl",
+          "base_aspect": 0.264,
+          "target_aspect": 3.953,
+          "delta": 0.933
+        }
+      ]
+    },
+    "xxl": {
+      "scale_factor": {
+        "width": 1.5221,
+        "height": 0.9192,
+        "area_sqrt": 1.0865
+      },
+      "piece_map": {
+        "piece_001_s": "piece_001_xxl",
+        "piece_002_s": "piece_002_xxl",
+        "piece_003_s": "piece_003_xxl",
+        "piece_004_s": "piece_004_xxl",
+        "piece_005_s": "piece_005_xxl",
+        "piece_006_s": "piece_006_xxl",
+        "piece_007_s": "piece_007_xxl",
+        "piece_008_s": "piece_008_xxl",
+        "piece_009_s": "piece_009_xxl"
+      },
+      "piece_count": 9,
+      "aspect_warnings": [
+        {
+          "rank": 6,
+          "base_id": "piece_006_s",
+          "target_id": "piece_006_xxl",
+          "base_aspect": 0.709,
+          "target_aspect": 1.394,
+          "delta": 0.492
+        },
+        {
+          "rank": 7,
+          "base_id": "piece_007_s",
+          "target_id": "piece_007_xxl",
+          "base_aspect": 0.707,
+          "target_aspect": 1.39,
+          "delta": 0.491
+        },
+        {
+          "rank": 8,
+          "base_id": "piece_008_s",
+          "target_id": "piece_008_xxl",
+          "base_aspect": 0.264,
+          "target_aspect": 3.989,
+          "delta": 0.934
+        }
+      ]
+    }
+  }
+}

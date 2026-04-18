@@ -409,6 +409,29 @@ python3 /path/to/auto-garment-producer/scripts/端到端自动化.py \
   --commercial-review --auto-retry 3
 ```
 
+### 多尺寸模板（一次性初始化）
+
+同版型多尺寸（如 S/M/L/XL/XXL）只需初始化一次，后续自动复用：
+
+```bash
+python3 /path/to/auto-garment-producer/scripts/初始化多尺寸模板.py \
+  --template-id BFSK26308XCJ01L \
+  --base-mask /path/to/*-S_mask.png \
+  --size-masks /path/to/*-M_mask.png /path/to/*-L_mask.png /path/to/*-XL_mask.png /path/to/*-XXL_mask.png \
+  --size-labels m l xl xxl \
+  --garment-type "children outerwear set"
+```
+
+初始化后：
+1. **人工检查角色**：打开 `templates/BFSK26308XCJ01L/base.json`，确认/修正各 slot 的 `garment_role`。
+2. **自动发现**：后续调用 `--pattern` 指向任意尺寸 mask 时，程序自动匹配该模板（按文件名货号匹配）。
+3. **自动输出全尺寸**：-S 版本 AI 渲染完成后，程序自动基于映射关系渲染 M/L/XL/XXL，输出文件名带尺寸后缀（`preview_m.png`、`piece_001_m.png` 等）。
+
+**关键约束**：
+- 基准尺寸 `-S` 是唯一走 AI 流程的版本。
+- M/L/XL/XXL 纯程序映射：使用 `-S` 的填充方案，仅 mask 和纹理 scale 按面积比调整。
+- 所有尺寸裁片数量必须一致（初始化脚本会校验）。
+
 ### 分步命令
 
 提取裁片：
@@ -490,11 +513,22 @@ ai_fill_plan_request.json        ← 子Agent请求结构化摘要
 ai_piece_fill_plan.json          ← 子Agent输出的填充计划（由子Agent生成）
 艺术指导方案.json
 裁片填充计划.json
-渲染结果/
+渲染结果/                ← -S 基准尺寸输出
   裁片/*.png
-  预览图.png
-  白底预览图.jpg
-  填充清单.json
+  preview_s.png
+  preview_white_s.jpg
+  piece_contact_sheet_s.jpg
+  texture_fill_manifest_s.json
+渲染结果_m/              ← M 尺寸（纯程序映射）
+  裁片/*.png
+  preview_m.png
+  ...
+渲染结果_l/              ← L 尺寸
+  ...
+渲染结果_xl/             ← XL 尺寸
+  ...
+渲染结果_xxl/            ← XXL 尺寸
+  ...
 成品质检报告.json
 ```
 

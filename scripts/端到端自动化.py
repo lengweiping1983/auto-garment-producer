@@ -26,6 +26,18 @@ from PIL import Image, ImageColor, ImageEnhance, ImageFilter, ImageStat
 SKILL_DIR = Path(__file__).resolve().parents[1]
 NEO_AI_SCRIPT = Path("/Users/lengweiping/.agents/skills/neo-ai/scripts/generate_texture_collection_board.py")
 
+# 导入模板加载器（用于多尺寸自动渲染）
+sys.path.insert(0, str(SKILL_DIR / "scripts"))
+try:
+    from template_loader import (
+        find_template_by_pattern_path,
+        load_size_mappings,
+        load_size_pieces,
+    )
+    HAS_TEMPLATE_LOADER = True
+except Exception:
+    HAS_TEMPLATE_LOADER = False
+
 
 def file_sha256(path: str | Path) -> str:
     """计算文件的 SHA256 哈希。"""
@@ -882,6 +894,93 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
     return write_json(out_dir / "texture_set.json", texture_set)
 
 
+def _render_size_variants(args, out_dir: Path, texture_set_path: Path) -> None:
+    """基于-S渲染结果，纯程序生成其他尺寸的渲染输出（无AI）。"""
+    pattern_path = getattr(args, "pattern", "")
+    if not pattern_path:
+        return
+
+    template = find_template_by_pattern_path(pattern_path)
+    if not template:
+        return
+
+    template_id = template.get("template_id", "")
+    mappings = load_size_mappings(template_id)
+    if not mappings:
+        return
+
+    base_size = mappings.get("base_size", "s")
+    size_data = mappings.get("sizes", {})
+    if not size_data:
+        return
+
+    # 读取-S的 fill_plan
+    base_fill_plan_path = out_dir / "piece_fill_plan.json"
+    if not base_fill_plan_path.exists():
+        print("[多尺寸渲染] 未找到基准 fill_plan，跳过")
+        return
+    try:
+        base_fill_plan = json.loads(base_fill_plan_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[多尺寸渲染] 读取基准 fill_plan 失败: {exc}")
+        return
+
+    print(f"[多尺寸渲染] 检测到多尺寸模板: {template_id}，准备渲染 {list(size_data.keys())}")
+
+    for size_label, mapping in size_data.items():
+        piece_map = mapping.get("piece_map", {})
+        scale_factor = mapping.get("scale_factor", {}).get("area_sqrt", 1.0)
+        if not piece_map:
+            continue
+
+        # 加载该尺寸的 pieces.json
+        size_pieces = load_size_pieces(template_id, size_label)
+        if not size_pieces:
+            print(f"[多尺寸渲染] 未找到 {size_label} 的 pieces.json，跳过")
+            continue
+
+        size_pieces_path = SKILL_DIR / "templates" / template_id / size_label / f"pieces_{size_label}.json"
+
+        # 生成映射后的 fill_plan：将 piece_id 从 base 映射到目标尺寸
+        mapped_fill_plan = {
+            "plan_id": f"{base_fill_plan.get('plan_id', 'auto')}_{size_label}",
+            "texture_set_id": base_fill_plan.get("texture_set_id", ""),
+            "locked": base_fill_plan.get("locked", False),
+            "pieces": [],
+        }
+        base_entries = {e.get("piece_id"): e for e in base_fill_plan.get("pieces", [])}
+        for base_pid, target_pid in piece_map.items():
+            entry = base_entries.get(base_pid)
+            if not entry:
+                continue
+            mapped_entry = dict(entry)
+            mapped_entry["piece_id"] = target_pid
+            mapped_fill_plan["pieces"].append(mapped_entry)
+
+        if not mapped_fill_plan["pieces"]:
+            print(f"[多尺寸渲染] {size_label.upper()} 映射后无有效填充计划，跳过")
+            continue
+
+        # 保存临时 fill_plan
+        mapped_plan_path = out_dir / f"piece_fill_plan_{size_label}.json"
+        mapped_plan_path.write_text(json.dumps(mapped_fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 调用渲染
+        size_rendered_dir = out_dir / f"rendered_{size_label}"
+        render_cmd = [
+            sys.executable,
+            str(SKILL_DIR / "scripts" / "渲染裁片.py"),
+            "--pieces", str(size_pieces_path),
+            "--texture-set", str(texture_set_path),
+            "--fill-plan", str(mapped_plan_path),
+            "--out", str(size_rendered_dir),
+            "--scale-factor", str(scale_factor),
+            "--size-label", size_label,
+        ]
+        print(f"[多尺寸渲染] 渲染 {size_label.upper()} (scale={scale_factor:.4f}) ...")
+        run_step(render_cmd)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="生成 Neo AI 面料看板并自动渲染服装裁片。")
     parser.add_argument("--pattern", required=True, help="透明纸样 mask PNG/WebP")
@@ -907,6 +1006,10 @@ def main() -> int:
     parser.add_argument("--auto-retry", type=int, default=0, help="自动重试次数（0=不重试）。时尚QC发现 high severity issues 或商业复审未通过时，自动构造返工请求并重新渲染。")
     parser.add_argument("--retry-agent-cmd", default="", help="子 Agent 自调用命令。当 auto-retry 需要修订计划但 rev 文件不存在时，脚本会尝试 subprocess 调用此命令自动生成修订计划。支持 {prompt_path} 和 {output_path} 占位符（如 \"claude -p --file {prompt_path} > {output_path}\"）。示例: \"kimi chat -p\" 或 \"claude -p\" 或 \"python3 /path/to/agent_runner.py\"")
     parser.add_argument("--ai-map", default="", help="AI子Agent输出的 ai_garment_map.json 路径。若提供，部位映射优先使用AI识别结果。")
+    parser.add_argument("--template", default="", help="模板ID。优先于 garment_type 自动匹配。如 children_outerwear_set。指定后跳过AI识别，直接用模板匹配裁片部位。")
+    parser.add_argument("--template-size", default="base", help="模板尺寸变体。默认 base。如 m/l/xl。")
+    parser.add_argument("--template-file", default="", help="用户自定义模板 JSON 文件路径。优先于内置模板。")
+    parser.add_argument("--no-template", action="store_true", help="禁用模板匹配，强制走 AI/几何推断路径。")
     parser.add_argument("--commercial-review", action="store_true", default=True, help="启用整体商业感复审（默认开启）。时尚质检后调用构造商业复审请求.py，生成 ai_commercial_review_prompt.txt 供子Agent审查。")
     parser.add_argument("--no-commercial-review", action="store_true", help="禁用整体商业感复审。生产环境建议保持默认开启。")
     parser.add_argument("--mode", default="standard", choices=["fast", "standard", "production", "legacy"], help="运行模式。fast=跳过看板选择AI和商业复审（草稿预览），standard=默认完整流程，production=含资产审批gate和强制返工，legacy=旧分步脚本兼容模式。")
@@ -1135,6 +1238,16 @@ def main() -> int:
     ]
     if args.ai_map:
         garment_cmd.extend(["--ai-map", args.ai_map])
+    if args.template:
+        garment_cmd.extend(["--template", args.template])
+    if args.template_size and args.template_size != "base":
+        garment_cmd.extend(["--template-size", args.template_size])
+    if args.template_file:
+        garment_cmd.extend(["--template-file", args.template_file])
+    if args.garment_type:
+        garment_cmd.extend(["--garment-type", args.garment_type])
+    if args.no_template:
+        garment_cmd.append("--no-template")
     run_step(garment_cmd)
 
     qc_cmd = [
@@ -1324,6 +1437,10 @@ def main() -> int:
         str(rendered_dir),
     ]
     run_step(render_cmd)
+
+    # ========== 多尺寸自动渲染（纯程序，无AI）==========
+    if HAS_TEMPLATE_LOADER:
+        _render_size_variants(args, out_dir, texture_set_path)
 
     fashion_cmd = [
         sys.executable,

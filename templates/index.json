@@ -1,0 +1,35 @@
+{
+  "templates": [
+    {
+      "template_id": "children_outerwear_set",
+      "template_name": "儿童外套套装",
+      "template_name_en": "Children Outerwear Set",
+      "garment_type": "children outerwear set",
+      "description": "标准儿童外套套装，9片结构",
+      "piece_count": 9,
+      "sizes": [
+        "base",
+        "m",
+        "l",
+        "xl"
+      ],
+      "default_size": "base"
+    },
+    {
+      "template_id": "BFSK26308XCJ01L",
+      "template_name": "BFSK26308XCJ01L",
+      "template_name_en": "BFSK26308XCJ01L",
+      "garment_type": "children outerwear set",
+      "piece_count": 9,
+      "sizes": [
+        "s",
+        "m",
+        "l",
+        "xl",
+        "xxl"
+      ],
+      "default_size": "s"
+    }
+  ],
+  "version": "1.0.0"
+}
