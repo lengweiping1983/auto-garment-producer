@@ -1,0 +1,8 @@
+node_modules/
+output
+*.log
+dist/
+build/
+.git/
+*.png
+*.jpg
