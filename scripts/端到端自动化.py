@@ -45,9 +45,10 @@ except Exception:
     HAS_TEMPLATE_LOADER = False
 
 try:
-    from theme_image_resolver import resolve_theme_image
+    from theme_image_resolver import resolve_theme_image, resolve_theme_images
 except Exception:
     resolve_theme_image = None
+    resolve_theme_images = None
 
 
 def file_sha256(path: str | Path) -> str:
@@ -60,6 +61,10 @@ def file_sha256(path: str | Path) -> str:
         for chunk in iter(lambda: f.read(8192), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def files_sha256(paths: list[str | Path]) -> list[str]:
+    return [file_sha256(path) for path in paths]
 
 
 def dict_sha256(data: dict) -> str:
@@ -204,6 +209,10 @@ def build_production_context(
         "script_version": "2.0.0",
     }
     # 输入文件 hash
+    theme_images = [str(p) for p in getattr(args, "theme_images", []) if str(p)]
+    if theme_images:
+        ctx["input_hash"]["theme_images"] = files_sha256(theme_images)
+        ctx["paths"]["theme_images"] = [str(Path(p).resolve()) for p in theme_images]
     if args.theme_image:
         ctx["input_hash"]["theme_image"] = file_sha256(args.theme_image)
         ctx["paths"]["theme_image"] = str(Path(args.theme_image).resolve())
@@ -1598,13 +1607,16 @@ def main() -> int:
     parser.add_argument("--texture-set", default="", help="已审批的 texture_set.json。提供后跳过看板生成/裁剪，直接使用该面料组合继续裁片映射、填充和渲染。")
     parser.add_argument(
         "--theme-image",
-        default="",
+        action="append",
+        default=[],
         help=(
-            "主题/参考图像。支持文件路径、目录、URL、data:image/base64；为空时会尝试 "
+            "主题/参考图像。可重复传入多张；支持文件路径、目录、URL、data:image/base64；为空时会尝试 "
             "AUTO_GARMENT_THEME_IMAGE/CODEX_ATTACHED_IMAGE_PATHS 及 out/input 自动发现。若提供，会先进行视觉元素提取。"
         ),
     )
+    parser.add_argument("--theme-images", default="", help="多张主题/参考图像，支持逗号、分号或换行分隔。")
     parser.add_argument("--require-theme-image", action="store_true", help="强制要求解析到本地主题图，否则立即报错。")
+    parser.add_argument("--user-prompt", default="", help="用户对主题图、多图角色或美术方向的补充说明。")
     parser.add_argument("--visual-elements", default="", help="已完成的 visual_elements.json 路径。若提供，跳过视觉提取直接生成设计简报。")
     parser.add_argument("--prompt-file", default="", help="Neo AI 看板生成的提示词文件")
     parser.add_argument("--negative-prompt-file", default="", help="Neo AI 看板生成的反向提示词文件")
@@ -1655,26 +1667,34 @@ def main() -> int:
 
     # 主题图输入归一化：端到端流程只能消费本地文件。会话附件如果由
     # 客户端/集成以环境变量、URL、base64 或 out/input 目录提供，在这里落成稳定路径。
-    if resolve_theme_image:
+    raw_theme_images = list(args.theme_image or [])
+    if resolve_theme_images:
         try:
-            resolved_theme = resolve_theme_image(
-                args.theme_image,
+            resolved_themes = resolve_theme_images(
+                raw_theme_images,
                 out_dir,
+                extra_values=args.theme_images,
                 required=bool(args.require_theme_image),
             )
         except Exception as exc:
             print(f"[错误] 主题图解析失败: {exc}", file=sys.stderr)
             return 1
-        if resolved_theme:
-            if str(resolved_theme) != args.theme_image:
-                source_note = args.theme_image or "auto-discovered"
+        args.theme_images = [str(path) for path in resolved_themes]
+        args.theme_image = args.theme_images[0] if args.theme_images else ""
+        if resolved_themes:
+            source_note = ", ".join(raw_theme_images) or args.theme_images[0] or "auto-discovered"
+            if args.theme_images and source_note != args.theme_images[0]:
                 if len(source_note) > 120:
                     source_note = source_note[:117] + "..."
-                print(f"[主题图] 已解析并落盘: {source_note} -> {resolved_theme}")
-            args.theme_image = str(resolved_theme)
+                print(f"[主题图] 已解析并落盘: {source_note} -> {len(args.theme_images)} 张")
+            if len(args.theme_images) > 1:
+                print(f"[主题图] 多图参考集合: {args.theme_images}")
     elif args.require_theme_image and not args.theme_image:
         print("[错误] 当前环境缺少 theme_image_resolver，且未提供 --theme-image。", file=sys.stderr)
         return 1
+    else:
+        args.theme_images = raw_theme_images
+        args.theme_image = raw_theme_images[0] if raw_theme_images else ""
 
     # ===== brief 校验 =====
     brief_path = Path(args.brief) if args.brief else None
@@ -1744,14 +1764,19 @@ def main() -> int:
     # ============================================================
     # 注意：此阶段与 Phase 1 无依赖关系，理论上可并行
     ve_handled = False
-    if args.theme_image and not args.visual_elements:
+    if args.theme_images and not args.visual_elements:
         theme_path = Path(args.theme_image)
         if not theme_path.exists():
             raise RuntimeError(f"主题图不存在: {theme_path}")
+        theme_paths = [Path(p) for p in args.theme_images]
         ve_out = out_dir / "visual_elements.json"
         # 缓存检查
         if args.reuse_cache:
-            ve_hash = {"theme_image": file_sha256(theme_path), "garment_type": args.garment_type}
+            ve_hash = {
+                "theme_images": files_sha256([str(p) for p in theme_paths]),
+                "garment_type": args.garment_type,
+                "user_prompt": getattr(args, "user_prompt", ""),
+            }
             cached = cache_lookup(out_dir, "visual_elements", ve_hash)
             if cached:
                 print(f"[缓存复用] visual_elements: {cached}")
@@ -1768,14 +1793,19 @@ def main() -> int:
                 ve_cmd = [
                     sys.executable,
                     str(SKILL_DIR / "scripts" / "视觉元素提取.py"),
-                    "--theme-image", str(theme_path),
                     "--out", str(out_dir),
                 ]
+                for path in theme_paths:
+                    ve_cmd.extend(["--theme-image", str(path)])
                 if args.garment_type:
                     ve_cmd.extend(["--garment-type", args.garment_type])
+                if getattr(args, "user_prompt", ""):
+                    ve_cmd.extend(["--user-prompt", args.user_prompt])
                 run_step(ve_cmd)
                 print("\n[提示] 子 Agent 视觉分析请求已构造。请启动子 Agent 阅读以下文件并输出 visual_elements.json：")
                 print(f"  主题图: {theme_path}")
+                if len(theme_paths) > 1:
+                    print(f"  多图参考: {[str(p) for p in theme_paths]}")
                 print(f"  提示词文件: {out_dir / 'ai_vision_prompt.txt'}")
                 print(f"  预期输出: {ve_out}")
                 print("  完成后重新运行本脚本并传入 --visual-elements 参数。\n")
@@ -1786,8 +1816,12 @@ def main() -> int:
         if not ve_path.exists():
             raise RuntimeError(f"visual_elements 不存在: {ve_path}")
         # 保存正确的 visual_elements 缓存（只有文件存在且有效时才缓存）
-        if args.reuse_cache and args.theme_image:
-            ve_hash = {"theme_image": file_sha256(args.theme_image), "garment_type": args.garment_type}
+        if args.reuse_cache and args.theme_images:
+            ve_hash = {
+                "theme_images": files_sha256(args.theme_images),
+                "garment_type": args.garment_type,
+                "user_prompt": getattr(args, "user_prompt", ""),
+            }
             cache_save(out_dir, "visual_elements", ve_hash, ve_path)
         # 基于视觉元素分析生成设计简报与纹理提示词
         brief_cmd = [
@@ -1798,6 +1832,8 @@ def main() -> int:
         ]
         if args.garment_type:
             brief_cmd.extend(["--garment-type", args.garment_type])
+        if getattr(args, "user_prompt", ""):
+            brief_cmd.extend(["--user-prompt", args.user_prompt])
         run_step(brief_cmd)
         # 构造看板候选选择请求
         if not args.skip_collection_selection and not args.selected_collection:

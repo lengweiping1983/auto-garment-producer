@@ -202,9 +202,11 @@ def _generate_from_visual_elements(visual: dict, ve_path: Path, out_dir: Path, u
         garment_type=garment_type,
         season=season,
         out_dir=out_dir,
+        theme_images=visual.get("source_images", []),
         style_details=style,
         generated_prompts=prompts,
         fabric_hints=visual.get("fabric_hints", {}),
+        fusion_strategy=visual.get("fusion_strategy", {}),
     )
 
 
@@ -217,9 +219,11 @@ def _generate_outputs(
     garment_type: str,
     season: str,
     out_dir: Path,
+    theme_images: list | None = None,
     style_details: dict = None,
     generated_prompts: dict = None,
     fabric_hints: dict = None,
+    fusion_strategy: dict = None,
 ) -> dict:
     """生成所有设计输出文件的核心逻辑。"""
     # 统一 palette 格式
@@ -240,6 +244,8 @@ def _generate_outputs(
 
     # 从 visual_elements 读取面料工艺推断
     fabric_hints = fabric_hints or {}
+    theme_images = theme_images or []
+    fusion_strategy = fusion_strategy or {}
     has_nap = fabric_hints.get("has_nap", False) if isinstance(fabric_hints, dict) else False
     nap_direction = fabric_hints.get("nap_direction", "") if isinstance(fabric_hints, dict) else ""
     nap_confidence = fabric_hints.get("nap_confidence", 0.0) if isinstance(fabric_hints, dict) else 0.0
@@ -264,6 +270,8 @@ def _generate_outputs(
             "notes": fabric_hints.get("reason", "") if isinstance(fabric_hints, dict) else "",
         },
         "theme_image": theme_image,
+        "theme_images": theme_images,
+        "fusion_strategy": fusion_strategy,
         "user_prompt": user_prompt,
         "wearability_notes": [
             "只保留一个明确的卖点概念",
@@ -288,6 +296,7 @@ def _generate_outputs(
         "texture_density": style_details.get("pattern_density", "低-中") if style_details else "低-中",
         "contrast": "受控",
         "style_details": style_details or {},
+        "fusion_strategy": fusion_strategy,
     }
 
     def _make_prompt(texture_id: str, purpose: str, prompt_text: str, panel: str = "", role: str = "") -> dict:

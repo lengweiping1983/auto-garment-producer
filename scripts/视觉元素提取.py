@@ -39,11 +39,38 @@ except Exception:
 
 
 def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, season: str) -> str:
+    return build_vision_prompt_multi([theme_path], user_prompt, garment_type, season)
+
+
+def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment_type: str, season: str) -> str:
     """构造面向子 Agent 的视觉分析 prompt。"""
+    image_lines = []
+    for idx, path in enumerate(theme_paths, 1):
+        role = "主参考图（主体优先）" if idx == 1 else "辅助参考图（风格/配色/辅助元素）"
+        image_lines.append(f"图 {idx}: {path.resolve()} — {role}")
+
+    multi_note = (
+        "本次只有 1 张主题参考图，请按单图流程分析。"
+        if len(theme_paths) == 1
+        else (
+            f"本次有 {len(theme_paths)} 张主题参考图。请先逐张观察，再融合为一个商业面料主题系统；"
+            "不要输出多套独立方案。默认图 1 是主参考，其余图用于补充辅助元素、背景色彩、纹理语言和风格。"
+        )
+    )
     lines = [
         "你是一位高级服装印花设计分析师和视觉艺术指导。请详细分析附带的主题参考图像，提取所有可用于商业成衣面料设计的视觉元素。",
         "",
+        "===== 参考图像 =====",
+        multi_note,
+        *image_lines,
+        "",
         "===== 分析任务 =====",
+        "",
+        "0. 多图融合要求（Multi-reference Fusion）",
+        "   - 如有多张图，必须先分别分析每张图的主体、辅助元素、背景色彩与风格，再合并成一个统一的商业面料方向",
+        "   - dominant_objects 与 supporting_elements 中必须用 source_image_refs 标注来源图编号，如 [1] 或 [1, 2]",
+        "   - 第一张图默认承担主参考/主体优先，其余图片用于补充风格、色彩、背景纹理和辅助图形；若用户提示指定角色，则按用户提示优先",
+        "   - 输出 fusion_strategy，说明多图如何取舍：主卖点、辅助元素、背景色、风格语言如何融合",
         "",
         "1. 主体元素（Dominant Objects）",
         "   - 识别图像中最突出的 1-3 个主体物体",
@@ -104,6 +131,7 @@ def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, s
                     "type": "main_subject",
                     "description": "淡蓝色牡丹花，中心偏深蓝，花瓣边缘柔和晕染，约占画面中心 15%",
                     "suggested_usage": "hero_motif",
+                    "source_image_refs": [1],
                     "geometry": {
                         "pixel_width": 320,
                         "pixel_height": 480,
@@ -119,7 +147,8 @@ def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, s
                 {
                     "name": "卷草边框",
                     "type": "decoration",
-                    "description": "淡蓝色洛可可卷草纹，环绕主体，线条纤细优雅"
+                    "description": "淡蓝色洛可可卷草纹，环绕主体，线条纤细优雅",
+                    "source_image_refs": [1]
                 }
             ],
             "palette": {
@@ -142,6 +171,24 @@ def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, s
                 "nap_direction": "",
                 "reason": "水彩纸张风格，无明显绒毛面料特征。若 has_nap=true，nap_direction 必须提供 vertical 或 horizontal，不允许留空。"
             },
+            "source_images": [
+                {"index": 1, "path": str(theme_paths[0].resolve()) if theme_paths else "", "role": "primary"}
+            ],
+            "image_analyses": [
+                {
+                    "image_ref": 1,
+                    "dominant_subject_summary": "蓝牡丹与卷草边框",
+                    "palette_summary": "象牙白、浅蓝、深靛蓝",
+                    "style_summary": "柔和水彩纸纹"
+                }
+            ],
+            "fusion_strategy": {
+                "primary_reference": 1,
+                "hero_subject_source": [1],
+                "palette_sources": [1],
+                "style_sources": [1],
+                "strategy_note": "以主图主体作为唯一卖点，将辅助装饰转译为低噪连续纹理"
+            },
             "generated_prompts": {
                 "main": "seamless tileable commercial textile texture, pale ivory ground with very faint blue peony scrolls, extremely low noise, abundant negative space, watercolor paper grain, no text, no watermark",
                 "secondary": "seamless tileable coordinating textile texture, soft sky-blue ground with delicate blue acanthus scroll pattern, medium density but airy, same watercolor brush style, no text, no watermark",
@@ -160,6 +207,8 @@ def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, s
         "- 颜色必须从图像中真实提取，不要编造",
         "- 提示词必须是英文，可直接用于 AI 图像生成器",
         "- 如果图像中有动物或人物，谨慎建议用途，优先建议用于 motif 而非 texture",
+        "- 多张参考图必须融合为同一个主题方向，不要输出多套方案",
+        "- 每个主体/辅助元素要标注 source_image_refs，便于后续追溯来源",
         "- 所有 generated_prompts 的值在输出前必须经过停用词/禁用词过滤",
         "- 不要返回任何解释文字，只返回 JSON",
     ]
@@ -168,23 +217,41 @@ def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, s
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="构造子 Agent 视觉元素提取请求。")
-    parser.add_argument("--theme-image", required=True, help="主题/参考图像路径")
+    parser.add_argument("--theme-image", action="append", default=[], help="主题/参考图像路径。可重复传入多张。")
+    parser.add_argument("--theme-images-manifest", default="", help="theme_images_manifest.json 路径（可选，优先使用其中的 images[].path）")
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument("--user-prompt", default="", help="用户美术指导或约束")
     parser.add_argument("--garment-type", default="commercial apparel sample", help="服装类型")
     parser.add_argument("--season", default="spring/summer", help="商业季节信号")
     args = parser.parse_args()
 
-    theme_path = Path(args.theme_image)
-    if not theme_path.exists():
-        print(f"错误: 主题图不存在: {theme_path}", file=sys.stderr)
-        return 1
-
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    theme_thumb = ensure_thumbnail(theme_path, max_size=512)
-    prompt = build_vision_prompt(theme_thumb, args.user_prompt, args.garment_type, args.season)
+    theme_paths: list[Path] = []
+    if args.theme_images_manifest:
+        manifest_path = Path(args.theme_images_manifest)
+        if not manifest_path.exists():
+            print(f"错误: 主题图 manifest 不存在: {manifest_path}", file=sys.stderr)
+            return 1
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for item in manifest.get("images", []):
+            if item.get("path"):
+                theme_paths.append(Path(item["path"]))
+    else:
+        theme_paths = [Path(p) for p in args.theme_image]
+
+    if not theme_paths:
+        print("错误: 必须提供至少一张 --theme-image，或提供 --theme-images-manifest。", file=sys.stderr)
+        return 1
+
+    missing = [str(p) for p in theme_paths if not p.exists()]
+    if missing:
+        print(f"错误: 主题图不存在: {missing[0]}", file=sys.stderr)
+        return 1
+
+    theme_thumbs = [ensure_thumbnail(path, max_size=512) for path in theme_paths]
+    prompt = build_vision_prompt_multi(theme_thumbs, args.user_prompt, args.garment_type, args.season)
     prompt_path = out_dir / "ai_vision_prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
     
@@ -192,8 +259,16 @@ def main() -> int:
     # 注意：实际过滤应在子 Agent 输出 visual_elements.json 后由调用方处理
 
     request_summary = {
-        "request_id": "ai_vision_extraction_v1",
-        "theme_image": str(theme_thumb.resolve()),
+        "request_id": "ai_vision_extraction_v1" if len(theme_thumbs) == 1 else "ai_vision_multi_extraction_v1",
+        "theme_image": str(theme_thumbs[0].resolve()),
+        "theme_images": [
+            {
+                "index": idx,
+                "path": str(path.resolve()),
+                "role_hint": "primary" if idx == 0 else "reference",
+            }
+            for idx, path in enumerate(theme_thumbs)
+        ],
         "prompt_path": str(prompt_path.resolve()),
         "expected_output": str((out_dir / "visual_elements.json").resolve()),
         "garment_type": args.garment_type,
@@ -206,7 +281,9 @@ def main() -> int:
     print(json.dumps({
         "视觉分析请求摘要": str(request_path.resolve()),
         "子Agent提示词": str(prompt_path.resolve()),
-        "主题图路径": str(theme_thumb.resolve()),
+        "主题图路径": str(theme_thumbs[0].resolve()),
+        "主题图数量": len(theme_thumbs),
+        "主题图列表": [str(path.resolve()) for path in theme_thumbs],
         "预期输出": request_summary["expected_output"],
     }, ensure_ascii=False, indent=2))
     return 0

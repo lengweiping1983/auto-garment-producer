@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve user-provided theme image references into a stable local file.
+"""Resolve user-provided theme image references into stable local files.
 
 The desktop/chat layer can provide images in several shapes: a normal path, a
 directory containing an uploaded image, a URL, a data URI/base64 payload, or an
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -77,7 +78,8 @@ def _copy_stable(src: Path, out_dir: Path, label: str = "theme_image") -> Path:
     return dest.resolve()
 
 
-def newest_image_in_dir(directory: Path) -> Path:
+def images_in_dir(directory: Path) -> list[Path]:
+    """Return supported images in a directory using deterministic filename order."""
     directory = directory.expanduser().resolve()
     if not directory.exists() or not directory.is_dir():
         raise ThemeImageResolveError(f"不是有效目录: {directory}")
@@ -87,6 +89,12 @@ def newest_image_in_dir(directory: Path) -> Path:
     ]
     if not images:
         raise ThemeImageResolveError(f"目录中没有图片文件: {directory}")
+    return sorted(images, key=lambda p: p.name.lower())
+
+
+def newest_image_in_dir(directory: Path) -> Path:
+    directory = directory.expanduser().resolve()
+    images = images_in_dir(directory)
     return max(images, key=lambda p: p.stat().st_mtime)
 
 
@@ -94,7 +102,7 @@ def _split_env_paths(value: str) -> list[str]:
     value = value.strip()
     if value.startswith("data:image/") or _is_url(value):
         return [value]
-    parts = re.split(r"[\n,;:]", value)
+    parts = re.split(r"[\n,;]", value)
     return [p.strip().strip("'\"") for p in parts if p.strip()]
 
 
@@ -157,8 +165,8 @@ def _decode_data_uri(value: str, out_dir: Path) -> Path | None:
     return dest.resolve()
 
 
-def _auto_discover(out_dir: Path) -> Path | None:
-    """Find a deliberately staged image near the run output.
+def _auto_discover(out_dir: Path) -> list[Path]:
+    """Find deliberately staged images near the run output.
 
     This avoids scanning unrelated user folders.  Users or integrations can put
     an attachment in one of these locations when they cannot pass a path.
@@ -181,46 +189,124 @@ def _auto_discover(out_dir: Path) -> Path | None:
                 and (name.startswith("theme") or name.startswith("input") or name.startswith("reference"))
             ):
                 candidates.append(p)
-    if not candidates:
-        return None
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+    return sorted(candidates, key=lambda p: p.name.lower())
+
+
+def _iter_raw_candidates(value: str | list[str] | tuple[str, ...] | None, extra_values: str | list[str] | tuple[str, ...] | None = None) -> list[str]:
+    raw_values: list[str] = []
+    for source in (value, extra_values):
+        if not source:
+            continue
+        if isinstance(source, (list, tuple)):
+            for item in source:
+                raw_values.extend(_split_env_paths(str(item)))
+        else:
+            raw_values.extend(_split_env_paths(str(source)))
+    return raw_values
+
+
+def _resolve_candidate_images(candidate: str, out_path: Path, index: int) -> list[dict]:
+    decoded = _decode_data_uri(candidate, out_path)
+    if decoded:
+        return [{"source": candidate[:80], "path": decoded, "sha256": _sha256(decoded)}]
+    if _is_url(candidate):
+        path = _download_url(candidate, out_path)
+        return [{"source": candidate, "path": path, "sha256": _sha256(path)}]
+
+    path = Path(candidate).expanduser()
+    if not path.exists():
+        return []
+    if path.is_dir():
+        images = images_in_dir(path)
+        resolved = []
+        for offset, image_path in enumerate(images):
+            stable = _copy_stable(image_path, out_path, label=f"theme_image_{index + offset:02d}")
+            resolved.append({"source": str(image_path.resolve()), "path": stable, "sha256": _sha256(stable)})
+        return resolved
+    stable = _copy_stable(path, out_path, label=f"theme_image_{index:02d}")
+    return [{"source": str(path.resolve()), "path": stable, "sha256": _sha256(stable)}]
+
+
+def write_theme_images_manifest(out_dir: str | Path, items: list[dict]) -> Path:
+    out_path = Path(out_dir)
+    manifest_path = out_path / "theme_images_manifest.json"
+    payload = {
+        "manifest_id": "theme_images_v1",
+        "image_count": len(items),
+        "images": [
+            {
+                "index": idx,
+                "source": item.get("source", ""),
+                "path": str(Path(item["path"]).resolve()),
+                "sha256": item.get("sha256") or _sha256(Path(item["path"])),
+                "role_hint": "primary" if idx == 0 else "reference",
+            }
+            for idx, item in enumerate(items)
+        ],
+    }
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return manifest_path.resolve()
+
+
+def resolve_theme_images(
+    value: str | list[str] | tuple[str, ...] | None,
+    out_dir: str | Path,
+    *,
+    extra_values: str | list[str] | tuple[str, ...] | None = None,
+    required: bool = False,
+) -> list[Path]:
+    """Resolve one or more theme image references into stable local files.
+
+    Args:
+        value: Path(s), directory, URL, data URI, base64 image payload, or empty.
+        out_dir: Run output directory where the normalized input should live.
+        extra_values: Additional path list/string, used by --theme-images.
+        required: Raise if no image can be found.
+    """
+    out_path = Path(out_dir)
+    raw_candidates = _iter_raw_candidates(value, extra_values)
+    if not raw_candidates:
+        raw_candidates.extend(env_image_candidates())
+
+    seen: set[str] = set()
+    resolved_items: list[dict] = []
+    for candidate in raw_candidates:
+        if not candidate:
+            continue
+        for item in _resolve_candidate_images(candidate, out_path, len(resolved_items)):
+            key = item.get("sha256") or _sha256(Path(item["path"]))
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved_items.append(item)
+
+    if not resolved_items:
+        for discovered in _auto_discover(out_path):
+            stable = _copy_stable(discovered, out_path, label=f"theme_image_{len(resolved_items):02d}")
+            key = _sha256(stable)
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved_items.append({"source": str(discovered.resolve()), "path": stable, "sha256": key})
+
+    if resolved_items:
+        write_theme_images_manifest(out_path, resolved_items)
+        return [Path(item["path"]).resolve() for item in resolved_items]
+
+    if required:
+        hint = (
+            "没有找到可用主题图。请传 --theme-image /path/to/image，可重复传多次；"
+            "或传 --theme-images '/path/a.png,/path/b.png'；或把图片放入 "
+            f"{(out_path / 'input').resolve()}，或设置 AUTO_GARMENT_THEME_IMAGES。"
+        )
+        raise ThemeImageResolveError(hint)
+    return []
 
 
 def resolve_theme_image(value: str, out_dir: str | Path, *, required: bool = False) -> Path | None:
     """Resolve a theme image reference into a stable local file.
 
-    Args:
-        value: Path, directory, URL, data URI, base64 image payload, or empty.
-        out_dir: Run output directory where the normalized input should live.
-        required: Raise if no image can be found.
+    Backward-compatible wrapper for callers that only support one image.
     """
-    out_path = Path(out_dir)
-    raw = (value or "").strip()
-
-    candidates = [raw] if raw else []
-    if not raw:
-        candidates.extend(env_image_candidates())
-
-    for candidate in candidates:
-        if not candidate:
-            continue
-        decoded = _decode_data_uri(candidate, out_path)
-        if decoded:
-            return decoded
-        if _is_url(candidate):
-            return _download_url(candidate, out_path)
-        path = Path(candidate).expanduser()
-        if path.exists():
-            return _copy_stable(path, out_path)
-
-    discovered = _auto_discover(out_path)
-    if discovered:
-        return _copy_stable(discovered, out_path)
-
-    if required:
-        hint = (
-            "没有找到可用主题图。请传 --theme-image /path/to/image，或把图片放入 "
-            f"{(out_path / 'input').resolve()}，或设置 AUTO_GARMENT_THEME_IMAGE。"
-        )
-        raise ThemeImageResolveError(hint)
-    return None
+    resolved = resolve_theme_images(value, out_dir, required=required)
+    return resolved[0] if resolved else None
