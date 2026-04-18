@@ -32,6 +32,8 @@ def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, s
         "1. 主体元素（Dominant Objects）",
         "   - 识别图像中最突出的 1-3 个主体物体",
         "   - 描述每个主体的：名称、颜色、形态、在画面中的位置与占比",
+        "   - 估算每个主体的像素尺寸（width × height）和画面占比（%）",
+        "   - 判断主体的方向性：vertical（竖向，如直立的花）/ horizontal（横向，如横枝）/ radial（放射形）/ symmetric（对称形）/ irregular（不规则）",
         "   - 判断该主体适合用作：hero_motif（定位图案）还是 main_texture（底纹元素）",
         "",
         "2. 辅助元素（Supporting Elements）",
@@ -73,7 +75,16 @@ def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, s
                     "name": "蓝牡丹",
                     "type": "main_subject",
                     "description": "淡蓝色牡丹花，中心偏深蓝，花瓣边缘柔和晕染，约占画面中心 15%",
-                    "suggested_usage": "hero_motif"
+                    "suggested_usage": "hero_motif",
+                    "geometry": {
+                        "pixel_width": 320,
+                        "pixel_height": 480,
+                        "canvas_ratio": 0.15,
+                        "aspect_ratio": 0.67,
+                        "orientation": "vertical",
+                        "visual_center": [0.52, 0.48],
+                        "form_type": "tall_flower"
+                    }
                 }
             ],
             "supporting_elements": [

@@ -187,6 +187,103 @@ def anchor_position(anchor: str, canvas_size: tuple[int, int], item_size: tuple[
     return x + offset_x, y + offset_y
 
 
+def compute_mask_centroid(mask: Image.Image) -> tuple[float, float]:
+    """计算二值 mask 的像素 centroid（密度加权重心）。
+    对于不对称裁片，centroid 可能偏离几何中心，更接近视觉重心。"""
+    pixels = list(mask.get_flattened_data())
+    w, h = mask.size
+    xs, ys = [], []
+    for y in range(h):
+        for x in range(w):
+            if pixels[y * w + x] > 128:
+                xs.append(x)
+                ys.append(y)
+    if not xs:
+        return w / 2.0, h / 2.0
+    return sum(xs) / len(xs), sum(ys) / len(ys)
+
+
+def compute_motif_visibility(motif: Image.Image, piece_size: tuple[int, int], pos: tuple[int, int], mask_path: str | Path) -> float:
+    """计算 motif 在裁片内的可见比例（0-1）。
+
+    方法：
+    1. 创建与裁片同尺寸的画布，将 motif 放置在 pos 位置
+    2. 提取 alpha 通道
+    3. 与裁片 mask 相乘
+    4. 可见像素数 / motif 总像素数
+    """
+    canvas = Image.new("RGBA", piece_size, (0, 0, 0, 0))
+    canvas.alpha_composite(motif, pos)
+    alpha = canvas.getchannel("A")
+
+    with Image.open(mask_path).convert("L") as mask:
+        if mask.size != piece_size:
+            mask = mask.resize(piece_size, Image.Resampling.LANCZOS)
+        mask_pixels = list(mask.get_flattened_data())
+        alpha_pixels = list(alpha.get_flattened_data())
+
+        visible = 0
+        total = 0
+        for mp, ap in zip(mask_pixels, alpha_pixels):
+            if ap > 10:  # motif 有内容的像素
+                total += 1
+                if mp > 128:  # 且在 mask 内
+                    visible += 1
+
+    return visible / max(1, total)
+
+
+def smart_motif_placement(motif: Image.Image, piece: dict, layer: dict) -> tuple[int, int]:
+    """智能计算 motif 放置位置，确保不被裁片边界切断。
+
+    策略：
+    1. 先按 anchor + offset 计算初始位置
+    2. 用裁片 mask 检查 motif 可见比例
+    3. 如果可见比例 < 0.85，在初始位置周围 ±20% 范围内搜索更好的位置
+    4. 返回使可见比例最大的位置
+    """
+    piece_size = (piece["width"], piece["height"])
+    mask_path = piece.get("mask_path", "")
+
+    # 计算初始位置
+    initial_pos = anchor_position(
+        layer.get("anchor", "center"),
+        piece_size,
+        motif.size,
+        int(layer.get("offset_x", 0) or 0),
+        int(layer.get("offset_y", 0) or 0),
+    )
+
+    if not mask_path or not Path(mask_path).exists():
+        return initial_pos
+
+    # 检查初始位置的可见度
+    initial_vis = compute_motif_visibility(motif, piece_size, initial_pos, mask_path)
+    if initial_vis >= 0.85:
+        return initial_pos
+
+    # 搜索更好的位置：在初始位置周围 ±20% 范围内网格搜索
+    best_pos = initial_pos
+    best_vis = initial_vis
+    search_range = min(piece["width"], piece["height"]) // 5  # ±20%
+    step = max(2, search_range // 8)
+
+    for dx in range(-search_range, search_range + 1, step):
+        for dy in range(-search_range, search_range + 1, step):
+            test_pos = (initial_pos[0] + dx, initial_pos[1] + dy)
+            # 确保 motif 还在画布范围内（允许部分出界，但不能全出界）
+            if test_pos[0] + motif.width < 0 or test_pos[0] > piece["width"]:
+                continue
+            if test_pos[1] + motif.height < 0 or test_pos[1] > piece["height"]:
+                continue
+            vis = compute_motif_visibility(motif, piece_size, test_pos, mask_path)
+            if vis > best_vis:
+                best_vis = vis
+                best_pos = test_pos
+
+    return best_pos
+
+
 def render_texture_piece(piece: dict, plan: dict, texture_info: dict) -> Image.Image:
     """渲染单层纹理裁片。"""
     texture = Image.open(texture_info["path"]).convert("RGBA")
@@ -224,7 +321,7 @@ def render_texture_layer(piece: dict, layer: dict, texture_info: dict) -> Image.
 
 
 def render_motif_layer(piece: dict, layer: dict, motif_info: dict) -> Image.Image:
-    """渲染图案图层。"""
+    """渲染图案图层（含智能放置与防切割）。"""
     motif = Image.open(motif_info["path"]).convert("RGBA")
     if layer.get("mirror_x"):
         motif = ImageOps.mirror(motif)
@@ -240,7 +337,8 @@ def render_motif_layer(piece: dict, layer: dict, motif_info: dict) -> Image.Imag
         motif = motif.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
     motif = apply_opacity(motif, float(layer.get("opacity", 1) or 1))
     content = Image.new("RGBA", (piece["width"], piece["height"]), (0, 0, 0, 0))
-    pos = anchor_position(layer.get("anchor", "center"), content.size, motif.size, int(layer.get("offset_x", 0) or 0), int(layer.get("offset_y", 0) or 0))
+    # 智能放置：防切割 + 视觉重心
+    pos = smart_motif_placement(motif, piece, layer)
     content.alpha_composite(motif, pos)
     return content
 

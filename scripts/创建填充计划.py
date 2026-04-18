@@ -10,6 +10,7 @@
 """
 import argparse
 import json
+import math
 from pathlib import Path
 
 from PIL import Image
@@ -52,6 +53,145 @@ def make_layer(fill_type: str, reason: str, **kwargs) -> dict:
     return layer
 
 
+def load_motif_geometries(visual_elements_path: Path) -> dict:
+    """从 visual_elements.json 提取所有 motif 候选元素的几何信息。
+    返回 {motif_name: geometry_dict} 映射。支持多 key 查找以便匹配。
+    兼容 LLM 路径（字段名 suggested_usage）和纯 CV 路径（字段名 suggested_use）。"""
+    if not visual_elements_path.exists():
+        return {}
+    try:
+        data = json.loads(visual_elements_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    geometries = {}
+    for obj in data.get("dominant_objects", []):
+        geo = obj.get("geometry")
+        if not geo:
+            continue
+        name = obj.get("name", "")
+        # 兼容两种字段名
+        usage = obj.get("suggested_usage", "") or obj.get("suggested_use", "")
+        # 宽松匹配：hero_motif / accent_motif / motif 直接是 motif
+        # main_texture / secondary_texture 如果带有明显的 form_type（如 tall_flower, branch），也视为潜在 motif
+        is_motif = usage in ("hero_motif", "accent_motif", "motif")
+        form_type = geo.get("form_type", "")
+        if not is_motif and form_type in ("tall_flower", "branch", "round_motif", "elongated"):
+            is_motif = True
+        if not is_motif:
+            continue
+        # 使用 name 作为 key
+        geometries[name] = geo
+        # 额外用 usage 作为 key
+        if usage:
+            geometries[usage] = geo
+        # 用 form_type 作为 key
+        if form_type:
+            geometries[form_type] = geo
+    return geometries
+
+
+def simulate_motif_size(motif_w: int, motif_h: int, piece_w: int, piece_h: int, scale: float) -> tuple[float, float]:
+    """模拟 render_motif_layer 的缩放逻辑，返回缩放后的 motif 尺寸。"""
+    target_max_w = piece_w * scale
+    target_max_h = piece_h * scale
+    ratio = min(target_max_w / max(1, motif_w), target_max_h / max(1, motif_h))
+    return motif_w * ratio, motif_h * ratio
+
+
+def compute_optimal_scale(motif_w: int, motif_h: int, piece_w: int, piece_h: int, desired_coverage: float = 0.55) -> float:
+    """二分搜索找到使 motif coverage 接近 desired_coverage 的 scale。"""
+    def coverage_at(s):
+        mw, mh = simulate_motif_size(motif_w, motif_h, piece_w, piece_h, s)
+        return (mw * mh) / max(1, piece_w * piece_h)
+
+    lo, hi = 0.05, 3.0
+    for _ in range(20):
+        mid = (lo + hi) / 2
+        if coverage_at(mid) < desired_coverage:
+            lo = mid
+        else:
+            hi = mid
+    return round((lo + hi) / 2, 3)
+
+
+def compute_motif_fit_score(motif_geo: dict, piece: dict, piece_role: str = "") -> dict:
+    """计算 motif 与裁片的综合适配度分数（0-1）。"""
+    piece_w = piece.get("width", 1)
+    piece_h = piece.get("height", 1)
+    piece_aspect = piece_w / max(1, piece_h)
+    texture_dir = piece.get("texture_direction", "transverse")
+
+    motif_w = motif_geo.get("pixel_width", 256)
+    motif_h = motif_geo.get("pixel_height", 256)
+    motif_aspect = motif_w / max(1, motif_h)
+    orientation = motif_geo.get("orientation", "irregular")
+
+    # 1. 尺寸匹配度：motif 短边 vs 裁片短边
+    motif_short = min(motif_w, motif_h)
+    piece_short = min(piece_w, piece_h)
+    size_ratio = motif_short / max(1, piece_short)
+    # 理想比例 0.75（motif 短边占裁片短边的 75%）
+    size_score = max(0.0, 1.0 - abs(size_ratio - 0.75) * 2.5)
+
+    # 2. 长宽比匹配度
+    log_diff = abs(math.log(max(motif_aspect, 0.01)) - math.log(max(piece_aspect, 0.01)))
+    aspect_score = max(0.0, 1.0 - log_diff / 1.5)
+
+    # 3. 方向匹配度
+    if orientation == "vertical" and texture_dir == "longitudinal":
+        orientation_score = 1.0
+    elif orientation == "horizontal" and texture_dir == "transverse":
+        orientation_score = 1.0
+    elif orientation in ("radial", "symmetric"):
+        orientation_score = 0.85
+    else:
+        orientation_score = 0.35
+
+    # 4. 防切割预估：用最优 scale 模拟 coverage
+    desired_coverage = 0.6 if "hero" in piece_role else 0.35
+    optimal_scale = compute_optimal_scale(motif_w, motif_h, piece_w, piece_h, desired_coverage)
+    mw, mh = simulate_motif_size(motif_w, motif_h, piece_w, piece_h, optimal_scale)
+    visibility = min(1.0, piece_w / max(1, mw)) * min(1.0, piece_h / max(1, mh))
+    visibility_score = visibility
+
+    # 综合分数
+    total = size_score * 0.25 + aspect_score * 0.2 + orientation_score * 0.3 + visibility_score * 0.25
+
+    # 推荐 rotation
+    if orientation == "vertical" and texture_dir == "transverse":
+        recommended_rotation = 90
+    elif orientation == "horizontal" and texture_dir == "longitudinal":
+        recommended_rotation = 90
+    else:
+        recommended_rotation = 0
+
+    return {
+        "total": round(total, 3),
+        "size_score": round(size_score, 3),
+        "aspect_score": round(aspect_score, 3),
+        "orientation_score": round(orientation_score, 3),
+        "visibility_score": round(visibility_score, 3),
+        "recommended_scale": optimal_scale,
+        "recommended_rotation": recommended_rotation,
+        "recommended_anchor": "center",
+    }
+
+
+def compute_motif_rotation(motif_orientation: str, texture_direction: str, piece: dict) -> float:
+    """根据 motif 方向性和裁片方向计算建议的 rotation。"""
+    if motif_orientation == "vertical" and texture_direction == "transverse":
+        return 90.0
+    if motif_orientation == "horizontal" and texture_direction == "longitudinal":
+        return 90.0
+    if motif_orientation in ("radial", "symmetric"):
+        return 0.0
+    # irregular：保持原有 rotation 或根据裁片 aspect 微调
+    piece_aspect = piece.get("width", 1) / max(1, piece.get("height", 1))
+    if piece_aspect > 1.5 and motif_orientation == "vertical":
+        return 90.0
+    return 0.0
+
+
 def infer_map_from_pieces(pieces_payload: dict) -> dict:
     """当没有部位映射文件时，从裁片几何回退推断。"""
     pieces = sorted(pieces_payload.get("pieces", []), key=lambda p: p["area"], reverse=True)
@@ -90,7 +230,7 @@ def infer_map_from_pieces(pieces_payload: dict) -> dict:
     }
 
 
-def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: dict, brief: dict) -> tuple[dict, dict]:
+def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: dict, brief: dict, motif_geometries: dict = None) -> tuple[dict, dict]:
     """后端回退规则生成填充计划（当 AI 计划不可用时）。"""
     texture_ids = approved_ids(texture_set, "textures", "texture_id")
     motif_ids = approved_ids(texture_set, "motifs", "motif_id")
@@ -187,12 +327,37 @@ def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: d
                 offset_y=params["offset_y"],
             )
             if motif_id:
+                # 动态 scale：基于 motif 实际尺寸与裁片尺寸的比例
+                motif_scale = 0.72
+                motif_rotation = 0
+                if motif_geometries:
+                    # 多策略匹配 geometry
+                    geo = motif_geometries.get(motif_id)
+                    if not geo:
+                        # 策略1：按 usage 关键词匹配
+                        mid_lower = motif_id.lower()
+                        if "hero" in mid_lower:
+                            geo = motif_geometries.get("hero_motif")
+                        elif "accent" in mid_lower:
+                            geo = motif_geometries.get("accent_motif")
+                    if not geo:
+                        # 策略2：模糊匹配（key 包含 motif_id 或反之）
+                        geo = next((g for n, g in motif_geometries.items() if n in motif_id or motif_id in n), None)
+                    if not geo:
+                        # 策略3：选择最大的 geometry（按 pixel area）
+                        geo = max(motif_geometries.values(), key=lambda g: g.get("pixel_width", 0) * g.get("pixel_height", 0))
+                    if geo:
+                        fit = compute_motif_fit_score(geo, piece, role)
+                        motif_scale = fit["recommended_scale"]
+                        motif_rotation = fit["recommended_rotation"]
+                        entry["_motif_fit_score"] = fit  # 供调试参考
                 entry["overlay"] = make_layer(
                     "motif",
-                    "单一卖点图案置于关键可见裁片",
+                    f"单一卖点图案置于关键可见裁片，动态缩放 scale={motif_scale}",
                     motif_id=motif_id,
                     anchor="center",
-                    scale=0.72,
+                    scale=motif_scale,
+                    rotation=motif_rotation,
                     opacity=0.92,
                     offset_y=-round(piece["height"] * 0.04),
                 )
@@ -256,7 +421,7 @@ def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: d
     return art_direction, fill_plan
 
 
-def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: dict) -> tuple[list[dict], list[dict]]:
+def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: dict, motif_geometries: dict = None) -> tuple[list[dict], list[dict]]:
     """后端强制校验修正填充计划。"""
     issues = []
     by_piece = {p["piece_id"]: p for p in pieces_payload.get("pieces", [])}
@@ -302,12 +467,33 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
         body_entries = [e for e in entries if e.get("zone") == "body"]
         if body_entries:
             largest_body = max(body_entries, key=lambda e: by_piece.get(e["piece_id"], {}).get("area", 0))
+            # 动态 scale
+            forced_motif_id = choose(motif_ids, ["hero_motif", "hero"])
+            forced_scale = 0.72
+            forced_rotation = 0
+            if motif_geometries:
+                geo = motif_geometries.get(forced_motif_id)
+                if not geo:
+                    mid_lower = forced_motif_id.lower()
+                    if "hero" in mid_lower:
+                        geo = motif_geometries.get("hero_motif")
+                    elif "accent" in mid_lower:
+                        geo = motif_geometries.get("accent_motif")
+                if not geo:
+                    geo = next((g for n, g in motif_geometries.items() if n in forced_motif_id or forced_motif_id in n), None)
+                if not geo:
+                    geo = max(motif_geometries.values(), key=lambda g: g.get("pixel_width", 0) * g.get("pixel_height", 0))
+                if geo:
+                    fit = compute_motif_fit_score(geo, largest_body_piece, "front_hero")
+                    forced_scale = fit["recommended_scale"]
+                    forced_rotation = fit["recommended_rotation"]
             largest_body["overlay"] = make_layer(
                 "motif",
-                "强制指定为 hero 裁片",
-                motif_id=choose(motif_ids, ["hero_motif", "hero"]),
+                f"强制指定为 hero 裁片，动态缩放 scale={forced_scale}",
+                motif_id=forced_motif_id,
                 anchor="center",
-                scale=0.72,
+                scale=forced_scale,
+                rotation=forced_rotation,
                 opacity=0.92,
             )
             issues.append({"type": "fixed_missing_hero", "piece_id": largest_body["piece_id"]})
@@ -375,6 +561,53 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
 
     # 6b. 对花对条后重新同步同组一致性（防止对称组因对花被拆散）
     _resync_group_consistency(entries, issues)
+
+    # 7. Motif 方向对齐修正
+    for entry in entries:
+        overlay = entry.get("overlay")
+        if not overlay or overlay.get("fill_type") != "motif":
+            continue
+        piece = by_piece.get(entry["piece_id"], {})
+        motif_id = overlay.get("motif_id", "")
+        geo = None
+        if motif_geometries:
+            geo = motif_geometries.get(motif_id)
+            if not geo:
+                mid_lower = motif_id.lower()
+                if "hero" in mid_lower:
+                    geo = motif_geometries.get("hero_motif")
+                elif "accent" in mid_lower:
+                    geo = motif_geometries.get("accent_motif")
+            if not geo:
+                geo = next((g for n, g in motif_geometries.items() if n in motif_id or motif_id in n), None)
+            if not geo:
+                geo = max(motif_geometries.values(), key=lambda g: g.get("pixel_width", 0) * g.get("pixel_height", 0))
+        if not geo:
+            continue
+        texture_dir = entry.get("texture_direction", "transverse")
+        recommended = compute_motif_rotation(geo.get("orientation", "irregular"), texture_dir, piece)
+        current = overlay.get("rotation", 0)
+        if abs(current - recommended) > 15:
+            overlay["rotation"] = recommended
+            issues.append({
+                "type": "fixed_motif_orientation",
+                "piece_id": entry["piece_id"],
+                "old_rotation": current,
+                "new_rotation": recommended,
+                "reason": f"motif 方向({geo.get('orientation')}) 与裁片方向({texture_dir}) 不匹配，自动对齐",
+            })
+        # 同时修正 scale：如果 visibility 过低，增大 scale
+        fit = compute_motif_fit_score(geo, piece, entry.get("garment_role", ""))
+        current_scale = overlay.get("scale", 0.72)
+        if fit["visibility_score"] < 0.7 and current_scale < fit["recommended_scale"]:
+            overlay["scale"] = fit["recommended_scale"]
+            issues.append({
+                "type": "fixed_motif_scale",
+                "piece_id": entry["piece_id"],
+                "old_scale": current_scale,
+                "new_scale": fit["recommended_scale"],
+                "reason": f"motif 在裁片内可见度({fit['visibility_score']})不足，自动调整 scale",
+            })
 
     return entries, issues
 
@@ -519,6 +752,7 @@ def main() -> int:
     parser.add_argument("--garment-map", default="", help="部位映射 JSON 路径（可选）")
     parser.add_argument("--brief", default="", help="商业设计简报 JSON 路径（可选）")
     parser.add_argument("--ai-plan", default="", help="子 Agent 生成的 AI 填充计划 JSON 路径（优先使用）")
+    parser.add_argument("--visual-elements", default="", help="visual_elements.json 路径（可选，用于读取 motif 几何信息）")
     parser.add_argument("--out", required=True, help="输出目录")
     args = parser.parse_args()
 
@@ -528,6 +762,24 @@ def main() -> int:
     brief = load_json(args.brief) if args.brief else {"aesthetic_direction": "商业畅销款打样"}
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 加载 visual_elements（如果提供）用于 motif 几何分析
+    motif_geometries = {}
+    if args.visual_elements:
+        ve_path = Path(args.visual_elements)
+        if ve_path.exists():
+            motif_geometries = load_motif_geometries(ve_path)
+            if motif_geometries:
+                print(f"[适配度引擎] 已加载 {len(motif_geometries)} 个 motif 几何信息")
+        else:
+            # 尝试从 out_dir 自动查找
+            auto_ve = out_dir / "visual_elements.json"
+            if auto_ve.exists():
+                motif_geometries = load_motif_geometries(auto_ve)
+            else:
+                auto_ve_cv = out_dir / "visual_elements_cv.json"
+                if auto_ve_cv.exists():
+                    motif_geometries = load_motif_geometries(auto_ve_cv)
 
     # 阶段 1：获取填充计划（优先 AI 计划，回退后端规则）
     ai_plan_used = False
@@ -554,11 +806,11 @@ def main() -> int:
         art_direction, ai_plan = {}, {}
 
     if not ai_plan_used:
-        art_direction, fill_plan = fallback_create_plan(pieces_payload, texture_set, garment_map, brief)
+        art_direction, fill_plan = fallback_create_plan(pieces_payload, texture_set, garment_map, brief, motif_geometries)
         entries = fill_plan.get("pieces", [])
 
     # 阶段 2：强制校验修正
-    entries, fix_issues = enforce_validation(entries, pieces_payload, texture_set)
+    entries, fix_issues = enforce_validation(entries, pieces_payload, texture_set, motif_geometries)
 
     # 重新组装 art_direction
     hero_ids = [e["piece_id"] for e in entries if (e.get("overlay") or {}).get("fill_type") == "motif"]

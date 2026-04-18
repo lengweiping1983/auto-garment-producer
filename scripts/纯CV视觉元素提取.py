@@ -11,6 +11,7 @@
 """
 
 import json
+import math
 import sys
 import argparse
 from pathlib import Path
@@ -254,6 +255,7 @@ def detect_dominant_regions(blocks: list, grid: int = 6) -> list:
                 "bbox_cells": [min_r, min_c, max_r, max_c],
                 "position": _describe_position(min_r, max_r, min_c, max_c, grid),
                 "proportion": round(len(cluster) / (grid * grid), 2),
+                "_cells": cluster,  # 保留 cell 数据供 geometry 计算使用
             })
 
     regions.sort(key=lambda r: r["score"], reverse=True)
@@ -396,6 +398,205 @@ def infer_style(palette: dict, regions: list, texture_info: dict, img: Image.Ima
     }
 
 
+def _eigenvalues_2x2(a: float, b: float, c: float) -> tuple[float, float, float, float]:
+    """2x2 对称矩阵 [[a, b], [b, c]] 的特征值分解。
+    返回 (lambda1, lambda2, vx, vy)，其中 (vx, vy) 是较大特征值对应的特征向量。
+    """
+    trace = a + c
+    det = a * c - b * b
+    discriminant = ((a - c) / 2.0) ** 2 + b * b
+    if discriminant < 0:
+        discriminant = 0
+    sqrt_d = discriminant ** 0.5
+    l1 = trace / 2.0 + sqrt_d
+    l2 = trace / 2.0 - sqrt_d
+    # 较大特征值对应的特征向量
+    if l1 >= l2:
+        lam = l1
+    else:
+        lam = l2
+    # 解 (a - lam) * vx + b * vy = 0
+    if abs(b) > 1e-9:
+        vx = b
+        vy = lam - a
+    else:
+        vx = 1.0 if abs(a - lam) < abs(c - lam) else 0.0
+        vy = 1.0 if abs(c - lam) < abs(a - lam) else 0.0
+    # 归一化
+    norm = (vx * vx + vy * vy) ** 0.5
+    if norm > 1e-9:
+        vx /= norm
+        vy /= norm
+    return l1, l2, vx, vy
+
+
+def compute_region_geometry(img: Image.Image, region: dict, blocks: list, grid: int) -> dict:
+    """基于原始图像像素为 region 计算精确几何属性（PCA 主轴 + 视觉重心）。
+
+    策略：
+    1. 将 region 的 grid cells 转换为像素级 bbox
+    2. 在 bbox 内采样像素，用与 region mean_rgb 的颜色距离筛选属于该 region 的像素
+    3. 计算筛选后像素的： centroid, covariance, PCA 主轴角度
+    4. 根据主轴角度判定 orientation
+    """
+    w, h = img.size
+    cell_w, cell_h = w // grid, h // grid
+    rgb_img = img.convert("RGB")
+
+    # 从 region 的 cells 构建像素 bbox
+    cells = region.get("_cells", [])
+    if not cells:
+        # fallback：用 bbox_cells
+        min_r, min_c, max_r, max_c = region.get("bbox_cells", [0, 0, 0, 0])
+        cells = [{"row": r, "col": c} for r in range(min_r, max_r + 1) for c in range(min_c, max_c + 1)]
+
+    min_r = min(c["row"] for c in cells)
+    max_r = max(c["row"] for c in cells)
+    min_c = min(c["col"] for c in cells)
+    max_c = max(c["col"] for c in cells)
+
+    px_min_x = min_c * cell_w
+    px_min_y = min_r * cell_h
+    px_max_x = (max_c + 1) * cell_w
+    px_max_y = (max_r + 1) * cell_h
+
+    # 限制在图像范围内
+    px_min_x = max(0, px_min_x)
+    px_min_y = max(0, px_min_y)
+    px_max_x = min(w, px_max_x)
+    px_max_y = min(h, px_max_y)
+
+    # 保存原始像素尺寸（用于返回 geometry）
+    original_pixel_w = px_max_x - px_min_x
+    original_pixel_h = px_max_y - px_min_y
+
+    # 缩小采样以加速（最大 128x128 采样窗口）
+    sample_w = px_max_x - px_min_x
+    sample_h = px_max_y - px_min_y
+    if sample_w > 128 or sample_h > 128:
+        scale = min(128 / sample_w, 128 / sample_h)
+        crop = rgb_img.crop((px_min_x, px_min_y, px_max_x, px_max_y))
+        crop = crop.resize((max(1, round(sample_w * scale)), max(1, round(sample_h * scale))), Image.Resampling.LANCZOS)
+        px_min_x, px_min_y = 0, 0
+        px_max_x, px_max_y = crop.size
+    else:
+        crop = rgb_img.crop((px_min_x, px_min_y, px_max_x, px_max_y))
+
+    region_mean = region.get("mean_rgb", (128, 128, 128))
+    color_thresh = 60  # 颜色距离阈值
+
+    # 收集属于该 region 的像素坐标和颜色
+    pixels = list(crop.get_flattened_data())
+    cx, cy = crop.size
+    coords = []
+    colors = []
+    for y in range(cy):
+        for x in range(cx):
+            idx = y * cx + x
+            r, g, b = pixels[idx]
+            d = ((r - region_mean[0]) ** 2 + (g - region_mean[1]) ** 2 + (b - region_mean[2]) ** 2) ** 0.5
+            if d < color_thresh:
+                coords.append((x, y))
+                colors.append((r, g, b))
+
+    if len(coords) < 10:
+        # fallback：降低阈值重试
+        color_thresh = 90
+        coords = []
+        colors = []
+        for y in range(cy):
+            for x in range(cx):
+                idx = y * cx + x
+                r, g, b = pixels[idx]
+                d = ((r - region_mean[0]) ** 2 + (g - region_mean[1]) ** 2 + (b - region_mean[2]) ** 2) ** 0.5
+                if d < color_thresh:
+                    coords.append((x, y))
+                    colors.append((r, g, b))
+
+    n = len(coords)
+    if n < 5:
+        # 像素太少，回退到 grid-level 估算
+        pixel_w = (max_c - min_c + 1) * cell_w
+        pixel_h = (max_r - min_r + 1) * cell_h
+        return {
+            "pixel_width": pixel_w,
+            "pixel_height": pixel_h,
+            "canvas_ratio": round((pixel_w * pixel_h) / (w * h), 4),
+            "aspect_ratio": round(pixel_w / max(1, pixel_h), 3),
+            "orientation": "irregular",
+            "visual_center": [0.5, 0.5],
+            "form_type": "unknown",
+            "_source": "grid_fallback",
+        }
+
+    # 计算 centroid
+    sum_x = sum(c[0] for c in coords)
+    sum_y = sum(c[1] for c in coords)
+    cx_mean = sum_x / n
+    cy_mean = sum_y / n
+
+    # 计算 covariance matrix
+    c_xx = sum((c[0] - cx_mean) ** 2 for c in coords) / n
+    c_yy = sum((c[1] - cy_mean) ** 2 for c in coords) / n
+    c_xy = sum((c[0] - cx_mean) * (c[1] - cy_mean) for c in coords) / n
+
+    # PCA
+    l1, l2, vx, vy = _eigenvalues_2x2(c_xx, c_xy, c_yy)
+    angle = math.degrees(math.atan2(vy, vx))
+    # 归一化到 [-90, 90]
+    while angle > 90:
+        angle -= 180
+    while angle < -90:
+        angle += 180
+
+    # 判定 orientation
+    abs_angle = abs(angle)
+    if abs_angle < 30:
+        orientation = "horizontal"
+    elif abs_angle > 60:
+        orientation = "vertical"
+    else:
+        orientation = "irregular"
+
+    # 判定 form_type
+    aspect_ratio = (px_max_x - px_min_x) / max(1, px_max_y - px_min_y)
+    elongation = max(l1, l2) / max(1e-9, min(l1, l2)) if min(l1, l2) > 1e-9 else 1.0
+    if elongation > 3.0:
+        form_type = "branch" if orientation == "horizontal" else "tall_flower"
+    elif elongation > 1.8:
+        form_type = "elongated"
+    elif elongation < 1.3 and aspect_ratio < 1.3 and aspect_ratio > 0.77:
+        form_type = "round_motif"
+    else:
+        form_type = "scattered"
+
+    # visual_center：密度加权重心（基于亮度对比度）
+    # 亮度越偏离背景 = 越可能是主体部分，权重越高
+    bg_lum = sum(region_mean) / 3.0
+    weighted_x = sum(c[0] * abs(sum(colors[i]) / 3.0 - bg_lum) for i, c in enumerate(coords))
+    weighted_y = sum(c[1] * abs(sum(colors[i]) / 3.0 - bg_lum) for i, c in enumerate(coords))
+    total_weight = sum(abs(sum(colors[i]) / 3.0 - bg_lum) for i in range(n))
+    if total_weight > 1e-9:
+        vis_cx = weighted_x / total_weight
+        vis_cy = weighted_y / total_weight
+    else:
+        vis_cx = cx_mean
+        vis_cy = cy_mean
+
+    return {
+        "pixel_width": original_pixel_w,
+        "pixel_height": original_pixel_h,
+        "canvas_ratio": round((original_pixel_w * original_pixel_h) / (w * h), 4),
+        "aspect_ratio": round(original_pixel_w / max(1, original_pixel_h), 3),
+        "orientation": orientation,
+        "visual_center": [round(vis_cx / max(1, cx), 3), round(vis_cy / max(1, cy), 3)],
+        "form_type": form_type,
+        "_pca_angle": round(angle, 2),
+        "_pca_elongation": round(elongation, 2),
+        "_source": "pixel_pca",
+    }
+
+
 def build_dominant_objects(regions: list, palette: dict) -> list:
     """将检测到的主体区域包装为 dominant_objects 格式"""
     objects = []
@@ -415,6 +616,9 @@ def build_dominant_objects(regions: list, palette: dict) -> list:
             "derived_rgb": list(reg["mean_rgb"]),
             "derived_hsl": [round(h, 1), round(s, 2), round(l, 2)],
         }
+        # 如果有 geometry 数据则加入
+        if "geometry" in reg:
+            obj["geometry"] = reg["geometry"]
         objects.append(obj)
     return objects
 
@@ -557,6 +761,10 @@ def extract_visual_elements(image_path: str, grid: int = 6) -> dict:
 
     # 3. 主体区域
     regions = detect_dominant_regions(blocks, grid=grid)
+
+    # 3b. 为每个 region 计算像素级几何属性（PCA 主轴 + 视觉重心）
+    for reg in regions:
+        reg["geometry"] = compute_region_geometry(img, reg, blocks, grid)
 
     # 4. 纹理分析
     texture_info = detect_texture_regions(blocks, grid=grid)

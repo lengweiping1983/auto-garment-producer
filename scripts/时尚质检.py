@@ -38,12 +38,145 @@ def image_variation(path: Path) -> float:
         return round(sum(stat.stddev) / 3, 3)
 
 
+def check_motif_cut(piece_id: str, rendered_path: Path, fill_plan_entry: dict) -> dict | None:
+    """检查 motif 是否被裁片边界切断。
+
+    简化方法：检查渲染后裁片中非透明区域的连通域。
+    最大连通域如果接触边界 > 10% 周长，判定为 motif 可能被切断。
+    """
+    if not rendered_path.exists():
+        return None
+    overlay = fill_plan_entry.get("overlay")
+    if not overlay or overlay.get("fill_type") != "motif":
+        return None
+
+    with Image.open(rendered_path).convert("RGBA") as img:
+        alpha = img.getchannel("A")
+        # 找到 alpha > 128 的像素（非透明）
+        pixels = list(alpha.get_flattened_data())
+        w, h = alpha.size
+        # 简单的 flood-fill 找最大连通域
+        visited = set()
+        max_component = []
+        for start_y in range(h):
+            for start_x in range(w):
+                idx = start_y * w + start_x
+                if pixels[idx] <= 128 or (start_x, start_y) in visited:
+                    continue
+                # BFS
+                queue = [(start_x, start_y)]
+                visited.add((start_x, start_y))
+                comp = []
+                while queue:
+                    x, y = queue.pop(0)
+                    comp.append((x, y))
+                    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                        nx, ny = x + dx, y + dy
+                        if 0 <= nx < w and 0 <= ny < h:
+                            nidx = ny * w + nx
+                            if pixels[nidx] > 128 and (nx, ny) not in visited:
+                                visited.add((nx, ny))
+                                queue.append((nx, ny))
+                if len(comp) > len(max_component):
+                    max_component = comp
+
+        if not max_component:
+            return None
+
+        # 检查最大连通域是否接触边界
+        border_pixels = sum(1 for x, y in max_component if x == 0 or x == w - 1 or y == 0 or y == h - 1)
+        border_ratio = border_pixels / max(1, len(max_component))
+        if border_ratio > 0.15:  # >15% 的像素在边界上，可能被切断
+            return {
+                "type": "motif_may_be_cut",
+                "piece_id": piece_id,
+                "border_ratio": round(border_ratio, 3),
+                "message": f"motif 可能接触裁片边界（边界像素占比 {round(border_ratio*100)}%），存在被切断风险",
+            }
+    return None
+
+
+def check_motif_scale(piece_id: str, rendered_path: Path, piece: dict, layer: dict) -> dict | None:
+    """检查 motif 在裁片中的面积占比是否合理。"""
+    if not rendered_path.exists():
+        return None
+    overlay = layer
+    if not overlay or overlay.get("fill_type") != "motif":
+        return None
+
+    with Image.open(rendered_path).convert("RGBA") as img:
+        alpha = img.getchannel("A")
+        pixels = list(alpha.get_flattened_data())
+        non_transparent = sum(1 for p in pixels if p > 128)
+        total_pixels = len(pixels)
+        coverage = non_transparent / max(1, total_pixels)
+
+    # hero_motif: 期望 25%~85%
+    # accent_motif: 期望 10%~45%
+    motif_id = overlay.get("motif_id", "")
+    is_hero = "hero" in motif_id.lower()
+    if is_hero:
+        if coverage < 0.15:
+            return {"type": "motif_too_small", "piece_id": piece_id, "coverage": round(coverage, 3), "message": f"hero motif 占比仅 {round(coverage*100)}%，可能过小而失去视觉冲击力"}
+        if coverage > 0.9:
+            return {"type": "motif_too_large", "piece_id": piece_id, "coverage": round(coverage, 3), "message": f"hero motif 占比达 {round(coverage*100)}%，可能过大而拥挤"}
+    else:
+        if coverage < 0.05:
+            return {"type": "motif_too_small", "piece_id": piece_id, "coverage": round(coverage, 3), "message": f"accent motif 占比仅 {round(coverage*100)}%，可能难以辨识"}
+        if coverage > 0.55:
+            return {"type": "motif_too_large", "piece_id": piece_id, "coverage": round(coverage, 3), "message": f"accent motif 占比达 {round(coverage*100)}%，可能喧宾夺主"}
+    return None
+
+
+def check_motif_orientation(piece_id: str, layer: dict, fill_plan_entry: dict, visual_elements: dict) -> dict | None:
+    """检查 motif 方向是否与裁片方向协调。
+    
+    注意：texture_direction 从 fill_plan_entry 读取，因为 pieces_payload 中不含此字段。
+    """
+    overlay = layer
+    if not overlay or overlay.get("fill_type") != "motif":
+        return None
+    motif_id = overlay.get("motif_id", "")
+    if not visual_elements:
+        return None
+
+    # 查找 motif 对应的 geometry
+    geo = None
+    for obj in visual_elements.get("dominant_objects", []):
+        obj_name = obj.get("name", "")
+        if obj_name in motif_id or motif_id in obj_name:
+            geo = obj.get("geometry")
+            break
+    if not geo:
+        return None
+
+    orientation = geo.get("orientation", "irregular")
+    texture_dir = fill_plan_entry.get("texture_direction", "transverse")
+    rotation = overlay.get("rotation", 0)
+
+    # 判定方向协调度
+    # vertical motif + longitudinal piece：rotation 应为 0°（|rotation| < 30）
+    if orientation == "vertical" and texture_dir == "longitudinal" and abs(rotation % 180) > 30:
+        return {"type": "motif_orientation_mismatch", "piece_id": piece_id, "orientation": orientation, "texture_direction": texture_dir, "rotation": rotation, "message": f"竖向 motif 放在纵向裁片上，但 rotation={rotation}°，方向未对齐"}
+    # vertical motif + transverse piece：rotation 应为 90°（|rotation-90| < 30 或 |rotation+90| < 30）
+    if orientation == "vertical" and texture_dir == "transverse" and not (60 < abs(rotation % 180) < 120):
+        return {"type": "motif_orientation_mismatch", "piece_id": piece_id, "orientation": orientation, "texture_direction": texture_dir, "rotation": rotation, "message": f"竖向 motif 放在横向裁片上，但 rotation={rotation}°，建议旋转 90° 对齐"}
+    # horizontal motif + transverse piece：rotation 应为 0°
+    if orientation == "horizontal" and texture_dir == "transverse" and abs(rotation % 180) > 30:
+        return {"type": "motif_orientation_mismatch", "piece_id": piece_id, "orientation": orientation, "texture_direction": texture_dir, "rotation": rotation, "message": f"横向 motif 放在横向裁片上，但 rotation={rotation}°，方向未对齐"}
+    # horizontal motif + longitudinal piece：rotation 应为 90°
+    if orientation == "horizontal" and texture_dir == "longitudinal" and not (60 < abs(rotation % 180) < 120):
+        return {"type": "motif_orientation_mismatch", "piece_id": piece_id, "orientation": orientation, "texture_direction": texture_dir, "rotation": rotation, "message": f"横向 motif 放在纵向裁片上，但 rotation={rotation}°，建议旋转 90° 对齐"}
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="评估商业成衣美学与生产安全性。")
     parser.add_argument("--pieces", required=True, help="裁片清单 JSON 路径")
     parser.add_argument("--texture-set", required=True, help="面料组合 JSON 路径")
     parser.add_argument("--fill-plan", required=True, help="裁片填充计划 JSON 路径")
     parser.add_argument("--rendered", required=True, help="渲染输出目录，包含 pieces/*.png")
+    parser.add_argument("--visual-elements", default="", help="visual_elements.json 路径（可选）")
     parser.add_argument("--out", required=True, help="质检报告输出路径")
     args = parser.parse_args()
 
@@ -54,6 +187,13 @@ def main() -> int:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     textures, motifs, solids = approved_assets(texture_set)
+
+    # 加载 visual_elements（如果提供）
+    visual_elements = None
+    if args.visual_elements:
+        ve_path = Path(args.visual_elements)
+        if ve_path.exists():
+            visual_elements = load_json(str(ve_path))
 
     issues = []
     warnings = []
@@ -133,6 +273,19 @@ def main() -> int:
                 if alpha.getextrema()[0] == 255:
                     alpha_failures.append(piece_id)
             variation_by_piece[piece_id] = image_variation(image_path)
+            # motif 级检查
+            motif_cut = check_motif_cut(piece_id, image_path, entry)
+            if motif_cut:
+                warnings.append(motif_cut)
+            for layer in collect_layer_refs(entry):
+                if layer.get("fill_type") == "motif":
+                    motif_scale_issue = check_motif_scale(piece_id, image_path, piece_lookup.get(piece_id, {}), layer)
+                    if motif_scale_issue:
+                        warnings.append(motif_scale_issue)
+                    if visual_elements:
+                        motif_ori_issue = check_motif_orientation(piece_id, layer, entry, visual_elements)
+                        if motif_ori_issue:
+                            warnings.append(motif_ori_issue)
         else:
             issues.append({"type": "missing_rendered_piece", "piece_id": piece_id, "message": f"缺失渲染裁片: {image_path}"})
 

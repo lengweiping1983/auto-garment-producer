@@ -15,7 +15,7 @@ def load_json(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def build_agent_prompt(garment_map: dict, texture_set: dict, brief: dict, pieces_payload: dict) -> str:
+def build_agent_prompt(garment_map: dict, texture_set: dict, brief: dict, pieces_payload: dict, visual_elements: dict = None) -> str:
     """构造面向子 Agent 的审美决策 prompt。"""
     lines = [
         "你是一位高级服装印花艺术指导。请根据以下数据为每个裁片制定填充计划。",
@@ -71,6 +71,60 @@ def build_agent_prompt(garment_map: dict, texture_set: dict, brief: dict, pieces
             f"confidence={gm.get('confidence',0)}"
         )
 
+    # 如果提供了 visual_elements，注入元素几何特征和适配度参考
+    if visual_elements:
+        lines.extend([
+            "",
+            "===== 主题元素几何特征 =====",
+            "（每个候选 motif 的精确尺寸与方向；用于指导裁片分配决策）",
+        ])
+        for obj in visual_elements.get("dominant_objects", []):
+            geo = obj.get("geometry")
+            if not geo:
+                continue
+            lines.append(
+                f"- {obj.get('name', 'unknown')}: "
+                f"原始尺寸 {geo.get('pixel_width', '?')}×{geo.get('pixel_height', '?')}px, "
+                f"宽高比 {geo.get('aspect_ratio', '?')}, "
+                f"方向: {geo.get('orientation', '?')}, "
+                f"形态: {geo.get('form_type', '?')}, "
+                f"建议用途: {obj.get('suggested_usage', '?')}"
+            )
+
+        # 计算适配度参考
+        lines.extend([
+            "",
+            "===== 裁片-元素适配度参考 =====",
+            "（后端几何引擎预计算的适配度分数；你可参考但不被强制约束）",
+        ])
+        # 需要 import 创建填充计划.py 的 compute_motif_fit_score
+        # 但为了避免循环依赖，这里直接内联计算
+        for obj in visual_elements.get("dominant_objects", []):
+            geo = obj.get("geometry")
+            if not geo:
+                continue
+            lines.append(f"- {obj.get('name', 'unknown')} 适配度:")
+            for piece_id in sorted(by_id.keys()):
+                gm = by_id[piece_id]
+                geo_piece = piece_lookup.get(piece_id, {})
+                if not geo_piece:
+                    continue
+                # 简化：只报告方向匹配和尺寸匹配
+                piece_aspect = geo_piece.get("width", 1) / max(1, geo_piece.get("height", 1))
+                motif_aspect = geo.get("aspect_ratio", 1.0)
+                texture_dir = gm.get("texture_direction", "transverse")
+                orientation = geo.get("orientation", "irregular")
+                # 方向匹配
+                dir_match = "✓" if (
+                    (orientation == "vertical" and texture_dir == "longitudinal") or
+                    (orientation == "horizontal" and texture_dir == "transverse") or
+                    orientation in ("radial", "symmetric")
+                ) else "✗"
+                lines.append(
+                    f"  → {piece_id} ({gm.get('garment_role')}, {geo_piece.get('width')}×{geo_piece.get('height')}, {texture_dir}): "
+                    f"方向匹配{dir_match}, 宽高比 motif={round(motif_aspect,2)} vs piece={round(piece_aspect,2)}"
+                )
+
     lines.extend([
         "",
         "===== 硬性约束（不可违反） =====",
@@ -81,6 +135,8 @@ def build_agent_prompt(garment_map: dict, texture_set: dict, brief: dict, pieces
         "5. trim zone（trim_strip, collar, hem）使用安静纯色（quiet solid 或 dark texture），绝不使用 motif 或 accent texture。",
         "6. detail zone 使用点缀纹理（accent），但保持克制。",
         "7. 每个裁片必须提供 reason（设计理由，中文）。",
+        "8. 【新增】motif 的 scale 和 rotation 必须考虑元素方向与裁片方向的匹配：竖向元素放纵向裁片时 rotation=0°，放横向裁片时 rotation=90°；横向元素反之。",
+        "9. 【新增】motif 不应被裁片边界切断；如果元素尺寸明显大于裁片，应缩小 scale 或更换为更小的元素。",
         "",
         "===== 输出格式 =====",
         "请返回严格的 JSON，格式如下（不要任何解释文字，只返回 JSON）：",
@@ -128,6 +184,7 @@ def main() -> int:
     parser.add_argument("--garment-map", required=True, help="部位映射 JSON 路径")
     parser.add_argument("--texture-set", required=True, help="面料组合 JSON 路径")
     parser.add_argument("--brief", default="", help="商业设计简报 JSON 路径（可选）")
+    parser.add_argument("--visual-elements", default="", help="visual_elements.json 路径（可选，用于注入元素几何特征）")
     parser.add_argument("--out", required=True, help="输出目录")
     args = parser.parse_args()
 
@@ -139,7 +196,13 @@ def main() -> int:
     texture_set = load_json(args.texture_set)
     brief = load_json(args.brief) if args.brief else {"aesthetic_direction": "商业畅销款"}
 
-    prompt = build_agent_prompt(garment_map, texture_set, brief, pieces_payload)
+    visual_elements = None
+    if args.visual_elements:
+        ve_path = Path(args.visual_elements)
+        if ve_path.exists():
+            visual_elements = load_json(str(ve_path))
+
+    prompt = build_agent_prompt(garment_map, texture_set, brief, pieces_payload, visual_elements)
     prompt_path = out_dir / "ai_fill_plan_prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
 
