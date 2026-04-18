@@ -105,6 +105,73 @@ def _build_collection_prompt_from_visual_elements(out_dir: Path, visual_elements
     return "\n".join(lines)
 
 
+def validate_board_colors(board_path: Path, palette: dict, threshold: int = 80) -> list[dict]:
+    """验证 3×3 看板各面板颜色是否与 palette 协调。
+    返回颜色偏差报告列表。"""
+    from PIL import Image
+    warnings = []
+    if not palette:
+        return warnings
+
+    board = Image.open(board_path).convert("RGB")
+    w, h = board.size
+    div_x1, div_x2 = w // 3, 2 * w // 3
+    div_y1, div_y2 = h // 3, 2 * h // 3
+
+    panels = {
+        "main": (0, 0, div_x1, div_y1),
+        "secondary": (div_x1, 0, div_x2, div_y1),
+        "dark_base": (div_x2, 0, w, div_y1),
+        "accent_light": (0, div_y1, div_x1, div_y2),
+        "accent_mid": (div_x1, div_y1, div_x2, div_y2),
+        "solid_quiet": (div_x2, div_y1, w, div_y2),
+        "hero_motif_1": (0, div_y2, div_x1, h),
+        "hero_motif_2": (div_x1, div_y2, div_x2, h),
+        "trim_motif": (div_x2, div_y2, w, h),
+    }
+
+    def _hex_to_rgb(hex_str):
+        from PIL import ImageColor
+        return ImageColor.getrgb(hex_str)
+
+    def _rgb_dist(c1, c2):
+        return sum((a - b) ** 2 for a, b in zip(c1, c2)) ** 0.5
+
+    mapping = {
+        "main": palette.get("primary", []),
+        "secondary": palette.get("secondary", []),
+        "dark_base": palette.get("dark", []),
+        "accent_light": palette.get("accent", []) or palette.get("primary", []),
+        "accent_mid": palette.get("secondary", []),
+        "solid_quiet": palette.get("primary", []),
+    }
+
+    for tid, box in panels.items():
+        crop = board.crop(box)
+        sample = crop.resize((1, 1), Image.Resampling.LANCZOS)
+        r, g, b = sample.getpixel((0, 0))
+        actual = (r, g, b)
+
+        candidates = mapping.get(tid, [])
+        if not candidates:
+            continue
+        try:
+            expected_rgb = _hex_to_rgb(candidates[0])
+            dist = _rgb_dist(actual, expected_rgb)
+            if dist > threshold:
+                warnings.append({
+                    "panel": tid,
+                    "actual_rgb": actual,
+                    "expected_hex": candidates[0],
+                    "distance": round(dist, 1),
+                    "severity": "high" if dist > 120 else "medium",
+                })
+        except Exception:
+            continue
+
+    return warnings
+
+
 def generate_board(args: argparse.Namespace, out_dir: Path) -> Path:
     """调用 Neo AI 生成面料看板。"""
     board_dir = out_dir / "neo_collection_board"
@@ -266,14 +333,44 @@ def make_motif_transparent(panel: Image.Image, threshold: int = 235) -> Image.Im
     return img
 
 
-def quiet_solid_from_image(image: Image.Image, fallback: str = "#78965c") -> str:
-    """从图像平均色提取一个安静的商业饰边纯色。"""
+def quiet_solid_from_image(image: Image.Image, palette: dict = None, target_role: str = "trim") -> str:
+    """从图像平均色提取纯色，优先遵循 palette，避免硬编码颜色偏差。
+
+    Args:
+        image: 面板图像。
+        palette: 从主题图提取的 palette dict，含 primary/secondary/accent/dark 列表。
+        target_role: 目标用途，决定从 palette 的哪个 tier 选色。
+    """
+    from PIL import ImageColor
+
     sample = image.convert("RGB").resize((1, 1), Image.Resampling.LANCZOS)
     r, g, b = sample.getpixel((0, 0))
-    # 将平均色向商业苔藓饰边色靠拢
-    moss = ImageColor.getrgb(fallback)
-    mixed = tuple(round(channel * 0.35 + moss_channel * 0.65) for channel, moss_channel in zip((r, g, b), moss))
-    return "#{:02x}{:02x}{:02x}".format(*mixed)
+    img_hex = "#{:02x}{:02x}{:02x}".format(r, g, b)
+
+    if not palette:
+        return img_hex
+
+    # 根据 target_role 从 palette 选最合适的颜色 tier
+    if target_role in ("trim", "dark", "dark_base"):
+        candidates = palette.get("dark", []) + palette.get("accent", [])
+    elif target_role in ("secondary", "accent"):
+        candidates = palette.get("secondary", []) + palette.get("accent", [])
+    else:
+        candidates = palette.get("primary", []) + palette.get("secondary", [])
+
+    if candidates:
+        def _color_distance(c1, c2):
+            try:
+                rgb1 = ImageColor.getrgb(c1)
+                rgb2 = ImageColor.getrgb(c2)
+                return sum((a - b) ** 2 for a, b in zip(rgb1, rgb2))
+            except Exception:
+                return float("inf")
+
+        best = min(candidates, key=lambda c: _color_distance(c, img_hex))
+        return best
+
+    return img_hex
 
 
 def clean_internal_text_strip(image: Image.Image, min_strip_height: int = 5, diff_threshold: float = 12.0) -> Image.Image:
@@ -344,7 +441,7 @@ def clean_internal_text_strip(image: Image.Image, min_strip_height: int = 5, dif
     return image
 
 
-def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_tiles: bool) -> Path:
+def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_tiles: bool, palette: dict = None) -> Path:
     """将 3×3 面料看板裁剪为九种资产，并生成面料组合.json。
     支持智能分隔带检测，自动扩大安全边距，并清理面板内部文字。"""
     assets_dir = out_dir / "assets"
@@ -395,8 +492,8 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
             crop.convert("RGB").save(path)
         paths[asset_id] = path
 
-    quiet_solid = quiet_solid_from_image(Image.open(paths["solid_quiet"]))
-    moss_color = quiet_solid_from_image(Image.open(paths["secondary"]))
+    quiet_solid = quiet_solid_from_image(Image.open(paths["solid_quiet"]), palette=palette, target_role="trim")
+    moss_color = quiet_solid_from_image(Image.open(paths["secondary"]), palette=palette, target_role="secondary")
 
     texture_set = {
         "texture_set_id": f"{out_dir.name}_neo_collection_texture_set",
@@ -625,7 +722,30 @@ def main() -> int:
         raise RuntimeError(f"面料看板未找到: {board_path}")
     print(f"使用面料看板: {board_path}")
 
-    texture_set_path = crop_collection_board(board_path, out_dir, args.crop_inset, not args.no_tile_repair)
+    # 尝试读取 palette 以指导纯色提取和颜色校验
+    palette = None
+    style_profile_path = out_dir / "style_profile.json"
+    if style_profile_path.exists():
+        try:
+            sp = json.loads(style_profile_path.read_text(encoding="utf-8"))
+            palette = sp.get("palette")
+        except Exception:
+            pass
+
+    # 看板颜色协调性校验
+    if palette:
+        color_warnings = validate_board_colors(board_path, palette)
+        if color_warnings:
+            print("[颜色校验警告] 以下面板颜色与 palette 偏差较大：")
+            for w in color_warnings:
+                print(f"  {w['panel']}: 实际 RGB{w['actual_rgb']} vs 预期 {w['expected_hex']} (偏差 {w['distance']})")
+            warn_path = out_dir / "board_color_warnings.json"
+            warn_path.write_text(json.dumps(color_warnings, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"  详细报告: {warn_path}")
+        else:
+            print("[颜色校验] 所有面板颜色与 palette 协调。")
+
+    texture_set_path = crop_collection_board(board_path, out_dir, args.crop_inset, not args.no_tile_repair, palette=palette)
 
     pieces_cmd = [
         sys.executable,

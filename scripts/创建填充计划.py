@@ -238,11 +238,12 @@ def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: d
     if not texture_ids:
         raise RuntimeError("没有已批准的面料可用于艺术指导填充计划。")
 
-    main_id = choose(texture_ids, ["main", "base", "secondary", "accent", "dark"])
-    secondary_id = choose(texture_ids, ["secondary", "main", "accent", "dark"])
-    accent_id = choose(texture_ids, ["accent", "secondary", "main", "dark"])
-    dark_id = choose(texture_ids, ["dark", "secondary", "accent", "main"])
-    trim_solid_id = choose(solid_ids, ["moss_green", "forest_green", "quiet_moss", "dark", "solid"])
+    # 注意：texture_id 实际值为 main/secondary/dark_base/accent_light/accent_mid/solid_quiet
+    main_id = choose(texture_ids, ["main", "base", "secondary", "accent_light", "dark_base"])
+    secondary_id = choose(texture_ids, ["secondary", "main", "accent_light", "accent_mid", "dark_base"])
+    accent_id = choose(texture_ids, ["accent_light", "accent_mid", "accent", "secondary", "main", "dark_base"])
+    dark_id = choose(texture_ids, ["dark_base", "dark", "secondary", "accent_light", "main"])
+    trim_solid_id = choose(solid_ids, ["quiet_solid", "quiet_moss", "moss_green", "forest_green", "dark", "solid"])
     motif_id = choose(motif_ids, ["hero_motif", "hero", "accent_motif"])
 
     by_piece = {item["piece_id"]: item for item in garment_map.get("pieces", [])}
@@ -278,7 +279,7 @@ def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: d
             params = {
                 "offset_x": 47 * (len(group_params) + index + 1),
                 "offset_y": 29 * (len(group_params) + index + 1),
-                "rotation": direction,
+                "scale": None,  # 由第一个成员的条件分支确定后写入
             }
             if group_key:
                 group_params[group_key] = params
@@ -297,13 +298,16 @@ def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: d
         }
         if is_trim:
             trim_ids.append(piece["piece_id"])
+            piece_scale = params.get("scale") or 1.18
+            if group_key and params.get("scale") is None:
+                params["scale"] = piece_scale
             if dark_id:
                 entry["base"] = make_layer(
                     "texture",
                     "真正饰边使用安静协调纹理，避免不匹配的纯色块",
                     texture_id=dark_id,
-                    scale=1.18,
-                    rotation=direction,
+                    scale=piece_scale,
+                    rotation=0,
                     offset_x=params["offset_x"],
                     offset_y=params["offset_y"],
                 )
@@ -317,12 +321,15 @@ def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: d
         elif is_hero:
             hero_count += 1
             hero_ids.append(piece["piece_id"])
+            piece_scale = params.get("scale") or 1.12
+            if group_key and params.get("scale") is None:
+                params["scale"] = piece_scale
             entry["base"] = make_layer(
                 "texture",
                 "前片卖点区使用低噪商业底纹，对齐服装方向",
                 texture_id=main_id,
-                scale=1.12,
-                rotation=direction,
+                scale=piece_scale,
+                rotation=0,
                 offset_x=params["offset_x"],
                 offset_y=params["offset_y"],
             )
@@ -364,12 +371,15 @@ def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: d
             entry["reason"] = "前片卖点区承载简化主题，不切割叙事插画"
         elif zone == "body" or role in ("back_body", "secondary_body"):
             quiet_ids.append(piece["piece_id"])
+            piece_scale = params.get("scale") or 1.18
+            if group_key and params.get("scale") is None:
+                params["scale"] = piece_scale
             entry["base"] = make_layer(
                 "texture",
                 "大身裁片使用可穿安静底纹/辅面料，对齐服装方向",
                 texture_id=main_id,
-                scale=1.18,
-                rotation=direction,
+                scale=piece_scale,
+                rotation=0,
                 offset_x=params["offset_x"],
                 offset_y=params["offset_y"],
             )
@@ -377,12 +387,15 @@ def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: d
         elif zone == "secondary" or role in ("sleeve_pair", "sleeve_or_side_panel"):
             secondary_ids.append(piece["piece_id"])
             mirror_x = bool(symmetry_group and piece["source_x"] > (pieces_payload.get("canvas", {}).get("width", 0) / 2))
+            piece_scale = params.get("scale") or 1.22
+            if group_key and params.get("scale") is None:
+                params["scale"] = piece_scale
             entry["base"] = make_layer(
                 "texture",
                 "匹配或副面板使用协调纹理，共享组参数",
                 texture_id=secondary_id,
-                scale=1.22,
-                rotation=direction,
+                scale=piece_scale,
+                rotation=0,
                 offset_x=params["offset_x"],
                 offset_y=params["offset_y"],
                 mirror_x=mirror_x,
@@ -390,12 +403,15 @@ def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: d
             entry["reason"] = "副面板增加节奏感，同形裁片保持视觉一致"
         else:
             secondary_ids.append(piece["piece_id"])
+            piece_scale = params.get("scale") or 1.35
+            if group_key and params.get("scale") is None:
+                params["scale"] = piece_scale
             entry["base"] = make_layer(
                 "texture",
                 "小型细节使用受控点缀纹理，不使用复杂叙事艺术",
                 texture_id=accent_id,
-                scale=1.35,
-                rotation=direction,
+                scale=piece_scale,
+                rotation=0,
                 offset_x=params["offset_x"],
                 offset_y=params["offset_y"],
             )
@@ -429,10 +445,10 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
     texture_ids = approved_ids(texture_set, "textures", "texture_id")
     motif_ids = approved_ids(texture_set, "motifs", "motif_id")
     solid_ids = approved_ids(texture_set, "solids", "solid_id")
-    main_id = choose(texture_ids, ["main", "base", "secondary", "accent", "dark"])
-    secondary_id = choose(texture_ids, ["secondary", "main", "accent", "dark"])
-    dark_id = choose(texture_ids, ["dark", "secondary", "accent", "main"])
-    trim_solid_id = choose(solid_ids, ["quiet_moss", "moss_green", "forest_green", "dark", "solid"])
+    main_id = choose(texture_ids, ["main", "base", "secondary", "accent_light", "dark_base"])
+    secondary_id = choose(texture_ids, ["secondary", "main", "accent_light", "accent_mid", "dark_base"])
+    dark_id = choose(texture_ids, ["dark_base", "dark", "secondary", "accent_light", "main"])
+    trim_solid_id = choose(solid_ids, ["quiet_solid", "quiet_moss", "moss_green", "forest_green", "dark", "solid"])
 
     # 1. 同组一致性修正
     group_templates: dict[str, dict] = {}

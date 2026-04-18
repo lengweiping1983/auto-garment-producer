@@ -292,23 +292,65 @@ def _generate_outputs(
     hero_motif_2_prompt = gp.get("hero_motif_2", f"a secondary accent subject, centered, plain light background, refined {medium} brushwork, designed as placement accent motif, {mood}, no text")
     trim_motif_prompt = gp.get("trim_motif", f"a small delicate decorative accent, minimal composition, plain warm background, designed as trim detail placement element, {medium} style, no text")
 
+    def _inject_palette_constraints(prompt_text: str, texture_id: str, palette: dict) -> str:
+        """为提示词追加具体的 hex 颜色硬约束，减少 AI 生成时的颜色偏差。"""
+        if not palette:
+            return prompt_text
+        primary = palette.get("primary", [])
+        secondary = palette.get("secondary", [])
+        accent = palette.get("accent", [])
+        dark = palette.get("dark", [])
+
+        constraints = []
+        if texture_id == "main" and primary:
+            constraints.append(f"ground color must be exactly {primary[0]}")
+        elif texture_id == "secondary" and secondary:
+            constraints.append(f"light ground and pattern tones must stay within {secondary[0]} family, no warm cast")
+        elif texture_id == "dark_base" and dark:
+            constraints.append(f"deep ground color must be exactly {dark[0]} or darker, no brown, no green cast")
+        elif texture_id == "accent_light" and (accent or primary):
+            c = accent[0] if accent else primary[0]
+            constraints.append(f"scattered accent elements must use {c} tones only")
+        elif texture_id == "accent_mid" and secondary:
+            constraints.append(f"lattice lines must use {secondary[0]} tones, pale ground stays within {primary[0] if primary else 'light'} family")
+        elif texture_id == "solid_quiet" and primary:
+            constraints.append(f"solid surface color must be exactly {primary[0]} with only subtle texture, no pattern")
+        elif texture_id == "hero_motif_1" and primary:
+            bg = primary[0] if primary else "#ffffff"
+            fg = accent[0] if accent else (secondary[0] if secondary else bg)
+            constraints.append(f"plain background exactly {bg}, subject painted in {fg} tones, soft fading edges")
+        elif texture_id == "hero_motif_2" and primary:
+            bg = primary[0] if primary else "#ffffff"
+            fg = secondary[0] if secondary else (accent[0] if accent else bg)
+            constraints.append(f"plain background exactly {bg}, accent subject in {fg} tones")
+        elif texture_id == "trim_motif" and (accent or secondary):
+            c = accent[0] if accent else secondary[0]
+            constraints.append(f"minimal decorative accent in {c} tones on plain warm background")
+
+        if constraints:
+            return f"{prompt_text}, color constraint: {', '.join(constraints)}"
+        return prompt_text
+
+    # 构建 9 面板提示词并注入 palette 约束
+    palette = style_profile.get("palette", {}) if style_details else {}
+    _prompts = [
+        ("main", "可穿大身裁片", main_prompt, "row1_left", "base_texture"),
+        ("secondary", "协调大副裁片", secondary_prompt, "row1_center", "base_texture"),
+        ("dark_base", "深色饰边/打底片", dark_prompt, "row1_right", "base_texture"),
+        ("accent_light", "小面板与受控点缀", accent_prompt, "row2_left", "accent_texture"),
+        ("accent_mid", "中格几何/有机格子", accent_mid_prompt, "row2_center", "accent_texture"),
+        ("solid_quiet", "安静纯色/衬里", solid_quiet_prompt, "row2_right", "solid_texture"),
+        ("hero_motif_1", "主卖点定位图案", hero_motif_1_prompt, "row3_left", "placement_motif"),
+        ("hero_motif_2", "次卖点定位图案", hero_motif_2_prompt, "row3_center", "placement_motif"),
+        ("trim_motif", "小型装饰点缀", trim_motif_prompt, "row3_right", "placement_motif"),
+    ]
+    prompts = [_make_prompt(tid, purpose, _inject_palette_constraints(ptext, tid, palette), panel=panel, role=role)
+               for tid, purpose, ptext, panel, role in _prompts]
+
     texture_prompts = {
         "style_id": style_id,
         "generation_owner": "external_ai_image_model",
-        "prompts": [
-            # Row 1 — Base textures for large garment panels
-            _make_prompt("main", "可穿大身裁片", main_prompt, panel="row1_left", role="base_texture"),
-            _make_prompt("secondary", "协调大副裁片", secondary_prompt, panel="row1_center", role="base_texture"),
-            _make_prompt("dark_base", "深色饰边/打底片", dark_prompt, panel="row1_right", role="base_texture"),
-            # Row 2 — Mid-scale accent textures
-            _make_prompt("accent_light", "小面板与受控点缀", accent_prompt, panel="row2_left", role="accent_texture"),
-            _make_prompt("accent_mid", "中格几何/有机格子", accent_mid_prompt, panel="row2_center", role="accent_texture"),
-            _make_prompt("solid_quiet", "安静纯色/衬里", solid_quiet_prompt, panel="row2_right", role="solid_texture"),
-            # Row 3 — Placement motifs and hero elements
-            _make_prompt("hero_motif_1", "主卖点定位图案", hero_motif_1_prompt, panel="row3_left", role="placement_motif"),
-            _make_prompt("hero_motif_2", "次卖点定位图案", hero_motif_2_prompt, panel="row3_center", role="placement_motif"),
-            _make_prompt("trim_motif", "小型装饰点缀", trim_motif_prompt, panel="row3_right", role="placement_motif"),
-        ],
+        "prompts": prompts,
     }
 
     motif_prompts = {
