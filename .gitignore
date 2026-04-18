@@ -1,4 +1,5 @@
 # Python bytecode and caches
+runs/
 output/
 __pycache__/
 .thumbnails/

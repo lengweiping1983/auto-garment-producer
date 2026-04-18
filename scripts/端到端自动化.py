@@ -44,6 +44,11 @@ except Exception:
 
     HAS_TEMPLATE_LOADER = False
 
+try:
+    from theme_image_resolver import resolve_theme_image
+except Exception:
+    resolve_theme_image = None
+
 
 def file_sha256(path: str | Path) -> str:
     """计算文件的 SHA256 哈希。"""
@@ -1553,7 +1558,15 @@ def main() -> int:
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument("--collection-board", default="", help="已有的 Neo AI 3×3 面料看板。若省略，则调用 Neo AI 生成。")
     parser.add_argument("--texture-set", default="", help="已审批的 texture_set.json。提供后跳过看板生成/裁剪，直接使用该面料组合继续裁片映射、填充和渲染。")
-    parser.add_argument("--theme-image", default="", help="主题/参考图像路径。若提供，会先进行视觉元素提取。")
+    parser.add_argument(
+        "--theme-image",
+        default="",
+        help=(
+            "主题/参考图像。支持文件路径、目录、URL、data:image/base64；为空时会尝试 "
+            "AUTO_GARMENT_THEME_IMAGE/CODEX_ATTACHED_IMAGE_PATHS 及 out/input 自动发现。若提供，会先进行视觉元素提取。"
+        ),
+    )
+    parser.add_argument("--require-theme-image", action="store_true", help="强制要求解析到本地主题图，否则立即报错。")
     parser.add_argument("--visual-elements", default="", help="已完成的 visual_elements.json 路径。若提供，跳过视觉提取直接生成设计简报。")
     parser.add_argument("--prompt-file", default="", help="Neo AI 看板生成的提示词文件")
     parser.add_argument("--negative-prompt-file", default="", help="Neo AI 看板生成的反向提示词文件")
@@ -1601,6 +1614,29 @@ def main() -> int:
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 主题图输入归一化：端到端流程只能消费本地文件。会话附件如果由
+    # 客户端/集成以环境变量、URL、base64 或 out/input 目录提供，在这里落成稳定路径。
+    if resolve_theme_image:
+        try:
+            resolved_theme = resolve_theme_image(
+                args.theme_image,
+                out_dir,
+                required=bool(args.require_theme_image),
+            )
+        except Exception as exc:
+            print(f"[错误] 主题图解析失败: {exc}", file=sys.stderr)
+            return 1
+        if resolved_theme:
+            if str(resolved_theme) != args.theme_image:
+                source_note = args.theme_image or "auto-discovered"
+                if len(source_note) > 120:
+                    source_note = source_note[:117] + "..."
+                print(f"[主题图] 已解析并落盘: {source_note} -> {resolved_theme}")
+            args.theme_image = str(resolved_theme)
+    elif args.require_theme_image and not args.theme_image:
+        print("[错误] 当前环境缺少 theme_image_resolver，且未提供 --theme-image。", file=sys.stderr)
+        return 1
 
     # ===== brief 校验 =====
     brief_path = Path(args.brief) if args.brief else None
