@@ -98,13 +98,31 @@ def simulate_motif_size(motif_w: int, motif_h: int, piece_w: int, piece_h: int, 
     return motif_w * ratio, motif_h * ratio
 
 
+def _compute_motif_render_bounds(piece_w: int, piece_h: int, motif_w: int, motif_h: int, scale: float, anchor: str, offset_x: int, offset_y: int) -> tuple[float, float, float, float]:
+    """计算 motif 在裁片上的渲染位置和尺寸。返回 (x, y, render_w, render_h)。"""
+    rw, rh = simulate_motif_size(motif_w, motif_h, piece_w, piece_h, scale)
+    positions = {
+        "center": ((piece_w - rw) / 2 + offset_x, (piece_h - rh) / 2 + offset_y),
+        "top": ((piece_w - rw) / 2 + offset_x, offset_y),
+        "bottom": ((piece_w - rw) / 2 + offset_x, piece_h - rh + offset_y),
+        "left": (offset_x, (piece_h - rh) / 2 + offset_y),
+        "right": (piece_w - rw + offset_x, (piece_h - rh) / 2 + offset_y),
+        "top_left": (offset_x, offset_y),
+        "top_right": (piece_w - rw + offset_x, offset_y),
+        "bottom_left": (offset_x, piece_h - rh + offset_y),
+        "bottom_right": (piece_w - rw + offset_x, piece_h - rh + offset_y),
+    }
+    x, y = positions.get(anchor, positions["center"])
+    return x, y, rw, rh
+
+
 def compute_optimal_scale(motif_w: int, motif_h: int, piece_w: int, piece_h: int, desired_coverage: float = 0.55) -> float:
     """二分搜索找到使 motif coverage 接近 desired_coverage 的 scale。"""
     def coverage_at(s):
         mw, mh = simulate_motif_size(motif_w, motif_h, piece_w, piece_h, s)
         return (mw * mh) / max(1, piece_w * piece_h)
 
-    lo, hi = 0.05, 3.0
+    lo, hi = 0.05, 1.0
     for _ in range(20):
         mid = (lo + hi) / 2
         if coverage_at(mid) < desired_coverage:
@@ -192,10 +210,48 @@ def compute_motif_rotation(motif_orientation: str, texture_direction: str, piece
     return 0.0
 
 
+def _group_similar_pieces(pieces: list[dict]) -> dict[str, str]:
+    """为几何相似的裁片自动分配 same_shape_group。
+    配对条件：面积比 ≥0.65、aspect 比 ≥0.55、y 坐标接近（在各自高度 2.5 倍内）。
+    主要用于 fallback 路径中让领子/袖口等小裁片保持同组一致。"""
+    group_map: dict[str, str] = {}
+    assigned: set[str] = set()
+    for i, p1 in enumerate(pieces):
+        if p1["piece_id"] in assigned:
+            continue
+        group = [p1]
+        for p2 in pieces[i + 1 :]:
+            if p2["piece_id"] in assigned:
+                continue
+            # 面积相似
+            area_ratio = min(p1["area"], p2["area"]) / max(p1["area"], p2["area"])
+            if area_ratio < 0.65:
+                continue
+            # y 坐标接近（都在顶部或都在底部）
+            cy1 = p1.get("cy", p1.get("y", 0) + p1.get("height", 0) / 2)
+            cy2 = p2.get("cy", p2.get("y", 0) + p2.get("height", 0) / 2)
+            if abs(cy1 - cy2) > max(p1.get("height", 1), p2.get("height", 1)) * 2.5:
+                continue
+            # aspect 相似
+            a1 = p1["width"] / max(1, p1["height"])
+            a2 = p2["width"] / max(1, p2["height"])
+            aspect_ratio = min(a1, a2) / max(a1, a2)
+            if aspect_ratio < 0.55:
+                continue
+            group.append(p2)
+        if len(group) >= 2:
+            gname = f"ssg_{p1['piece_id']}"
+            for p in group:
+                assigned.add(p["piece_id"])
+                group_map[p["piece_id"]] = gname
+    return group_map
+
+
 def infer_map_from_pieces(pieces_payload: dict) -> dict:
     """当没有部位映射文件时，从裁片几何回退推断。"""
     pieces = sorted(pieces_payload.get("pieces", []), key=lambda p: p["area"], reverse=True)
     largest_area = pieces[0]["area"] if pieces else 1
+    group_map = _group_similar_pieces(pieces)
     mapped = []
     for index, piece in enumerate(pieces):
         aspect = piece["width"] / max(1, piece["height"])
@@ -216,7 +272,7 @@ def infer_map_from_pieces(pieces_payload: dict) -> dict:
             "garment_role": role,
             "zone": zone,
             "symmetry_group": "",
-            "same_shape_group": "",
+            "same_shape_group": group_map.get(piece["piece_id"], ""),
             "direction_degrees": 90 if aspect >= 1.8 else 0,
             "texture_direction": texture_dir,
             "confidence": confidence,
@@ -270,7 +326,7 @@ def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: d
         aspect = piece["width"] / max(1, piece["height"])
         area_ratio = piece["area"] / max(1, largest_area)
         is_true_trim = zone == "trim" or role in ("trim_strip", "collar_or_upper_trim", "hem_or_lower_trim")
-        is_trim = is_true_trim and area_ratio < 0.12
+        is_trim = is_true_trim and area_ratio < 0.18
         is_hero = role == "front_hero" and hero_count < (1 if len(sorted_pieces) < 8 else 2)
         group_key = same_shape_group or symmetry_group
         if group_key and group_key in group_params:
@@ -468,8 +524,6 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
         if not group:
             continue
         base = entry.get("base")
-        if not isinstance(base, dict):
-            continue
         # AI 声明了有意不对称设计，程序不强制修正
         if entry.get("intentional_asymmetry"):
             issues.append({
@@ -481,22 +535,35 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
             })
             continue
         if group not in group_templates:
-            group_templates[group] = dict(base)
-        else:
-            template = group_templates[group]
-            changed = False
-            for key in ("texture_id", "scale", "rotation", "offset_x", "offset_y", "mirror_x", "mirror_y"):
-                if base.get(key) != template.get(key):
-                    base[key] = template[key]
-                    changed = True
-            if changed:
-                issues.append({
-                    "type": "fixed_group_mismatch",
-                    "severity": "high",
-                    "piece_id": entry["piece_id"],
-                    "group": group,
-                    "message": "修正为与同组裁片一致的 base 层参数",
-                })
+            # 第一个有 base 的成员设为 template；若 base 为 None，先留空待后续填充
+            if isinstance(base, dict):
+                group_templates[group] = dict(base)
+            continue
+        template = group_templates[group]
+        if not isinstance(base, dict):
+            # 同组成员 base 缺失，复制 template 的完整 base
+            entry["base"] = dict(template)
+            issues.append({
+                "type": "fixed_group_missing_base",
+                "severity": "high",
+                "piece_id": entry["piece_id"],
+                "group": group,
+                "message": "同组成员 base 缺失，已复制 template 的完整 base",
+            })
+            continue
+        changed = False
+        for key in ("fill_type", "texture_id", "scale", "rotation", "offset_x", "offset_y", "mirror_x", "mirror_y"):
+            if base.get(key) != template.get(key):
+                base[key] = template[key]
+                changed = True
+        if changed:
+            issues.append({
+                "type": "fixed_group_mismatch",
+                "severity": "high",
+                "piece_id": entry["piece_id"],
+                "group": group,
+                "message": "修正为与同组裁片一致的 base 层参数",
+            })
 
     # 2. Hero 数量修正
     hero_entries = [e for e in entries if e.get("garment_role") == "front_hero" or (e.get("overlay") or {}).get("fill_type") == "motif"]
@@ -678,6 +745,61 @@ def enforce_validation(entries: list[dict], pieces_payload: dict, texture_set: d
                 "message": f"motif 在裁片内可见度({fit['visibility_score']:.2f})偏低，建议增大 scale 或更换 motif",
             })
 
+    # 9. Motif 边界溢出检测（安全修正）
+    for entry in entries:
+        overlay = entry.get("overlay")
+        if not overlay or overlay.get("fill_type") != "motif":
+            continue
+        piece = by_piece.get(entry["piece_id"], {})
+        pw = piece.get("width", 1)
+        ph = piece.get("height", 1)
+        motif_id = overlay.get("motif_id", "")
+        mw, mh = 256, 256
+        if motif_geometries:
+            geo = motif_geometries.get(motif_id)
+            if not geo:
+                mid_lower = motif_id.lower()
+                if "hero" in mid_lower:
+                    geo = motif_geometries.get("hero_motif")
+                elif "accent" in mid_lower:
+                    geo = motif_geometries.get("accent_motif")
+            if not geo:
+                geo = next((g for n, g in motif_geometries.items() if n in motif_id or motif_id in n), None)
+            if not geo:
+                geo = max(motif_geometries.values(), key=lambda g: g.get("pixel_width", 0) * g.get("pixel_height", 0))
+            if geo:
+                mw = geo.get("pixel_width", 256)
+                mh = geo.get("pixel_height", 256)
+        scale = overlay.get("scale", 0.72)
+        anchor = overlay.get("anchor", "center")
+        offset_x = overlay.get("offset_x", 0)
+        offset_y = overlay.get("offset_y", 0)
+        new_scale = scale
+        for _ in range(15):
+            x, y, rw, rh = _compute_motif_render_bounds(pw, ph, mw, mh, new_scale, anchor, offset_x, offset_y)
+            overflow_x = max(0, -x, x + rw - pw)
+            overflow_y = max(0, -y, y + rh - ph)
+            if overflow_x <= 0 and overflow_y <= 0:
+                break
+            shrink = 1.0
+            if overflow_x > 0 and rw > 0:
+                shrink = min(shrink, (rw - overflow_x) / rw)
+            if overflow_y > 0 and rh > 0:
+                shrink = min(shrink, (rh - overflow_y) / rh)
+            new_scale *= max(0.5, shrink)
+            if new_scale < 0.05:
+                break
+        if new_scale < scale:
+            overlay["scale"] = round(new_scale, 3)
+            issues.append({
+                "type": "fixed_motif_overflow",
+                "severity": "high",
+                "piece_id": entry["piece_id"],
+                "old_scale": scale,
+                "new_scale": round(new_scale, 3),
+                "message": f"motif 渲染尺寸超出裁片边界，已自动缩小 scale {scale} → {round(new_scale, 3)}",
+            })
+
     return entries, issues
 
 
@@ -700,7 +822,7 @@ def _resync_group_consistency(entries: list[dict], issues: list) -> None:
         else:
             template = group_templates[group]
             changed = False
-            for key in ("texture_id", "scale", "rotation", "offset_x", "offset_y", "mirror_x", "mirror_y"):
+            for key in ("fill_type", "texture_id", "scale", "rotation", "offset_x", "offset_y", "mirror_x", "mirror_y"):
                 if base.get(key) != template.get(key):
                     base[key] = template[key]
                     changed = True
