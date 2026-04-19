@@ -105,10 +105,10 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "generated_prompts": {
             "main": "英文 seamless tileable low-density tonal leaf repeat pattern prompt，淡底、可见但安静的叶片重复结构，不得是 abstract wash / plain color wash / blurred background / empty texture",
             "secondary": "英文 coordinating repeat prompt",
-            "dark_base": "英文 seamless tileable dark green micro stripe or tiny geometric repeat prompt，清晰 jacquard/织纹结构，不得是 forest / foliage photo / camouflage / atmospheric scene / plain dark texture",
+            "dark_base": "英文 seamless tileable perfectly flat dark solid prompt，只有极细微颗粒感，不得有 ribs / corduroy / stripes / folds / shadows / 3D面料摄影 / visible repeat structure / forest / foliage photo / camouflage / atmospheric scene / moody landscape",
             "accent_light": "英文 small-scale accent repeat prompt",
             "accent_mid": "英文 soft geometric or organic lattice repeat prompt",
-            "solid_quiet": "英文 seamless tileable quiet light-ground micro dot or mini woven repeat prompt，低对比衬里/饰边微型纹样，不得是 plain solid / blank canvas / paper grain",
+            "solid_quiet": "英文 seamless tileable perfectly flat uniform solid prompt，只有极细微织纹（仅在极近距离可见），不得有 visible pattern / micro dot / mini woven repeat / folds / wrinkles / draping / shadows / 3D面料摄影 / creases / light variation / paper grain / blank canvas",
             "hero_motif_1": "英文 isolated foreground hero motif only as transparent PNG cutout with real alpha background, no background, no garden, no foliage behind subject, no full illustration scene, no colored box",
             "hero_motif_2": "英文 isolated secondary accent motif only as transparent PNG cutout with real alpha background, no background, no colored box",
             "trim_motif": "英文 isolated small decorative accent motif only as transparent PNG cutout with real alpha background, no background, no colored box"

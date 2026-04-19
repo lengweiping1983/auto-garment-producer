@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-构造整体商业感复审请求，供子 Agent 审查最终预览图的商业可接受性。
+构造整体商业感复审请求，供子 Agent 审查裁片联络单的商业可接受性。
 
 使用方式：
 1. 渲染完成后运行本脚本
-2. 子Agent查看 preview_path 指向的 Kimi 缩略图 + 填充计划 → 输出 ai_commercial_review.json
+2. 子Agent查看 piece_contact_sheet 的 Kimi 缩略图 + 填充计划 → 输出 ai_commercial_review.json
 3. 程序读取 review 结果：若 not approved 且 --auto-retry 启用，触发返工流程
 
 输入：
-- preview.png（最终预览图；请求中会转换为 Kimi 缩略图）
+- piece_contact_sheet.jpg（裁片联络单；请求中会转换为 Kimi 缩略图）
 - piece_fill_plan.json
 - commercial_design_brief.json
 - fashion_qc_report.json（可选，提供逐裁片质检数据）
@@ -35,11 +35,11 @@ def load_json(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def create_three_meter_preview(preview_path: str | Path, out_path: str | Path) -> Path | None:
-    """Create a 64px mental-distance preview enlarged to 512px for review."""
+def create_three_meter_preview(source_image_path: str | Path, out_path: str | Path) -> Path | None:
+    """Create a 64px mental-distance contact-sheet view enlarged to 512px for review."""
     if Image is None:
         return None
-    src = Path(preview_path)
+    src = Path(source_image_path)
     dst = Path(out_path)
     try:
         with Image.open(src) as im:
@@ -65,7 +65,7 @@ def build_review_prompt(image_path: str, fill_plan: dict, brief: dict, qc_report
 
     lines = [
         "你是一位资深服装买手总监，精通商业成衣的市场可接受性判断。",
-        "请查看以下最终预览图，从整体商业角度判断这套印花成衣是否适合量产销售。",
+        "请查看以下裁片联络单，从整体商业角度判断这套印花成衣是否适合量产销售。",
         "",
         "===== 必看图片 =====",
         f"{image_label}: {image_path}",
@@ -208,8 +208,7 @@ def build_review_prompt(image_path: str, fill_plan: dict, brief: dict, qc_report
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="构造整体商业感复审请求，或验证AI复审结果。")
-    parser.add_argument("--preview", default="", help="preview.png 路径（已废弃，优先使用 --piece-contact-sheet）")
-    parser.add_argument("--piece-contact-sheet", default="", help="piece_contact_sheet.jpg 路径。优先使用，替代 preview.png 参与商业复审流程。")
+    parser.add_argument("--piece-contact-sheet", default="", help="piece_contact_sheet.jpg 路径。生成复审请求时必须提供；preview.png 不参与流程。")
     parser.add_argument("--fill-plan", required=True, help="piece_fill_plan.json 路径")
     parser.add_argument("--brief", required=True, help="commercial_design_brief.json 路径")
     parser.add_argument("--qc-report", default="", help="fashion_qc_report.json 路径（可选）")
@@ -224,27 +223,19 @@ def main() -> int:
     brief = load_json(args.brief)
     qc_report = load_json(args.qc_report) if args.qc_report else None
 
-    # 确定使用哪张图参与复审：优先 piece_contact_sheet，fallback preview
-    source_image = ""
-    image_label = "预览图"
-    if args.piece_contact_sheet:
-        source_image = args.piece_contact_sheet
-        image_label = "裁片联络单"
-    elif args.preview:
-        source_image = args.preview
-
     # 模式A：生成复审请求（使用缩略图避免 413）
     if not args.selected:
-        if source_image:
-            image_thumb = ensure_thumbnail(source_image, max_size=384, provider="kimi")
-            image_3m = create_three_meter_preview(source_image, out_dir / "review_3m.png")
-            image_3m_thumb = ensure_thumbnail(image_3m, max_size=384, provider="kimi") if image_3m else None
-        else:
-            image_thumb = None
-            image_3m = None
-            image_3m_thumb = None
+        if not args.piece_contact_sheet:
+            print("[错误] 生成商业复审请求必须提供 --piece-contact-sheet；preview.png 是用户预览图，不参与 LLM 流程。", file=sys.stderr)
+            return 2
+
+        source_image = args.piece_contact_sheet
+        image_label = "裁片联络单"
+        image_thumb = ensure_thumbnail(source_image, max_size=384, provider="kimi")
+        image_3m = create_three_meter_preview(source_image, out_dir / "review_3m.png")
+        image_3m_thumb = ensure_thumbnail(image_3m, max_size=384, provider="kimi") if image_3m else None
         prompt = build_review_prompt(
-            str(image_thumb) if image_thumb else "（未提供图片，请在脑中模拟判断）",
+            str(image_thumb),
             fill_plan,
             brief,
             qc_report,
@@ -261,14 +252,14 @@ def main() -> int:
             "review_image_path": str(image_thumb.resolve()) if image_thumb else "",
             "review_image_3m_path": str(image_3m_thumb.resolve()) if image_3m_thumb else "",
             "review_image_3m_original_path": str(image_3m.resolve()) if image_3m else "",
-            "review_image_original_path": str(Path(source_image).resolve()) if source_image else "",
+            "review_image_original_path": str(Path(source_image).resolve()),
             "fill_plan_path": str(Path(args.fill_plan).resolve()),
             "brief_path": str(Path(args.brief).resolve()),
             "prompt_path": str(prompt_path.resolve()),
             "expected_output": str((out_dir / "ai_commercial_review.json").resolve()),
             "payload_budget": payload_budget,
             "kimi_images": [str(path.resolve()) for path in kimi_images],
-            "kimi_input_note": "只传 review_image_path 和 review_image_3m_path 指向的 Kimi 缩略图，不要传原始大图。preview.png 是用户最终产物，不参与流程。",
+            "kimi_input_note": "只传 review_image_path 和 review_image_3m_path 指向的 piece_contact_sheet Kimi 缩略图，不要传原始大图。preview.png / preview_white.jpg 是用户最终预览图，不参与流程。",
         }
         req_path = out_dir / "ai_commercial_review_request.json"
         req_path.write_text(json.dumps(request_summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -280,7 +271,7 @@ def main() -> int:
             "Kimi复审图": str(image_thumb.resolve()) if image_thumb else "",
             "Kimi三米模拟图": str(image_3m_thumb.resolve()) if image_3m_thumb else "",
             "Kimi请求体预算": payload_budget,
-            "说明": "请启动 coder 子Agent，传入 ai_commercial_review_prompt.txt + review_image_path/review_image_3m_path 缩略图，要求输出严格的 ai_commercial_review.json；不要传原始大图。",
+            "说明": "请启动 coder 子Agent，传入 ai_commercial_review_prompt.txt + review_image_path/review_image_3m_path 缩略图，要求输出严格的 ai_commercial_review.json；只使用 piece_contact_sheet 缩略图，不要传 preview 原图。",
         }, ensure_ascii=False, indent=2))
         if kimi_images:
             print_payload_budget_warning(payload_budget)

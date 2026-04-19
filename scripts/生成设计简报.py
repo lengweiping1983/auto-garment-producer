@@ -361,12 +361,12 @@ def _generate_outputs(
     )
     main_prompt = gp.get("main", f"seamless tileable low-density tonal leaf repeat pattern on pale ground, faint leaf silhouettes inspired by {motif_str}, visible but quiet structure, commercial apparel base fabric, abundant breathing room, same {medium} brush style, no abstract wash, no plain color wash, no blurred background, no empty texture, no figurative subject, no flower bouquet, no landscape scene, no environment, no scenery, {base_guard}, no text")
     secondary_prompt = gp.get("secondary", f"seamless tileable coordinating textile texture, soft light ground with delicate abstract pattern inspired by {motif_str}, medium density but airy, same {medium} brush style, no standalone scene, no environment, {base_guard}, no text")
-    dark_prompt = gp.get("dark_base", gp.get("dark", f"seamless tileable dark green micro stripe or tiny geometric repeat, crisp woven jacquard textile swatch, visible repeat structure, controlled low contrast, deep trim fabric, same {medium} palette family, no forest, no foliage photo, no camouflage, no atmospheric scene, no moody landscape, no plain dark texture, no landscape, no scenery, no environment, no figurative elements, no brown cast unless present in palette, no text"))
+    dark_prompt = gp.get("dark_base", gp.get("dark", f"seamless tileable perfectly flat dark solid, only microscopic grain, no ribs, no corduroy, no stripes, no folds, no wrinkles, no draping, no shadows, no 3D fabric photography, no visible repeat structure, uniform surface, textile swatch, flat lay, same {medium} palette family, no forest, no foliage photo, no camouflage, no atmospheric scene, no moody landscape, no landscape, no scenery, no environment, no figurative elements, no brown cast unless present in palette, no text"))
 
     # Row 2 — Mid-scale accent textures（全部走 gp.get，无硬编码）
     accent_prompt = gp.get("accent_light", gp.get("accent", f"seamless tileable small-scale accent pattern, tiny scattered elements inspired by {motif_str}, very small scale repeating, charming but controlled density, same palette and brush as main panel, no standalone scene, no text"))
     accent_mid_prompt = gp.get("accent_mid", f"seamless tileable soft geometric or organic lattice on pale ground, same {mood} palette, same {medium} hand-painted brush language, low noise, seamless tileable texture for secondary panels, no style shift, no text")
-    solid_quiet_prompt = gp.get("solid_quiet", f"seamless tileable quiet light-ground micro dot or mini woven repeat, subtle visible textile pattern, low contrast trim or lining fabric, calm and minimal, same {mood} palette family, not plain solid, no paper grain, no blank canvas, no empty texture, no scene, no text")
+    solid_quiet_prompt = gp.get("solid_quiet", f"seamless tileable perfectly flat uniform solid, only subtle microscopic weave texture on very close inspection, no visible pattern, no folds, no wrinkles, no draping, no shadows, no 3D fabric photography, no creases, no light variation, flat lay textile swatch, calm and minimal, same {mood} palette family, no paper grain, no blank canvas, no scene, no text")
 
     def _force_transparent_motif_prompt(prompt_text: str, motif_id: str = "") -> str:
         required = (
@@ -429,14 +429,14 @@ def _generate_outputs(
         elif texture_id == "secondary" and secondary:
             constraints.append(f"light ground and pattern tones must stay within {secondary[0]} family, no warm cast, no scene")
         elif texture_id == "dark_base" and dark:
-            constraints.append(f"deep ground color must be exactly {dark[0]} or darker, keep crisp micro stripe or tiny geometric repeat visible, no brown, no green cast, no forest, no foliage photo, no camouflage, no atmospheric scene, no moody landscape, no plain dark texture")
+            constraints.append(f"deep ground color must be exactly {dark[0]} or darker, no brown, no green cast, no forest, no foliage photo, no camouflage, no atmospheric scene, no moody landscape, no stripes, no visible repeat structure, no plain dark texture")
         elif texture_id == "accent_light" and (accent or primary):
             c = accent[0] if accent else primary[0]
             constraints.append(f"scattered accent elements must use {c} tones only")
         elif texture_id == "accent_mid" and secondary:
             constraints.append(f"lattice lines must use {secondary[0]} tones, pale ground stays within {primary[0] if primary else 'light'} family")
         elif texture_id == "solid_quiet" and primary:
-            constraints.append(f"light ground color must stay within {primary[0]} family with subtle visible micro dot or mini woven repeat, not plain solid, no paper grain, no canvas, no blank background")
+            constraints.append(f"solid surface color must be exactly {primary[0]}, no visible pattern, no micro dot, no mini woven repeat, no paper grain, no canvas, no blank background, perfectly flat uniform solid")
         elif texture_id == "hero_motif_1" and primary:
             bg = primary[0] if primary else "#ffffff"
             fg = accent[0] if accent else (secondary[0] if secondary else bg)

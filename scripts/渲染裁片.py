@@ -487,7 +487,7 @@ def render_all(pieces_payload: dict, texture_set: dict, fill_plan: dict, out_dir
 
 
 def compose_preview(pieces_payload: dict, rendered: list[dict], out_path: Path) -> Path:
-    """合成完整预览图。"""
+    """合成给用户查看的完整预览图；不作为 LLM 流程输入。"""
     canvas = pieces_payload.get("canvas") or {}
     width = int(canvas.get("width") or max(piece["source_x"] + piece["width"] for piece in pieces_payload["pieces"]))
     height = int(canvas.get("height") or max(piece["source_y"] + piece["height"] for piece in pieces_payload["pieces"]))

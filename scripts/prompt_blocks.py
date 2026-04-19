@@ -19,13 +19,15 @@ BOARD_NEGATIVE_EN = (
     "no labels, no captions, no titles, no words, no letters, no typography, no logo, no watermark, "
     "no house, no river, no full landscape scene, no scenery, no environment, no background scene, no poster composition, no sticker sheet, "
     "no harsh black outlines, no dense confetti, no neon colors, no muddy dark colors, "
+    "no folds, no wrinkles, no draping, no creases, no shadows, no 3D fabric photography, no light variation across surface, "
     "no gradient backgrounds inside individual panels, " + FRONT_EFFECT_NEGATIVE_EN
 )
 
 BOARD_NEGATIVE_ZH = (
     "不要动物（除非明确批准的主题元素）、不要人物、不要人脸、不要文字、不要商标、不要水印、"
     "不要房屋、不要河流、不要完整风景场景、不要风景、不要环境画面、不要背景场景、不要海报构图、不要贴纸页、不要粗黑轮廓、"
-    "不要密集纸屑、不要霓虹色、不要浑浊深色、不要单个面板内的渐变背景。" + FRONT_EFFECT_NEGATIVE_ZH
+    "不要密集纸屑、不要霓虹色、不要浑浊深色、不要褶皱、不要垂坠感、不要阴影、不要3D面料摄影、不要表面光照变化、"
+    "不要单个面板内的渐变背景。" + FRONT_EFFECT_NEGATIVE_ZH
 )
 
 STRICT_JSON_ONLY_ZH = "只返回严格 JSON；不要解释文字、不要 markdown 代码块。"
@@ -41,10 +43,10 @@ COMMERCIAL_FILL_RULES_ZH = [
 PANEL_DEFAULTS_EN = {
     "main": "seamless tileable low-density tonal leaf repeat pattern on pale ground, faint leaf silhouettes, visible but quiet structure, commercial apparel base fabric, abundant breathing room, no abstract wash, no plain color wash, no blurred background, no empty texture, no scene, no landscape, no text",
     "secondary": "coordinated medium-density pattern on light ground, same palette, no scene, no text",
-    "dark_base": "seamless tileable dark green micro stripe or tiny geometric repeat, crisp woven jacquard textile swatch, visible repeat structure, controlled low contrast, no forest, no foliage photo, no camouflage, no atmospheric scene, no moody landscape, no plain dark texture, no text",
+    "dark_base": "perfectly flat dark solid, only microscopic grain, no ribs, no corduroy, no stripes, no folds, no shadows, no 3D fabric photography, uniform surface, textile swatch, flat lay, no forest, no foliage photo, no camouflage, no atmospheric scene, no moody landscape, no text",
     "accent_light": "tiny scattered small-scale pattern on light ground, controlled density, no text",
     "accent_mid": "soft geometric or organic lattice on pale ground, same palette, seamless tileable texture, no text",
-    "solid_quiet": "seamless tileable quiet light-ground micro dot or mini woven repeat, subtle visible textile pattern, low contrast trim or lining fabric, not plain solid, no paper grain, no blank canvas, no empty texture, no text",
+    "solid_quiet": "perfectly flat uniform solid, only subtle microscopic weave texture on very close inspection, no visible pattern, no folds, no wrinkles, no draping, no shadows, no 3D fabric photography, no creases, no light variation, flat lay textile swatch, no paper grain, no blank canvas, no text",
     "hero_motif_1": "isolated foreground hero motif only, centered subject, transparent PNG cutout, real alpha background, empty transparent pixels around the subject, no background, no background art, no scenery, no garden, no foliage behind subject, no botanical backdrop, no painted wash, no rectangular composition, no full illustration scene, no vignette, no ground shadow, no text",
     "hero_motif_2": "isolated secondary accent motif only, centered subject, transparent PNG cutout, real alpha background, empty transparent pixels around the subject, no background, no colored background box, no scenery, refined brushwork, no text",
     "trim_motif": "isolated small decorative accent motif only, minimal composition, transparent PNG cutout, real alpha background, empty transparent pixels around the subject, no background, no colored background box, no scenery, no text",
