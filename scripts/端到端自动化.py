@@ -924,11 +924,11 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
     paths = {}
     for asset_id, box in boxes.items():
         crop = board.crop(box)
-        # Row 3: motifs → 直接保存原图，不做透明化/去背景/erode 等处理，
-        # 避免破坏 AI 生成的前景内容（如小熊白色高光被误伤）。
+        # Row 3: motifs → 去背景后保存为透明 PNG，渲染时直接 alpha_composite 贴上去
         if asset_id in ("hero_motif_1", "hero_motif_2", "trim_motif"):
             path = assets_dir / f"{asset_id}.png"
-            crop.convert("RGBA").save(path)
+            transparent = make_motif_transparent(crop)
+            transparent.save(path)
         else:
             # Row 1 & 2: textures → clean + tile repair + RGB
             crop = clean_internal_text_strip(crop)

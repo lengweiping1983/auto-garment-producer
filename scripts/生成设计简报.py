@@ -357,22 +357,42 @@ def _generate_outputs(
     # Row 1 — Base textures
     base_guard = (
         "commercial apparel repeat, only atmosphere and color from the theme, no large figurative subject, "
-        "no mushroom or animal as full-body hero, no complete scene, no poster composition, cohesive with all other panels"
+        "no mushroom or animal as full-body hero, no complete scene, no landscape, no scenery, no environment, no poster composition, cohesive with all other panels"
     )
-    main_prompt = gp.get("main", f"seamless tileable commercial textile texture, pale ground with very faint pattern inspired by {motif_str}, extremely low noise, abundant negative space, {medium} paper grain, {base_guard}, no text")
-    secondary_prompt = gp.get("secondary", f"seamless tileable coordinating textile texture, soft light ground with delicate pattern inspired by {motif_str}, medium density but airy, same {medium} brush style, {base_guard}, no text")
-    dark_prompt = gp.get("dark", f"seamless tileable quiet dark trim texture, deep ground with tiny subtle texture, very low noise, dark-quiet and minimal, same {medium} grain and palette family, no brown cast unless present in palette, no text")
+    main_prompt = gp.get("main", f"seamless tileable commercial textile base texture, pale ground with very faint abstract color wash inspired by {motif_str}, extremely low noise, abundant negative space, no figurative subject, no flower bouquet, no landscape scene, no environment, no scenery, fabric repeat pattern, textile swatch aesthetic, {base_guard}, no text")
+    secondary_prompt = gp.get("secondary", f"seamless tileable coordinating textile texture, soft light ground with delicate abstract pattern inspired by {motif_str}, medium density but airy, same {medium} brush style, no standalone scene, no environment, {base_guard}, no text")
+    dark_prompt = gp.get("dark_base", gp.get("dark", f"seamless tileable commercial textile dark trim texture, deep ground with tiny subtle fiber texture or micro pattern, very low noise, dark-quiet and minimal, no forest scene, no landscape, no scenery, no environment, no figurative elements, fabric repeat, textile swatch, same {medium} grain and palette family, no brown cast unless present in palette, no text"))
 
     # Row 2 — Mid-scale accent textures（全部走 gp.get，无硬编码）
-    accent_prompt = gp.get("accent", gp.get("accent_light", f"seamless tileable small-scale accent pattern, tiny scattered elements inspired by {motif_str}, very small scale repeating, charming but controlled density, same palette and brush as main panel, no standalone scene, no text"))
+    accent_prompt = gp.get("accent_light", gp.get("accent", f"seamless tileable small-scale accent pattern, tiny scattered elements inspired by {motif_str}, very small scale repeating, charming but controlled density, same palette and brush as main panel, no standalone scene, no text"))
     accent_mid_prompt = gp.get("accent_mid", f"seamless tileable soft geometric or organic lattice on pale ground, same {mood} palette, same {medium} hand-painted brush language, low noise, seamless tileable texture for secondary panels, no style shift, no text")
-    solid_quiet_prompt = gp.get("solid_quiet", f"quiet warm solid with only subtle {medium} paper grain, no pattern, calm and minimal, seamless tileable solid texture for quiet trim or lining, {mood}, same palette family, no text")
+    solid_quiet_prompt = gp.get("solid_quiet", f"seamless tileable commercial textile solid, quiet warm fabric ground with only subtle woven or knit texture, no paper grain, no canvas, no pattern, no scene, calm and minimal, textile swatch aesthetic, {mood}, same palette family, no text")
 
-    # Row 3 — Placement motifs (plain backgrounds for background removal)（全部走 gp.get，无硬编码）
-    motif_guard = "clean transparent-ready placement motif, no filled rectangular background, no semi-transparent full-image patch"
-    hero_motif_1_prompt = gp.get("hero_motif", gp.get("hero_motif_1", f"a single elegant main subject centered, plain light background, soft fading edges, balanced negative space, {medium} hand-painted, designed as placement print element, {motif_guard}, no text"))
-    hero_motif_2_prompt = gp.get("hero_motif_2", f"a secondary accent subject, centered, plain light background, refined {medium} brushwork, designed as placement accent motif, {mood}, {motif_guard}, no text")
-    trim_motif_prompt = gp.get("trim_motif", f"a small delicate decorative accent, minimal composition, plain warm background, designed as trim detail placement element, same {medium} style and palette family, {motif_guard}, no text")
+    def _force_transparent_motif_prompt(prompt_text: str) -> str:
+        required = (
+            "transparent PNG cutout, real alpha background, no background, "
+            "no plain light background, no plain warm background, no colored background box, "
+            "no filled rectangular background, no semi-transparent full-image patch"
+        )
+        text = prompt_text.strip()
+        for old in (
+            "plain light background",
+            "plain warm background",
+            "removable plain background",
+            "removable plain backgrounds",
+            "suitable for background removal",
+        ):
+            text = text.replace(old, "transparent alpha background")
+        lower = text.lower()
+        if "transparent png cutout" in lower and "real alpha background" in lower:
+            return f"{text}, no colored background box, no semi-transparent full-image patch"
+        return f"{text}, {required}"
+
+    # Row 3 — Placement motifs must be generated as transparent cutouts.
+    motif_guard = "transparent PNG cutout, real alpha background, no background, no plain-color box, no filled rectangular background, no semi-transparent full-image patch"
+    hero_motif_1_prompt = _force_transparent_motif_prompt(gp.get("hero_motif_1", gp.get("hero_motif", f"a single elegant main subject centered, transparent PNG cutout with real alpha background, soft fading edges, balanced negative space, {medium} hand-painted, designed as placement print element, {motif_guard}, no text")))
+    hero_motif_2_prompt = _force_transparent_motif_prompt(gp.get("hero_motif_2", f"a secondary accent subject, centered, transparent PNG cutout with real alpha background, refined {medium} brushwork, designed as placement accent motif, {mood}, {motif_guard}, no text"))
+    trim_motif_prompt = _force_transparent_motif_prompt(gp.get("trim_motif", f"a small delicate decorative accent, minimal composition, transparent PNG cutout with real alpha background, designed as trim detail placement element, same {medium} style and palette family, {motif_guard}, no text"))
 
     def _inject_palette_constraints(prompt_text: str, texture_id: str, palette: dict) -> str:
         """为提示词追加具体的 hex 颜色硬约束，减少 AI 生成时的颜色偏差。"""
@@ -385,29 +405,29 @@ def _generate_outputs(
 
         constraints = []
         if texture_id == "main" and primary:
-            constraints.append(f"ground color must be exactly {primary[0]}")
+            constraints.append(f"ground color must be exactly {primary[0]}, no figurative elements, no scene, no landscape")
         elif texture_id == "secondary" and secondary:
-            constraints.append(f"light ground and pattern tones must stay within {secondary[0]} family, no warm cast")
+            constraints.append(f"light ground and pattern tones must stay within {secondary[0]} family, no warm cast, no scene")
         elif texture_id == "dark_base" and dark:
-            constraints.append(f"deep ground color must be exactly {dark[0]} or darker, no brown, no green cast")
+            constraints.append(f"deep ground color must be exactly {dark[0]} or darker, no brown, no green cast, no forest scene, no landscape, no scenery")
         elif texture_id == "accent_light" and (accent or primary):
             c = accent[0] if accent else primary[0]
             constraints.append(f"scattered accent elements must use {c} tones only")
         elif texture_id == "accent_mid" and secondary:
             constraints.append(f"lattice lines must use {secondary[0]} tones, pale ground stays within {primary[0] if primary else 'light'} family")
         elif texture_id == "solid_quiet" and primary:
-            constraints.append(f"solid surface color must be exactly {primary[0]} with only subtle texture, no pattern")
+            constraints.append(f"solid surface color must be exactly {primary[0]} with only subtle woven fabric texture, no paper grain, no canvas, no pattern")
         elif texture_id == "hero_motif_1" and primary:
             bg = primary[0] if primary else "#ffffff"
             fg = accent[0] if accent else (secondary[0] if secondary else bg)
-            constraints.append(f"plain background exactly {bg}, subject painted in {fg} tones, soft fading edges")
+            constraints.append(f"transparent alpha background only, subject painted in {fg} tones, soft fading edges, no colored background box")
         elif texture_id == "hero_motif_2" and primary:
             bg = primary[0] if primary else "#ffffff"
             fg = secondary[0] if secondary else (accent[0] if accent else bg)
-            constraints.append(f"plain background exactly {bg}, accent subject in {fg} tones")
+            constraints.append(f"transparent alpha background only, accent subject in {fg} tones, no colored background box")
         elif texture_id == "trim_motif" and (accent or secondary):
             c = accent[0] if accent else secondary[0]
-            constraints.append(f"minimal decorative accent in {c} tones on plain warm background")
+            constraints.append(f"minimal decorative accent in {c} tones on transparent alpha background, no colored background box")
 
         if constraints:
             return f"{prompt_text}, color constraint: {', '.join(constraints)}"
@@ -444,7 +464,7 @@ def _generate_outputs(
             {
                 "motif_id": "hero_motif",
                 "purpose": "单一卖点定位，置于一个 hero 裁片",
-                "prompt": sanitize_prompt(generated_prompts.get("hero_motif", f"elegant placement print motif, simplified {hero_selling_point}, balanced negative space, plain light background, soft fading edges, suitable for background removal, no text, no watermark"), domain="fashion") if generated_prompts else sanitize_prompt(f"elegant placement print motif, simplified {hero_selling_point}, balanced negative space, plain light background, soft fading edges, suitable for background removal, no text, no watermark", domain="fashion"),
+                "prompt": sanitize_prompt(generated_prompts.get("hero_motif", f"transparent PNG cutout placement print motif, simplified {hero_selling_point}, real alpha background, balanced negative space, soft fading edges, no background, no colored rectangle, no text, no watermark"), domain="fashion") if generated_prompts else sanitize_prompt(f"transparent PNG cutout placement print motif, simplified {hero_selling_point}, real alpha background, balanced negative space, soft fading edges, no background, no colored rectangle, no text, no watermark", domain="fashion"),
                 "negative_prompt": "complex background, full scene, poster, text, logo, watermark, faces, multiple subjects, frame, " + FRONT_EFFECT_NEGATIVE_EN,
             }
         ],

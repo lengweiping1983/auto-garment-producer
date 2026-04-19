@@ -60,7 +60,7 @@ def build_selection_prompt(candidates: dict, brief: dict, style_profile: dict) -
         "",
         "===== 选择原则 =====",
         "同一系列感优先：palette、brush style、paper texture 一致。",
-        "Row1/Row2 选择可平铺、低噪、可穿变体；Row3 选择浅底、边缘柔和、适合去背景的定位图案。",
+        "Row1/Row2 选择可平铺、低噪、可穿变体；Row3 只能选择 transparent PNG cutout、real alpha background、无纯色底框的定位图案。",
         "避免 dense/busy/high contrast/overcrowded/harsh，除非用户明确要视觉冲击款。",
         "",
         "===== 候选面板（9 panels × 3 variants）=====",
