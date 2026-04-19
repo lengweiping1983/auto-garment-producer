@@ -433,7 +433,7 @@ def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: d
                     anchor="center",
                     scale=motif_scale,
                     rotation=motif_rotation,
-                    opacity=0.92,
+                    opacity=1.0,
                     offset_y=-round(piece["height"] * 0.04),
                 )
             entry["reason"] = "前片卖点区承载简化主题，不切割叙事插画"

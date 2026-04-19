@@ -733,9 +733,9 @@ def _generate_prompts(palette: dict, style: dict, regions: list) -> dict:
     # Hero motif
     if regions:
         hero_color = hex_color(regions[0]["mean_rgb"]) if regions[0].get("mean_rgb") else _color_desc(accents[:1] if accents else primaries[:1])
-        hero_desc = f"a single elegant {_color_desc(accents[:1] if accents else primaries[:1])} subject centered, transparent PNG cutout with real alpha background, no colored background box, soft fading edges, designed as placement print element"
+        hero_desc = f"isolated foreground {_color_desc(accents[:1] if accents else primaries[:1])} hero motif only, centered subject, transparent PNG cutout with real alpha background, empty transparent pixels around the subject, no background, no garden, no foliage behind subject, no rectangular composition, no full illustration scene, no colored background box, soft clean edges, designed as placement print element"
     else:
-        hero_desc = "a single elegant floral or organic subject centered, transparent PNG cutout with real alpha background, no colored background box, soft fading edges"
+        hero_desc = "isolated foreground floral or organic hero motif only, centered subject, transparent PNG cutout with real alpha background, empty transparent pixels around the subject, no background, no scenery, no rectangular composition, no colored background box, soft clean edges"
 
     return {
         "main": main_desc,

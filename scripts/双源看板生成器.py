@@ -284,6 +284,15 @@ class DualBoardGenerator:
         self.health_report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         return report
 
+    def _write_health_report(self, dual_run_status: str = "") -> dict:
+        """写入健康报告，可选覆盖 dual_run_status。"""
+        report = self.preflight()
+        if dual_run_status:
+            report["dual_run_status"] = dual_run_status
+            report["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            self.health_report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return report
+
     def _source_summary(self) -> dict:
         summary = {}
         failure_statuses = {"failed", "poll_timeout", "no_image_result", "no_valid_3x3_board"}
@@ -624,6 +633,9 @@ class DualBoardGenerator:
             两个源都会被调用并等待结果；至少一个源成功时返回。
             双源均失败且重试耗尽则抛出 DualBoardGenerationError。
         """
+        # 先写入 in_progress 状态，便于外部轮询检测
+        self._write_health_report(dual_run_status="in_progress")
+
         dual_prompts_path = Path(dual_prompts_path)
         if not dual_prompts_path.exists():
             raise FileNotFoundError(f"dual_collection_prompts.json 不存在: {dual_prompts_path}")

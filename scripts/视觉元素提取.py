@@ -103,15 +103,15 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
             "do_not_use_as_full_body_texture": ["不适合大面积满版的具象元素"]
         },
         "generated_prompts": {
-            "main": "英文 seamless tileable low-noise base texture prompt，只能继承色彩和氛围，不得包含任何具象主体/场景/风景",
+            "main": "英文 seamless tileable low-density tonal leaf repeat pattern prompt，淡底、可见但安静的叶片重复结构，不得是 abstract wash / plain color wash / blurred background / empty texture",
             "secondary": "英文 coordinating repeat prompt",
-            "dark_base": "英文 quiet dark trim repeat prompt，必须是面料纹理，不得是深色风景/森林场景",
+            "dark_base": "英文 seamless tileable dark green micro stripe or tiny geometric repeat prompt，清晰 jacquard/织纹结构，不得是 forest / foliage photo / camouflage / atmospheric scene / plain dark texture",
             "accent_light": "英文 small-scale accent repeat prompt",
             "accent_mid": "英文 soft geometric or organic lattice repeat prompt",
-            "solid_quiet": "英文 quiet solid trim/lining texture prompt，必须是面料纯色底纹，不得是纸张/画布",
-            "hero_motif_1": "英文 main placement motif as transparent PNG cutout with real alpha background, no colored box",
-            "hero_motif_2": "英文 secondary accent motif as transparent PNG cutout with real alpha background, no colored box",
-            "trim_motif": "英文 small decorative accent as transparent PNG cutout with real alpha background, no colored box"
+            "solid_quiet": "英文 seamless tileable quiet light-ground micro dot or mini woven repeat prompt，低对比衬里/饰边微型纹样，不得是 plain solid / blank canvas / paper grain",
+            "hero_motif_1": "英文 isolated foreground hero motif only as transparent PNG cutout with real alpha background, no background, no garden, no foliage behind subject, no full illustration scene, no colored box",
+            "hero_motif_2": "英文 isolated secondary accent motif only as transparent PNG cutout with real alpha background, no background, no colored box",
+            "trim_motif": "英文 isolated small decorative accent motif only as transparent PNG cutout with real alpha background, no background, no colored box"
         }
     }
     lines = [
@@ -128,7 +128,7 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "4. style: medium、brush_quality、mood、pattern_density、line_style、overall_impression。",
         "5. fabric_hints: 判断 has_nap；若 true，nap_direction 必填 vertical/horizontal。关键词含 corduroy/velvet/fleece/suede/plush/毛呢/法兰绒等。",
         "6. theme_to_piece_strategy: 把主题工程化拆成 base_atmosphere、hero_motif、accent_details、quiet_zones；明确哪些具象元素不得作为大身满版纹理。",
-        "7. generated_prompts: 生成英文 main/secondary/dark_base/accent_light/accent_mid/solid_quiet/hero_motif_1/hero_motif_2/trim_motif 共9个面板提示词；texture 要 seamless tileable、low noise；motif 要 centered、transparent PNG cutout、real alpha background、no colored box。",
+        "7. generated_prompts: 生成英文 main/secondary/dark_base/accent_light/accent_mid/solid_quiet/hero_motif_1/hero_motif_2/trim_motif 共9个面板提示词；texture 要 seamless tileable、low noise 且有明确 repeat 结构；motif 要 isolated foreground、transparent PNG cutout、real alpha background、no background、no colored box。",
         "",
         "===== 主题元素 S/A/B/C 分级规则 =====",
         "S级：完整动物、人脸/人像、文字、商标、完整建筑、完整场景、复杂叙事插画。绝不能进入 base texture，只能拒绝、简化为剪影，或作为很小的定位 motif。",
@@ -163,9 +163,11 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "- 多张参考图必须融合为同一个主题方向，不要输出多套方案",
         "- 每个主体/辅助元素要标注 source_image_refs，便于后续追溯来源",
         "- generated_prompts 用具体视觉词；避免 very/really/beautiful/nice/good/great/perfect 等空泛词",
-        "- generated_prompts.hero_motif_1/hero_motif_2/trim_motif 必须明确 transparent PNG cutout, real alpha background, no background, no colored rectangle, no plain light box",
-        "- generated_prompts.solid_quiet 必须是纯色面料底纹，使用主题色，不得用 paper grain/canvas 等纸质描述",
-        "- generated_prompts.dark_base 必须是深底微纹理面料，不得生成森林/风景/场景画面",
+        "- generated_prompts.hero_motif_1/hero_motif_2/trim_motif 必须明确 isolated foreground motif only, transparent PNG cutout, real alpha background, no background, no colored rectangle, no plain light box",
+        "- generated_prompts.hero_motif_1 必须是前景主体 cutout，不得写 scene、garden、meadow、landscape、environment、foliage behind subject、botanical backdrop、painted wash、vignette、rectangular composition 或 full illustration scene",
+        "- generated_prompts.main 必须是低密度 tonal leaf repeat pattern，淡底、可见但安静；不得写 abstract wash、plain color wash、blurred background 或 empty texture",
+        "- generated_prompts.dark_base 必须是 dark green micro stripe 或 tiny geometric repeat，清晰织纹结构；不得写 forest、foliage photo、camouflage、atmospheric、moody landscape 或 plain dark texture",
+        "- generated_prompts.solid_quiet 必须是 quiet light-ground micro dot 或 mini woven repeat，低对比衬里/饰边微型纹样；不得写 plain solid、no pattern、blank canvas、paper grain 或 pure background function",
         "- 负向逻辑必须覆盖 no text, no watermark, no logo, no faces；除非用户明确要求，不要动物",
         "- 不要返回任何解释文字，只返回 JSON",
     ]

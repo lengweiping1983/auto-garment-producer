@@ -924,11 +924,13 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
     paths = {}
     for asset_id, box in boxes.items():
         crop = board.crop(box)
-        # Row 3: motifs → 去背景后保存为透明 PNG，渲染时直接 alpha_composite 贴上去
+        # Row 3: motifs are expected to be generated as clean transparent cutouts.
+        # Keep the cropped image unchanged here; do not run post background removal,
+        # because it can fade/erase pale illustration details and make garment output
+        # differ from the original 3x3 board cell.
         if asset_id in ("hero_motif_1", "hero_motif_2", "trim_motif"):
             path = assets_dir / f"{asset_id}.png"
-            transparent = make_motif_transparent(crop)
-            transparent.save(path)
+            crop.save(path)
         else:
             # Row 1 & 2: textures → clean + tile repair + RGB
             crop = clean_internal_text_strip(crop)
@@ -1077,6 +1079,24 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
     return write_json(out_dir / f"texture_set{suffix}.json", texture_set)
 
 
+def _auto_approve_texture_set(ts_path: Path) -> None:
+    """将 texture_set.json 中所有面料资产的 approved 设为 true（用于 fast 模式）。"""
+    if not ts_path.exists():
+        return
+    data = json.loads(ts_path.read_text(encoding="utf-8"))
+    modified = False
+    for key in ("textures", "motifs", "solids"):
+        for asset in data.get(key, []):
+            asset["approved"] = True
+            if "qc" in asset:
+                asset["qc"]["approved"] = True
+                asset["qc"]["status"] = "approved"
+            modified = True
+    if modified:
+        ts_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[fast模式] 自动批准面料资产: {ts_path}")
+
+
 def run_garment_mapping(args, pieces_path: Path, out_dir: Path) -> None:
     """执行部位映射。提取为独立函数以便与看板生成并行执行。"""
     garment_cmd = [
@@ -1148,47 +1168,50 @@ def _run_render_pipeline(
 
     # ---- 质检纹理 ----
     qc_out = out_dir / f"texture_qc_report{suffix}.json"
-    qc_cmd = [
-        sys.executable,
-        str(SKILL_DIR / "scripts" / "质检纹理.py"),
-        "--texture-set", str(texture_set_path),
-        "--out", str(qc_out),
-    ]
-    style_profile_for_qc = out_dir / "style_profile.json"
-    if style_profile_for_qc.exists():
-        qc_cmd.extend(["--style-profile", str(style_profile_for_qc)])
-    qc_result = run_step(qc_cmd, check=False)
-    if qc_out.exists():
-        texture_qc = load_json(qc_out)
-        texture_qc_issues = collect_texture_qc_issues(texture_qc)
-        high_issues = [issue for issue in texture_qc_issues if issue.get("severity") == "high"]
-        blocking_issues = [issue for issue in high_issues if issue.get("type") != "not_user_approved"]
-        if blocking_issues:
-            print(f"[错误{suffix}] 面料质检存在 high severity 问题，停止渲染：", file=sys.stderr)
-            for issue in blocking_issues[:10]:
-                print(f"  - {issue.get('asset_id')}: {issue.get('message', issue.get('type'))}", file=sys.stderr)
-            return 1
-        if high_issues:
-            approval_request = {
-                "request_id": f"asset_approval_required{suffix}_v1",
-                "texture_set": str(texture_set_path.resolve()),
-                "texture_qc_report": str(qc_out.resolve()),
-                "message": "面料/图案/纯色仍为 candidate，必须经 AI 视觉 QC 或人工审批后才能继续渲染。",
-                "next_step": f"审批后将 texture_set{suffix}.json 中对应 assets 的 approved 设为 true，并使用 --texture-set 指向该文件重新运行。",
-                "assets": [
-                    {"asset_id": issue.get("asset_id", ""), "asset_role": issue.get("asset_role", ""), "issue": issue.get("message", "")}
-                    for issue in high_issues
-                ],
-            }
-            approval_path = out_dir / f"asset_approval_request{suffix}.json"
-            write_json(approval_path, approval_request)
-            print(f"\n[暂停{suffix}] 已生成候选面料组合，但资产尚未审批，按生产规则停止在渲染前。")
-            print(f"  面料组合: {texture_set_path.resolve()}")
-            print(f"  质检报告: {qc_out.resolve()}")
-            print(f"  审批请求: {approval_path.resolve()}")
-            return 0
-    elif qc_result.returncode != 0:
-        return qc_result.returncode
+    if args.mode == "fast":
+        print(f"[fast模式] 跳过面料质检{suffix}")
+    else:
+        qc_cmd = [
+            sys.executable,
+            str(SKILL_DIR / "scripts" / "质检纹理.py"),
+            "--texture-set", str(texture_set_path),
+            "--out", str(qc_out),
+        ]
+        style_profile_for_qc = out_dir / "style_profile.json"
+        if style_profile_for_qc.exists():
+            qc_cmd.extend(["--style-profile", str(style_profile_for_qc)])
+        qc_result = run_step(qc_cmd, check=False)
+        if qc_out.exists():
+            texture_qc = load_json(qc_out)
+            texture_qc_issues = collect_texture_qc_issues(texture_qc)
+            high_issues = [issue for issue in texture_qc_issues if issue.get("severity") == "high"]
+            blocking_issues = [issue for issue in high_issues if issue.get("type") != "not_user_approved"]
+            if blocking_issues:
+                print(f"[错误{suffix}] 面料质检存在 high severity 问题，停止渲染：", file=sys.stderr)
+                for issue in blocking_issues[:10]:
+                    print(f"  - {issue.get('asset_id')}: {issue.get('message', issue.get('type'))}", file=sys.stderr)
+                return 1
+            if high_issues:
+                approval_request = {
+                    "request_id": f"asset_approval_required{suffix}_v1",
+                    "texture_set": str(texture_set_path.resolve()),
+                    "texture_qc_report": str(qc_out.resolve()),
+                    "message": "面料/图案/纯色仍为 candidate，必须经 AI 视觉 QC 或人工审批后才能继续渲染。",
+                    "next_step": f"审批后将 texture_set{suffix}.json 中对应 assets 的 approved 设为 true，并使用 --texture-set 指向该文件重新运行。",
+                    "assets": [
+                        {"asset_id": issue.get("asset_id", ""), "asset_role": issue.get("asset_role", ""), "issue": issue.get("message", "")}
+                        for issue in high_issues
+                    ],
+                }
+                approval_path = out_dir / f"asset_approval_request{suffix}.json"
+                write_json(approval_path, approval_request)
+                print(f"\n[暂停{suffix}] 已生成候选面料组合，但资产尚未审批，按生产规则停止在渲染前。")
+                print(f"  面料组合: {texture_set_path.resolve()}")
+                print(f"  质检报告: {qc_out.resolve()}")
+                print(f"  审批请求: {approval_path.resolve()}")
+                return 0
+        elif qc_result.returncode != 0:
+            return qc_result.returncode
 
     # ---- 生产规划 ----
     use_legacy = args.mode == "legacy"
@@ -1407,7 +1430,7 @@ def _run_render_pipeline(
             review_cmd = [
                 sys.executable,
                 str(SKILL_DIR / "scripts" / "构造商业复审请求.py"),
-                "--preview", str(rendered_dir / "preview.png"),
+                "--piece-contact-sheet", str(rendered_dir / "piece_contact_sheet.jpg"),
                 "--fill-plan", str(out_dir / "piece_fill_plan.json"),
                 "--brief", brief_for_review,
                 "--qc-report", str(out_dir / f"fashion_qc_report{suffix}.json"),
@@ -1476,7 +1499,7 @@ def _run_render_pipeline_for_scheme(
         return rc
 
     # ---- 多尺寸自动渲染 ----
-    if HAS_TEMPLATE_LOADER:
+    if args.full_set and HAS_TEMPLATE_LOADER:
         _render_size_variants(args, out_dir, texture_set_path, suffix=suffix)
 
     # ---- 时尚质检 ----
@@ -1510,7 +1533,7 @@ def _run_render_pipeline_for_scheme(
             review_cmd = [
                 sys.executable,
                 str(SKILL_DIR / "scripts" / "构造商业复审请求.py"),
-                "--preview", str(rendered_dir / "preview.png"),
+                "--piece-contact-sheet", str(rendered_dir / "piece_contact_sheet.jpg"),
                 "--fill-plan", str(out_dir / "piece_fill_plan.json"),
                 "--brief", brief_for_review,
                 "--qc-report", str(out_dir / f"fashion_qc_report{suffix}.json"),
@@ -2119,6 +2142,8 @@ def main() -> int:
     # ============================================================
     # 双源模式（Neo AI + libtv 并行生成）
     # ============================================================
+    EXIT_DUAL_SOURCE_IN_PROGRESS = 2
+
     if args.dual_source and not args.texture_set:
         # 1. 确保 dual_collection_prompts.json 存在
         dual_prompts_path = out_dir / "dual_collection_prompts.json"
@@ -2128,37 +2153,105 @@ def main() -> int:
             print(f"[错误] 双源模式需要 dual_collection_prompts.json。请先运行生成设计简报.py，或传入 --dual-prompts。", file=sys.stderr)
             return 1
 
-        # 2. 初始化双源生成器
-        sys.path.insert(0, str(SKILL_DIR / "scripts"))
-        from 双源看板生成器 import DualBoardGenerator
+        # ---- 状态机：检查是否已有进行中的双源生成 ----
+        dual_health_path = out_dir / "dual_source_health_report.json"
+        health_status = "not_started"
+        board_results_from_health = []
+        if dual_health_path.exists():
+            try:
+                health = json.loads(dual_health_path.read_text(encoding="utf-8"))
+                health_status = health.get("dual_run_status", "not_started")
+                # 若已有成功结果，提取看板路径
+                for source in ("neo", "libtv"):
+                    src_sum = health.get("source_summary", {}).get(source, {})
+                    if src_sum.get("succeeded"):
+                        # 尝试从 invocations 中找到成功的 board 路径
+                        for inv in health.get("invocations", []):
+                            if inv.get("source") == source and inv.get("status") == "succeeded":
+                                board_path_str = inv.get("board_path", "")
+                                if board_path_str and Path(board_path_str).exists():
+                                    style = "style_a" if source == "neo" else "style_b"
+                                    board_results_from_health.append({"source": source, "path": Path(board_path_str), "style": style})
+                                    break
+                        else:
+                            # fallback: 直接扫描输出目录
+                            style = "style_a" if source == "neo" else "style_b"
+                            suffix = "_a" if source == "neo" else "_b"
+                            board_dir = out_dir / f"{source}_collection_board"
+                            if board_dir.exists():
+                                for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
+                                    boards = sorted(board_dir.glob(ext))
+                                    if boards:
+                                        board_results_from_health.append({"source": source, "path": boards[-1], "style": style})
+                                        break
+            except Exception:
+                health_status = "not_started"
 
-        generator = DualBoardGenerator(
-            out_dir=out_dir,
-            neo_token=args.token,
-            libtv_key=args.libtv_key or os.environ.get("LIBTV_ACCESS_KEY", ""),
-            max_retries=args.max_retries,
-            timeout=300,
-            neo_model=args.neo_model,
-            neo_size=args.neo_size,
-        )
+        # 状态机处理
+        if health_status == "in_progress":
+            print(f"[双源状态] 看板生成进行中（检测到 {dual_health_path} 状态为 in_progress）。")
+            print(f"  请等待双源看板生成完成后重新运行本脚本，或启动轮询驱动脚本自动等待。")
+            print(f"  健康报告: {dual_health_path}")
+            return EXIT_DUAL_SOURCE_IN_PROGRESS
 
-        # 3. 并行：双源看板生成 + 部位映射（部位映射不依赖 texture_set）
-        from concurrent.futures import ThreadPoolExecutor
-        try:
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                boards_future = executor.submit(generator.generate, dual_prompts_path)
-                mapping_future = None
-                if template_assets:
-                    print("[模板复用] 双源模式跳过部位映射生成，直接使用模板库 garment_map。")
-                else:
-                    mapping_future = executor.submit(run_garment_mapping, args, pieces_path, out_dir)
+        if health_status in ("both_succeeded", "neo_only_libtv_failed", "libtv_only_neo_failed"):
+            if board_results_from_health:
+                print(f"[双源状态] 看板已生成（{health_status}），跳过生成，直接使用已有看板。")
+                board_results = sorted(board_results_from_health, key=lambda item: item["source"])
+                # 继续后续流程（跳到步骤4）
+                goto_crop = True
+            else:
+                print(f"[双源状态] 健康报告显示 {health_status}，但未能定位看板文件。将重新生成。")
+                goto_crop = False
+        else:
+            goto_crop = False
 
-                board_results = boards_future.result()
-                if mapping_future:
-                    mapping_future.result()
-        except Exception as exc:
-            print(f"[错误] 双源看板生成失败: {exc}", file=sys.stderr)
-            return 1
+        if not goto_crop:
+            # ---- 异步启动双源看板生成（避免阻塞导致 Shell 超时）----
+            print("[双源状态] 启动异步双源看板生成...")
+            print(f"  提示词: {dual_prompts_path}")
+            print(f"  输出目录: {out_dir}")
+            print(f"  健康报告: {dual_health_path}")
+
+            # 在独立后台进程中启动双源看板生成器
+            dual_board_script = SKILL_DIR / "scripts" / "双源看板生成器.py"
+            bg_cmd = [
+                sys.executable, str(dual_board_script),
+                "--dual-prompts", str(dual_prompts_path),
+                "--out", str(out_dir),
+                "--timeout", "600",
+            ]
+            if args.token:
+                bg_cmd.extend(["--token", args.token])
+            if args.libtv_key:
+                bg_cmd.extend(["--libtv-key", args.libtv_key])
+            if args.neo_model:
+                bg_cmd.extend(["--neo-model", args.neo_model])
+            if args.neo_size:
+                bg_cmd.extend(["--neo-size", args.neo_size])
+
+            # Popen 启动后台进程，不等待；使用 start_new_session 避免随父进程被杀死
+            import subprocess as _sp
+            print(f"[双源后台] 启动: {' '.join(bg_cmd)}")
+            _sp.Popen(
+                bg_cmd,
+                stdout=_sp.DEVNULL,
+                stderr=_sp.DEVNULL,
+                start_new_session=True,
+            )
+
+            # 部位映射不依赖 texture_set，可以同步执行（很快完成）
+            if template_assets:
+                print("[模板复用] 双源模式跳过部位映射生成，直接使用模板库 garment_map。")
+            else:
+                try:
+                    run_garment_mapping(args, pieces_path, out_dir)
+                except Exception as exc:
+                    print(f"[警告] 部位映射执行失败（非阻塞）: {exc}")
+
+            print(f"\n[双源状态] 看板生成已启动，请在后台进程中等待完成。")
+            print(f"  当前脚本立即返回，请使用轮询驱动脚本自动等待后续完成。")
+            return EXIT_DUAL_SOURCE_IN_PROGRESS
 
         # 4. 处理结果
         if not board_results:
@@ -2192,6 +2285,9 @@ def main() -> int:
                     print(f"[颜色校验{suffix}] 所有面板颜色与 palette 协调。")
 
             ts_path = crop_collection_board(board_path, out_dir, args.crop_inset, not args.no_tile_repair, palette=palette, suffix=suffix)
+            # fast 模式下自动批准所有面料资产
+            if args.mode == "fast":
+                _auto_approve_texture_set(ts_path)
             texture_sets.append({"source": result["source"], "path": ts_path, "style": result["style"], "suffix": suffix})
 
         # 6. 多方案模式：合并 A/B 资产 → 构造多方案生产规划 → 拆解 → 逐 scheme 渲染
@@ -2228,36 +2324,41 @@ def main() -> int:
                     tex["texture_id"] = f"{tex['texture_id']}_{single_name}"
                 for motif in ts_data.get("motifs", []):
                     motif["motif_id"] = f"{motif['motif_id']}_{single_name}"
-                    motif["texture_id"] = f"{motif['texture_id']}_{single_name}"
                 for solid in ts_data.get("solids", []):
                     solid["solid_id"] = f"{solid['solid_id']}_{single_name}"
                 ts_data["texture_set_id"] = f"{out_dir.name}_merged_from_{single_name}"
                 ts_data["source_sets"] = {single_name: str(Path(single_path).resolve())}
                 write_json(merged_ts_path, ts_data)
                 print(f"[多方案] 仅源{single_name.upper()} 成功，从 9 个资产中组合多套方案: {merged_ts_path}")
+            # fast 模式下自动批准合并后的面料资产
+            if args.mode == "fast":
+                _auto_approve_texture_set(merged_ts_path)
 
             # 6b. 质检合并后的资产（只做一次）
             qc_out = out_dir / "texture_qc_report_merged.json"
-            qc_cmd = [
-                sys.executable,
-                str(SKILL_DIR / "scripts" / "质检纹理.py"),
-                "--texture-set", str(merged_ts_path),
-                "--out", str(qc_out),
-            ]
-            if style_profile_path.exists():
-                qc_cmd.extend(["--style-profile", str(style_profile_path)])
-            qc_result = run_step(qc_cmd, check=False)
-            if qc_out.exists():
-                texture_qc = load_json(qc_out)
-                texture_qc_issues = collect_texture_qc_issues(texture_qc)
-                blocking_issues = [issue for issue in texture_qc_issues if issue.get("severity") == "high" and issue.get("type") != "not_user_approved"]
-                if blocking_issues:
-                    print("[错误] 合并面料质检存在 high severity 问题，停止渲染：", file=sys.stderr)
-                    for issue in blocking_issues[:10]:
-                        print(f"  - {issue.get('asset_id')}: {issue.get('message', issue.get('type'))}", file=sys.stderr)
-                    return 1
-            elif qc_result.returncode != 0:
-                return qc_result.returncode
+            if args.mode == "fast":
+                print("[fast模式] 跳过合并面料质检")
+            else:
+                qc_cmd = [
+                    sys.executable,
+                    str(SKILL_DIR / "scripts" / "质检纹理.py"),
+                    "--texture-set", str(merged_ts_path),
+                    "--out", str(qc_out),
+                ]
+                if style_profile_path.exists():
+                    qc_cmd.extend(["--style-profile", str(style_profile_path)])
+                qc_result = run_step(qc_cmd, check=False)
+                if qc_out.exists():
+                    texture_qc = load_json(qc_out)
+                    texture_qc_issues = collect_texture_qc_issues(texture_qc)
+                    blocking_issues = [issue for issue in texture_qc_issues if issue.get("severity") == "high" and issue.get("type") != "not_user_approved"]
+                    if blocking_issues:
+                        print("[错误] 合并面料质检存在 high severity 问题，停止渲染：", file=sys.stderr)
+                        for issue in blocking_issues[:10]:
+                            print(f"  - {issue.get('asset_id')}: {issue.get('message', issue.get('type'))}", file=sys.stderr)
+                        return 1
+                elif qc_result.returncode != 0:
+                    return qc_result.returncode
 
             # 6c. 构造多方案生产规划请求
             multi_plan_path = out_dir / "ai_multi_production_plan.json"
@@ -2457,6 +2558,8 @@ def main() -> int:
 
     if not args.texture_set:
         texture_set_path = crop_collection_board(board_path, out_dir, args.crop_inset, not args.no_tile_repair, palette=palette)
+        if args.mode == "fast":
+            _auto_approve_texture_set(texture_set_path)
 
     # 部位映射（模板模式直接使用模板库固定映射；非模板保持旧流程）
     if template_assets:
@@ -2464,54 +2567,57 @@ def main() -> int:
     else:
         run_garment_mapping(args, pieces_path, out_dir)
 
-    qc_cmd = [
-        sys.executable,
-        str(SKILL_DIR / "scripts" / "质检纹理.py"),
-        "--texture-set",
-        str(texture_set_path),
-        "--out",
-        str(out_dir / "texture_qc_report.json"),
-    ]
-    if style_profile_path.exists():
-        qc_cmd.extend(["--style-profile", str(style_profile_path)])
-    qc_result = run_step(qc_cmd, check=False)
-    texture_qc_report_path = out_dir / "texture_qc_report.json"
-    if texture_qc_report_path.exists():
-        texture_qc = load_json(texture_qc_report_path)
-        texture_qc_issues = collect_texture_qc_issues(texture_qc)
-        high_issues = [issue for issue in texture_qc_issues if issue.get("severity") == "high"]
-        blocking_issues = [issue for issue in high_issues if issue.get("type") != "not_user_approved"]
-        if blocking_issues:
-            print("[错误] 面料质检存在 high severity 问题，停止渲染。请修复资产后重试：", file=sys.stderr)
-            for issue in blocking_issues[:10]:
-                print(f"  - {issue.get('asset_id')}: {issue.get('message', issue.get('type'))}", file=sys.stderr)
-            return 1
-        if high_issues:
-            approval_request = {
-                "request_id": "asset_approval_required_v1",
-                "texture_set": str(texture_set_path.resolve()),
-                "texture_qc_report": str(texture_qc_report_path.resolve()),
-                "message": "面料/图案/纯色仍为 candidate，必须经 AI 视觉 QC 或人工审批后才能继续渲染。",
-                "next_step": "审批后将 texture_set.json 中对应 assets 的 approved 设为 true，并使用 --texture-set 指向该文件重新运行。",
-                "assets": [
-                    {
-                        "asset_id": issue.get("asset_id", ""),
-                        "asset_role": issue.get("asset_role", ""),
-                        "issue": issue.get("message", ""),
-                    }
-                    for issue in high_issues
-                ],
-            }
-            approval_path = out_dir / "asset_approval_request.json"
-            write_json(approval_path, approval_request)
-            print("\n[暂停] 已生成候选面料组合，但资产尚未审批，按生产规则停止在渲染前。")
-            print(f"  面料组合: {texture_set_path.resolve()}")
-            print(f"  质检报告: {texture_qc_report_path.resolve()}")
-            print(f"  审批请求: {approval_path.resolve()}")
-            print("  审批后重新运行时传入 --texture-set 指向已审批的 texture_set.json。")
-            return 0
-    elif qc_result.returncode != 0:
-        return qc_result.returncode
+    if args.mode == "fast":
+        print("[fast模式] 跳过面料质检")
+    else:
+        qc_cmd = [
+            sys.executable,
+            str(SKILL_DIR / "scripts" / "质检纹理.py"),
+            "--texture-set",
+            str(texture_set_path),
+            "--out",
+            str(out_dir / "texture_qc_report.json"),
+        ]
+        if style_profile_path.exists():
+            qc_cmd.extend(["--style-profile", str(style_profile_path)])
+        qc_result = run_step(qc_cmd, check=False)
+        texture_qc_report_path = out_dir / "texture_qc_report.json"
+        if texture_qc_report_path.exists():
+            texture_qc = load_json(texture_qc_report_path)
+            texture_qc_issues = collect_texture_qc_issues(texture_qc)
+            high_issues = [issue for issue in texture_qc_issues if issue.get("severity") == "high"]
+            blocking_issues = [issue for issue in high_issues if issue.get("type") != "not_user_approved"]
+            if blocking_issues:
+                print("[错误] 面料质检存在 high severity 问题，停止渲染。请修复资产后重试：", file=sys.stderr)
+                for issue in blocking_issues[:10]:
+                    print(f"  - {issue.get('asset_id')}: {issue.get('message', issue.get('type'))}", file=sys.stderr)
+                return 1
+            if high_issues:
+                approval_request = {
+                    "request_id": "asset_approval_required_v1",
+                    "texture_set": str(texture_set_path.resolve()),
+                    "texture_qc_report": str(texture_qc_report_path.resolve()),
+                    "message": "面料/图案/纯色仍为 candidate，必须经 AI 视觉 QC 或人工审批后才能继续渲染。",
+                    "next_step": "审批后将 texture_set.json 中对应 assets 的 approved 设为 true，并使用 --texture-set 指向该文件重新运行。",
+                    "assets": [
+                        {
+                            "asset_id": issue.get("asset_id", ""),
+                            "asset_role": issue.get("asset_role", ""),
+                            "issue": issue.get("message", ""),
+                        }
+                        for issue in high_issues
+                    ],
+                }
+                approval_path = out_dir / "asset_approval_request.json"
+                write_json(approval_path, approval_request)
+                print("\n[暂停] 已生成候选面料组合，但资产尚未审批，按生产规则停止在渲染前。")
+                print(f"  面料组合: {texture_set_path.resolve()}")
+                print(f"  质检报告: {texture_qc_report_path.resolve()}")
+                print(f"  审批请求: {approval_path.resolve()}")
+                print("  审批后重新运行时传入 --texture-set 指向已审批的 texture_set.json。")
+                return 0
+        elif qc_result.returncode != 0:
+            return qc_result.returncode
 
     # ============================================================
     # Phase 3: 生产规划（合并部位识别 + 审美决策）
@@ -2707,7 +2813,7 @@ def main() -> int:
             review_cmd = [
                 sys.executable,
                 str(SKILL_DIR / "scripts" / "构造商业复审请求.py"),
-                "--preview", str(rendered_dir / "preview.png"),
+                "--piece-contact-sheet", str(rendered_dir / "piece_contact_sheet.jpg"),
                 "--fill-plan", str(out_dir / "piece_fill_plan.json"),
                 "--brief", brief_for_review,
                 "--qc-report", str(out_dir / "fashion_qc_report.json"),
@@ -2812,7 +2918,7 @@ def main() -> int:
                     review_cmd = [
                         sys.executable,
                         str(SKILL_DIR / "scripts" / "构造商业复审请求.py"),
-                        "--preview", str(rendered_dir / "preview.png"),
+                        "--piece-contact-sheet", str(rendered_dir / "piece_contact_sheet.jpg"),
                         "--fill-plan", str(out_dir / "piece_fill_plan.json"),
                         "--brief", brief_for_review,
                         "--qc-report", str(out_dir / "fashion_qc_report.json"),

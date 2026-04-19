@@ -56,7 +56,7 @@ def create_three_meter_preview(preview_path: str | Path, out_path: str | Path) -
         return None
 
 
-def build_review_prompt(preview_path: str, fill_plan: dict, brief: dict, qc_report: dict = None, preview_3m_path: str = "") -> str:
+def build_review_prompt(image_path: str, fill_plan: dict, brief: dict, qc_report: dict = None, image_3m_path: str = "", image_label: str = "预览图") -> str:
     """构造面向子Agent的整体商业感复审 prompt。"""
     pieces = fill_plan.get("pieces", [])
     hero_ids = [p["piece_id"] for p in pieces if (p.get("overlay") or {}).get("fill_type") == "motif"]
@@ -68,8 +68,8 @@ def build_review_prompt(preview_path: str, fill_plan: dict, brief: dict, qc_repo
         "请查看以下最终预览图，从整体商业角度判断这套印花成衣是否适合量产销售。",
         "",
         "===== 必看图片 =====",
-        f"预览图: {preview_path}",
-        f"三米模拟图: {preview_3m_path}" if preview_3m_path else "三米模拟图: 未提供，请在脑中把预览缩成 64×64 像素再判断。",
+        f"{image_label}: {image_path}",
+        f"三米模拟图: {image_3m_path}" if image_3m_path else "三米模拟图: 未提供，请在脑中把图片缩成 64×64 像素再判断。",
         "你必须先查看这张图片，再做判断。",
         "三米测试必须以 64px 远看效果为准：在 64×64 模拟图上仍能分辨 hero、身片和袖片关系才算通过；如果只剩花、糊、乱或拼贴感，rule A 必须 fail。",
         "",
@@ -208,7 +208,8 @@ def build_review_prompt(preview_path: str, fill_plan: dict, brief: dict, qc_repo
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="构造整体商业感复审请求，或验证AI复审结果。")
-    parser.add_argument("--preview", required=True, help="preview.png 路径")
+    parser.add_argument("--preview", default="", help="preview.png 路径（已废弃，优先使用 --piece-contact-sheet）")
+    parser.add_argument("--piece-contact-sheet", default="", help="piece_contact_sheet.jpg 路径。优先使用，替代 preview.png 参与商业复审流程。")
     parser.add_argument("--fill-plan", required=True, help="piece_fill_plan.json 路径")
     parser.add_argument("--brief", required=True, help="commercial_design_brief.json 路径")
     parser.add_argument("--qc-report", default="", help="fashion_qc_report.json 路径（可选）")
@@ -223,36 +224,51 @@ def main() -> int:
     brief = load_json(args.brief)
     qc_report = load_json(args.qc_report) if args.qc_report else None
 
+    # 确定使用哪张图参与复审：优先 piece_contact_sheet，fallback preview
+    source_image = ""
+    image_label = "预览图"
+    if args.piece_contact_sheet:
+        source_image = args.piece_contact_sheet
+        image_label = "裁片联络单"
+    elif args.preview:
+        source_image = args.preview
+
     # 模式A：生成复审请求（使用缩略图避免 413）
     if not args.selected:
-        preview_thumb = ensure_thumbnail(args.preview, max_size=384, provider="kimi")
-        preview_3m = create_three_meter_preview(args.preview, out_dir / "preview_3m.png")
-        preview_3m_thumb = ensure_thumbnail(preview_3m, max_size=384, provider="kimi") if preview_3m else None
+        if source_image:
+            image_thumb = ensure_thumbnail(source_image, max_size=384, provider="kimi")
+            image_3m = create_three_meter_preview(source_image, out_dir / "review_3m.png")
+            image_3m_thumb = ensure_thumbnail(image_3m, max_size=384, provider="kimi") if image_3m else None
+        else:
+            image_thumb = None
+            image_3m = None
+            image_3m_thumb = None
         prompt = build_review_prompt(
-            str(preview_thumb),
+            str(image_thumb) if image_thumb else "（未提供图片，请在脑中模拟判断）",
             fill_plan,
             brief,
             qc_report,
-            str(preview_3m_thumb) if preview_3m_thumb else "",
+            str(image_3m_thumb) if image_3m_thumb else "",
+            image_label,
         )
         prompt_path = out_dir / "ai_commercial_review_prompt.txt"
         prompt_path.write_text(prompt, encoding="utf-8")
-        kimi_images = [preview_thumb] + ([preview_3m_thumb] if preview_3m_thumb else [])
+        kimi_images = ([image_thumb] if image_thumb else []) + ([image_3m_thumb] if image_3m_thumb else [])
         payload_budget = estimate_payload_budget(prompt_path, kimi_images)
 
         request_summary = {
             "request_id": "commercial_review_v1",
-            "preview_path": str(preview_thumb.resolve()),
-            "preview_3m_path": str(preview_3m_thumb.resolve()) if preview_3m_thumb else "",
-            "preview_3m_original_path": str(preview_3m.resolve()) if preview_3m else "",
-            "preview_original_path": str(Path(args.preview).resolve()),
+            "review_image_path": str(image_thumb.resolve()) if image_thumb else "",
+            "review_image_3m_path": str(image_3m_thumb.resolve()) if image_3m_thumb else "",
+            "review_image_3m_original_path": str(image_3m.resolve()) if image_3m else "",
+            "review_image_original_path": str(Path(source_image).resolve()) if source_image else "",
             "fill_plan_path": str(Path(args.fill_plan).resolve()),
             "brief_path": str(Path(args.brief).resolve()),
             "prompt_path": str(prompt_path.resolve()),
             "expected_output": str((out_dir / "ai_commercial_review.json").resolve()),
             "payload_budget": payload_budget,
             "kimi_images": [str(path.resolve()) for path in kimi_images],
-            "kimi_input_note": "只传 preview_path 和 preview_3m_path 指向的 Kimi 缩略图，不要传 preview_original_path 原图。",
+            "kimi_input_note": "只传 review_image_path 和 review_image_3m_path 指向的 Kimi 缩略图，不要传原始大图。preview.png 是用户最终产物，不参与流程。",
         }
         req_path = out_dir / "ai_commercial_review_request.json"
         req_path.write_text(json.dumps(request_summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -261,12 +277,13 @@ def main() -> int:
             "商业复审请求": str(req_path.resolve()),
             "子Agent提示词": str(prompt_path.resolve()),
             "预期输出": request_summary["expected_output"],
-            "Kimi预览图": str(preview_thumb.resolve()),
-            "Kimi三米模拟图": str(preview_3m_thumb.resolve()) if preview_3m_thumb else "",
+            "Kimi复审图": str(image_thumb.resolve()) if image_thumb else "",
+            "Kimi三米模拟图": str(image_3m_thumb.resolve()) if image_3m_thumb else "",
             "Kimi请求体预算": payload_budget,
-            "说明": "请启动 coder 子Agent，传入 ai_commercial_review_prompt.txt + preview_path/preview_3m_path 缩略图，要求输出严格的 ai_commercial_review.json；不要传原始 preview.png。",
+            "说明": "请启动 coder 子Agent，传入 ai_commercial_review_prompt.txt + review_image_path/review_image_3m_path 缩略图，要求输出严格的 ai_commercial_review.json；不要传原始大图。",
         }, ensure_ascii=False, indent=2))
-        print_payload_budget_warning(payload_budget)
+        if kimi_images:
+            print_payload_budget_warning(payload_budget)
         return 0
 
     # 模式B：验证子Agent复审结果

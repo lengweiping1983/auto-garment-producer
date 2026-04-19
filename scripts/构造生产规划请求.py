@@ -448,7 +448,7 @@ def build_production_plan_prompt(
                             {
                                 "piece_id": "piece_001",
                                 "base": {"fill_type": "texture", "texture_id": "main_a", "scale": 1.0, "rotation": 0, "offset_x": 0, "offset_y": 0, "mirror_x": False, "mirror_y": False},
-                                "overlay": {"fill_type": "motif", "motif_id": "hero_motif_1_a", "anchor": "center", "scale": 0.72, "opacity": 0.92, "offset_x": 0, "offset_y": -40},
+                                "overlay": {"fill_type": "motif", "motif_id": "hero_motif_1_a", "anchor": "center", "scale": 0.72, "opacity": 1.0, "offset_x": 0, "offset_y": -40},
                                 "trim": None,
                                 "texture_direction": "transverse",
                                 "reason": "中文原因",
@@ -511,7 +511,7 @@ def build_production_plan_prompt(
                     {
                         "piece_id": "piece_001",
                         "base": {"fill_type": "texture", "texture_id": "main", "scale": 1.0, "rotation": 0, "offset_x": 0, "offset_y": 0, "mirror_x": False, "mirror_y": False},
-                        "overlay": {"fill_type": "motif", "motif_id": "hero_motif_1", "anchor": "center", "scale": 0.72, "opacity": 0.92, "offset_x": 0, "offset_y": -40},
+                        "overlay": {"fill_type": "motif", "motif_id": "hero_motif_1", "anchor": "center", "scale": 0.72, "opacity": 1.0, "offset_x": 0, "offset_y": -40},
                         "trim": None,
                         "texture_direction": "transverse",
                         "reason": "中文原因",

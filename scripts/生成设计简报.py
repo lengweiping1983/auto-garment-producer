@@ -359,20 +359,27 @@ def _generate_outputs(
         "commercial apparel repeat, only atmosphere and color from the theme, no large figurative subject, "
         "no mushroom or animal as full-body hero, no complete scene, no landscape, no scenery, no environment, no poster composition, cohesive with all other panels"
     )
-    main_prompt = gp.get("main", f"seamless tileable commercial textile base texture, pale ground with very faint abstract color wash inspired by {motif_str}, extremely low noise, abundant negative space, no figurative subject, no flower bouquet, no landscape scene, no environment, no scenery, fabric repeat pattern, textile swatch aesthetic, {base_guard}, no text")
+    main_prompt = gp.get("main", f"seamless tileable low-density tonal leaf repeat pattern on pale ground, faint leaf silhouettes inspired by {motif_str}, visible but quiet structure, commercial apparel base fabric, abundant breathing room, same {medium} brush style, no abstract wash, no plain color wash, no blurred background, no empty texture, no figurative subject, no flower bouquet, no landscape scene, no environment, no scenery, {base_guard}, no text")
     secondary_prompt = gp.get("secondary", f"seamless tileable coordinating textile texture, soft light ground with delicate abstract pattern inspired by {motif_str}, medium density but airy, same {medium} brush style, no standalone scene, no environment, {base_guard}, no text")
-    dark_prompt = gp.get("dark_base", gp.get("dark", f"seamless tileable commercial textile dark trim texture, deep ground with tiny subtle fiber texture or micro pattern, very low noise, dark-quiet and minimal, no forest scene, no landscape, no scenery, no environment, no figurative elements, fabric repeat, textile swatch, same {medium} grain and palette family, no brown cast unless present in palette, no text"))
+    dark_prompt = gp.get("dark_base", gp.get("dark", f"seamless tileable dark green micro stripe or tiny geometric repeat, crisp woven jacquard textile swatch, visible repeat structure, controlled low contrast, deep trim fabric, same {medium} palette family, no forest, no foliage photo, no camouflage, no atmospheric scene, no moody landscape, no plain dark texture, no landscape, no scenery, no environment, no figurative elements, no brown cast unless present in palette, no text"))
 
     # Row 2 — Mid-scale accent textures（全部走 gp.get，无硬编码）
     accent_prompt = gp.get("accent_light", gp.get("accent", f"seamless tileable small-scale accent pattern, tiny scattered elements inspired by {motif_str}, very small scale repeating, charming but controlled density, same palette and brush as main panel, no standalone scene, no text"))
     accent_mid_prompt = gp.get("accent_mid", f"seamless tileable soft geometric or organic lattice on pale ground, same {mood} palette, same {medium} hand-painted brush language, low noise, seamless tileable texture for secondary panels, no style shift, no text")
-    solid_quiet_prompt = gp.get("solid_quiet", f"seamless tileable commercial textile solid, quiet warm fabric ground with only subtle woven or knit texture, no paper grain, no canvas, no pattern, no scene, calm and minimal, textile swatch aesthetic, {mood}, same palette family, no text")
+    solid_quiet_prompt = gp.get("solid_quiet", f"seamless tileable quiet light-ground micro dot or mini woven repeat, subtle visible textile pattern, low contrast trim or lining fabric, calm and minimal, same {mood} palette family, not plain solid, no paper grain, no blank canvas, no empty texture, no scene, no text")
 
-    def _force_transparent_motif_prompt(prompt_text: str) -> str:
+    def _force_transparent_motif_prompt(prompt_text: str, motif_id: str = "") -> str:
         required = (
-            "transparent PNG cutout, real alpha background, no background, "
+            "isolated foreground motif only, transparent PNG cutout, real alpha background, "
+            "empty transparent pixels around the subject, no background, no background art, "
             "no plain light background, no plain warm background, no colored background box, "
-            "no filled rectangular background, no semi-transparent full-image patch"
+            "no filled rectangular background, no scenery, no semi-transparent full-image patch"
+        )
+        hero_required = (
+            "hero_motif_1 must be foreground subject only, no scene, no garden, "
+            "no meadow, no landscape, no environment, no foliage behind subject, "
+            "no botanical backdrop, no painted wash behind subject, no vignette, "
+            "no rectangular composition, no full illustration scene, no ground shadow"
         )
         text = prompt_text.strip()
         for old in (
@@ -381,18 +388,31 @@ def _generate_outputs(
             "removable plain background",
             "removable plain backgrounds",
             "suitable for background removal",
+            "full illustration scene",
+            "rectangular composition",
+            "botanical backdrop",
+            "foliage behind subject",
+            "painted wash behind subject",
+            "garden background",
+            "background art",
         ):
             text = text.replace(old, "transparent alpha background")
         lower = text.lower()
+        suffix = required
+        if motif_id == "hero_motif_1":
+            suffix = f"{required}, {hero_required}"
         if "transparent png cutout" in lower and "real alpha background" in lower:
-            return f"{text}, no colored background box, no semi-transparent full-image patch"
-        return f"{text}, {required}"
+            if motif_id == "hero_motif_1":
+                return f"{text}, no colored background box, no semi-transparent full-image patch, {hero_required}"
+            return f"{text}, isolated foreground motif only, empty transparent pixels around the subject, no colored background box, no scenery, no semi-transparent full-image patch"
+        return f"{text}, {suffix}"
 
     # Row 3 — Placement motifs must be generated as transparent cutouts.
-    motif_guard = "transparent PNG cutout, real alpha background, no background, no plain-color box, no filled rectangular background, no semi-transparent full-image patch"
-    hero_motif_1_prompt = _force_transparent_motif_prompt(gp.get("hero_motif_1", gp.get("hero_motif", f"a single elegant main subject centered, transparent PNG cutout with real alpha background, soft fading edges, balanced negative space, {medium} hand-painted, designed as placement print element, {motif_guard}, no text")))
-    hero_motif_2_prompt = _force_transparent_motif_prompt(gp.get("hero_motif_2", f"a secondary accent subject, centered, transparent PNG cutout with real alpha background, refined {medium} brushwork, designed as placement accent motif, {mood}, {motif_guard}, no text"))
-    trim_motif_prompt = _force_transparent_motif_prompt(gp.get("trim_motif", f"a small delicate decorative accent, minimal composition, transparent PNG cutout with real alpha background, designed as trim detail placement element, same {medium} style and palette family, {motif_guard}, no text"))
+    motif_guard = "isolated foreground motif only, transparent PNG cutout, real alpha background, no background, no plain-color box, no filled rectangular background, no scenery, no semi-transparent full-image patch"
+    hero_guard = f"{motif_guard}, no garden, no meadow, no landscape, no environment, no foliage behind subject, no botanical backdrop, no painted wash behind subject, no rectangular composition, no full illustration scene, no vignette, no ground shadow"
+    hero_motif_1_prompt = _force_transparent_motif_prompt(gp.get("hero_motif_1", gp.get("hero_motif", f"isolated foreground hero motif only, centered subject, transparent PNG cutout with real alpha background, empty transparent pixels around the subject, soft clean edges, balanced negative space, {medium} hand-painted placement print element, {hero_guard}, no text")), "hero_motif_1")
+    hero_motif_2_prompt = _force_transparent_motif_prompt(gp.get("hero_motif_2", f"isolated secondary accent motif only, centered subject, transparent PNG cutout with real alpha background, empty transparent pixels around the subject, refined {medium} brushwork, designed as placement accent motif, {mood}, {motif_guard}, no text"), "hero_motif_2")
+    trim_motif_prompt = _force_transparent_motif_prompt(gp.get("trim_motif", f"isolated small decorative accent motif only, minimal composition, transparent PNG cutout with real alpha background, empty transparent pixels around the subject, same {medium} style and palette family, {motif_guard}, no text"), "trim_motif")
 
     def _inject_palette_constraints(prompt_text: str, texture_id: str, palette: dict) -> str:
         """为提示词追加具体的 hex 颜色硬约束，减少 AI 生成时的颜色偏差。"""
@@ -405,29 +425,29 @@ def _generate_outputs(
 
         constraints = []
         if texture_id == "main" and primary:
-            constraints.append(f"ground color must be exactly {primary[0]}, no figurative elements, no scene, no landscape")
+            constraints.append(f"ground color must be exactly {primary[0]}, keep a visible low-density leaf repeat, no abstract wash, no plain color wash, no blurred background, no figurative elements, no scene, no landscape")
         elif texture_id == "secondary" and secondary:
             constraints.append(f"light ground and pattern tones must stay within {secondary[0]} family, no warm cast, no scene")
         elif texture_id == "dark_base" and dark:
-            constraints.append(f"deep ground color must be exactly {dark[0]} or darker, no brown, no green cast, no forest scene, no landscape, no scenery")
+            constraints.append(f"deep ground color must be exactly {dark[0]} or darker, keep crisp micro stripe or tiny geometric repeat visible, no brown, no green cast, no forest, no foliage photo, no camouflage, no atmospheric scene, no moody landscape, no plain dark texture")
         elif texture_id == "accent_light" and (accent or primary):
             c = accent[0] if accent else primary[0]
             constraints.append(f"scattered accent elements must use {c} tones only")
         elif texture_id == "accent_mid" and secondary:
             constraints.append(f"lattice lines must use {secondary[0]} tones, pale ground stays within {primary[0] if primary else 'light'} family")
         elif texture_id == "solid_quiet" and primary:
-            constraints.append(f"solid surface color must be exactly {primary[0]} with only subtle woven fabric texture, no paper grain, no canvas, no pattern")
+            constraints.append(f"light ground color must stay within {primary[0]} family with subtle visible micro dot or mini woven repeat, not plain solid, no paper grain, no canvas, no blank background")
         elif texture_id == "hero_motif_1" and primary:
             bg = primary[0] if primary else "#ffffff"
             fg = accent[0] if accent else (secondary[0] if secondary else bg)
-            constraints.append(f"transparent alpha background only, subject painted in {fg} tones, soft fading edges, no colored background box")
+            constraints.append(f"transparent alpha background only, isolated foreground subject painted in {fg} tones, empty transparent pixels around the subject, soft fading edges, no colored background box, no garden, no foliage behind subject, no botanical backdrop, no rectangular composition, no full illustration scene")
         elif texture_id == "hero_motif_2" and primary:
             bg = primary[0] if primary else "#ffffff"
             fg = secondary[0] if secondary else (accent[0] if accent else bg)
-            constraints.append(f"transparent alpha background only, accent subject in {fg} tones, no colored background box")
+            constraints.append(f"transparent alpha background only, isolated accent subject in {fg} tones, empty transparent pixels around the subject, no colored background box, no scenery")
         elif texture_id == "trim_motif" and (accent or secondary):
             c = accent[0] if accent else secondary[0]
-            constraints.append(f"minimal decorative accent in {c} tones on transparent alpha background, no colored background box")
+            constraints.append(f"minimal isolated decorative accent in {c} tones on transparent alpha background, empty transparent pixels around the subject, no colored background box, no scenery")
 
         if constraints:
             return f"{prompt_text}, color constraint: {', '.join(constraints)}"
@@ -464,7 +484,7 @@ def _generate_outputs(
             {
                 "motif_id": "hero_motif",
                 "purpose": "单一卖点定位，置于一个 hero 裁片",
-                "prompt": sanitize_prompt(generated_prompts.get("hero_motif", f"transparent PNG cutout placement print motif, simplified {hero_selling_point}, real alpha background, balanced negative space, soft fading edges, no background, no colored rectangle, no text, no watermark"), domain="fashion") if generated_prompts else sanitize_prompt(f"transparent PNG cutout placement print motif, simplified {hero_selling_point}, real alpha background, balanced negative space, soft fading edges, no background, no colored rectangle, no text, no watermark", domain="fashion"),
+                "prompt": sanitize_prompt(generated_prompts.get("hero_motif", f"isolated foreground transparent PNG cutout placement print motif, simplified {hero_selling_point}, real alpha background, empty transparent pixels around the subject, balanced negative space, soft fading edges, no background, no background art, no colored rectangle, no scene, no text, no watermark"), domain="fashion") if generated_prompts else sanitize_prompt(f"isolated foreground transparent PNG cutout placement print motif, simplified {hero_selling_point}, real alpha background, empty transparent pixels around the subject, balanced negative space, soft fading edges, no background, no background art, no colored rectangle, no scene, no text, no watermark", domain="fashion"),
                 "negative_prompt": "complex background, full scene, poster, text, logo, watermark, faces, multiple subjects, frame, " + FRONT_EFFECT_NEGATIVE_EN,
             }
         ],
@@ -538,27 +558,27 @@ def _build_collection_prompt_from_prompts(prompts: list[dict], style: dict) -> s
 # =============================================================================
 
 _MASS_PRODUCTION_INJECT = {
-    "main": "extremely low noise, abundant negative space, barely visible texture, highly wearable at retail distance, safe for mass production",
+    "main": "low-density tonal leaf repeat, visible but quiet structure, abundant breathing room, highly wearable at retail distance, safe for mass production, no abstract wash",
     "secondary": "coordinated but very quiet, medium density but still airy, safe for large garment panels, no visual risk",
-    "dark_base": "deep ground with tiny subtle texture, very low noise, dark-quiet and minimal, understated elegance",
+    "dark_base": "deep green micro stripe or tiny geometric repeat, crisp woven jacquard structure, controlled low contrast, understated elegance, no atmospheric scene",
     "accent_light": "tiny scattered elements, very small scale repeating, charming but controlled density, whisper-level presence",
     "accent_mid": "soft organic lattice, low noise, seamless tileable texture for secondary panels, gentle structure",
-    "solid_quiet": "quiet warm solid with only subtle paper grain, no pattern, calm and minimal, pure background function",
-    "hero_motif_1": "single elegant main subject, balanced negative space, soft fading edges, refined and quiet, one clear selling point only",
-    "hero_motif_2": "secondary accent subject, refined brushwork, gentle presence, supporting role not competing",
-    "trim_motif": "small delicate decorative accent, minimal composition, designed as trim detail, quiet punctuation",
+    "solid_quiet": "quiet light-ground micro dot or mini woven repeat, subtle visible textile pattern, low contrast trim or lining function, not plain solid",
+    "hero_motif_1": "isolated foreground hero motif only, real alpha background, no scene, no garden, no foliage behind subject, no rectangular composition, one clear selling point only",
+    "hero_motif_2": "isolated secondary accent motif only, real alpha background, refined brushwork, gentle presence, no scenery",
+    "trim_motif": "isolated small decorative accent motif only, real alpha background, minimal composition, no scenery",
 }
 
 _STATEMENT_INJECT = {
-    "main": "visible artistic texture, confident brushstrokes, gallery-worthy surface, stronger visual presence while still wearable",
+    "main": "more visible tonal leaf repeat, confident brush rhythm, stronger repeat structure while still wearable, no abstract wash",
     "secondary": "coordinating with more visible pattern, medium-high density, stronger visual rhythm, bolder expression",
-    "dark_base": "deep rich ground with expressive texture, moody and atmospheric, dramatic dark panels, statement depth",
+    "dark_base": "deep rich micro stripe or tiny geometric repeat, crisp jacquard rhythm, visible repeat structure, statement depth without atmosphere or scenery",
     "accent_light": "scattered elements with more presence, charming and lively, noticeable accent density, playful energy",
     "accent_mid": "geometric or organic lattice with stronger rhythm, more visible structure, architectural confidence",
-    "solid_quiet": "warm solid with visible artisan paper grain texture, subtle but tactile, handcrafted character",
-    "hero_motif_1": "bold main subject with stronger presence, dramatic negative space, statement piece, hero-worthy impact",
-    "hero_motif_2": "expressive accent subject with dynamic brushwork, confident artistic gesture, memorable accent",
-    "trim_motif": "decorative accent with more visual weight, confident composition, eye-catching trim detail",
+    "solid_quiet": "quiet micro dot or mini woven repeat with subtle tactile structure, low contrast handcrafted trim character, not plain solid",
+    "hero_motif_1": "bold isolated foreground hero motif only, real alpha background, hero-worthy impact, no background art, no scene, no garden, no foliage behind subject",
+    "hero_motif_2": "expressive isolated accent motif only, real alpha background, confident artistic gesture, memorable accent, no scenery",
+    "trim_motif": "isolated decorative accent motif only, real alpha background, confident composition, eye-catching trim detail, no scenery",
 }
 
 

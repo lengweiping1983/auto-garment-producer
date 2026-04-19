@@ -39,24 +39,24 @@ COMMERCIAL_FILL_RULES_ZH = [
 ]
 
 PANEL_DEFAULTS_EN = {
-    "main": "pale base with faint abstract pattern, very low noise, lots of negative space, no scene, no landscape, no text",
+    "main": "seamless tileable low-density tonal leaf repeat pattern on pale ground, faint leaf silhouettes, visible but quiet structure, commercial apparel base fabric, abundant breathing room, no abstract wash, no plain color wash, no blurred background, no empty texture, no scene, no landscape, no text",
     "secondary": "coordinated medium-density pattern on light ground, same palette, no scene, no text",
-    "dark_base": "deep dark ground with very subtle fiber texture, quiet and minimal, no forest scene, no landscape, no text",
+    "dark_base": "seamless tileable dark green micro stripe or tiny geometric repeat, crisp woven jacquard textile swatch, visible repeat structure, controlled low contrast, no forest, no foliage photo, no camouflage, no atmospheric scene, no moody landscape, no plain dark texture, no text",
     "accent_light": "tiny scattered small-scale pattern on light ground, controlled density, no text",
     "accent_mid": "soft geometric or organic lattice on pale ground, same palette, seamless tileable texture, no text",
-    "solid_quiet": "quiet warm solid with subtle woven fabric texture, no paper grain, no canvas, no pattern, seamless tileable solid, no text",
-    "hero_motif_1": "single elegant main subject centered, transparent PNG cutout, alpha background, no background, soft fading edges, no text",
-    "hero_motif_2": "secondary accent subject centered, transparent PNG cutout, alpha background, no background, refined brushwork, no text",
-    "trim_motif": "small delicate decorative accent, minimal composition, transparent PNG cutout, alpha background, no background, no text",
+    "solid_quiet": "seamless tileable quiet light-ground micro dot or mini woven repeat, subtle visible textile pattern, low contrast trim or lining fabric, not plain solid, no paper grain, no blank canvas, no empty texture, no text",
+    "hero_motif_1": "isolated foreground hero motif only, centered subject, transparent PNG cutout, real alpha background, empty transparent pixels around the subject, no background, no background art, no scenery, no garden, no foliage behind subject, no botanical backdrop, no painted wash, no rectangular composition, no full illustration scene, no vignette, no ground shadow, no text",
+    "hero_motif_2": "isolated secondary accent motif only, centered subject, transparent PNG cutout, real alpha background, empty transparent pixels around the subject, no background, no colored background box, no scenery, refined brushwork, no text",
+    "trim_motif": "isolated small decorative accent motif only, minimal composition, transparent PNG cutout, real alpha background, empty transparent pixels around the subject, no background, no colored background box, no scenery, no text",
 }
 
 PANEL_DEFAULTS_ZH = {
-    "main": "淡色底极低噪抽象底纹，不得有场景/风景",
+    "main": "淡色底低密度叶片重复纹样，安静但有可见结构，不得是抽象水洗/糊底/空底",
     "secondary": "协调中密度图案，不得有场景",
-    "dark_base": "深底微纹理面料，不得有森林/风景场景",
+    "dark_base": "深绿色微条纹或小几何重复纹样，清晰织纹感，不得是森林/迷彩/深色空底",
     "accent_light": "浅色小图案点缀",
     "accent_mid": "中调几何/有机格子",
-    "solid_quiet": "安静纯色面料/衬里，不得用纸纹/画布",
+    "solid_quiet": "浅底安静微点或迷你织纹重复纹样，低对比衬里感，不得是纯色空白",
     "hero_motif_1": "主卖点定位图案",
     "hero_motif_2": "次卖点定位图案",
     "trim_motif": "小型饰边装饰图案",
@@ -102,11 +102,11 @@ def build_collection_board_prompt_en(panel_prompts: dict, style: dict | None = N
     lines = [
         "Create one square 3x3 commercial textile collection board with thin white gutters. No text anywhere.",
         f"Art direction: {compact_style_line(style)}",
-        "Rows: 1 base seamless textures; 2 accent/solid seamless textures; 3 transparent PNG placement motifs with alpha backgrounds.",
+        "Rows: 1 base seamless textures; 2 accent/solid seamless textures; 3 isolated transparent PNG placement motifs with real alpha backgrounds.",
         "All 9 panels must look like one coherent textile family: same palette, same paper grain, same brush language, same saturation range.",
         "Do not mix separate visual worlds such as warm beige line-art mushrooms with green watercolor meadow panels unless the palette and brush style are fully unified.",
         "Rows 1-2 are fabric repeats only: no large figurative subject, no complete scene, no landscape, no scenery, no environment, no animal/character/mushroom/flower bouquet as a full-body hero texture. Each panel must look like a fabric swatch, not a painting or scene.",
-        "Row 3 motifs must be clean transparent cutout artwork with real alpha backgrounds, never plain-color boxes, rectangular patches, or semi-transparent full-image backgrounds.",
+        "Row 3 motifs must be AI-generated as clean isolated transparent cutout artwork with real alpha backgrounds, never plain-color boxes, background art, scenery, rectangular patches, or semi-transparent full-image backgrounds.",
     ]
     for label, panel_id in BOARD_POSITIONS_EN:
         prompt = panel_prompts.get(panel_id) or PANEL_DEFAULTS_EN[panel_id]
@@ -114,7 +114,7 @@ def build_collection_board_prompt_en(panel_prompts: dict, style: dict | None = N
     lines.extend([
         "All panels share one palette, fabric texture, brush language, and commercial apparel mood.",
         BOARD_NEGATIVE_EN + ".",
-        "Rows 1-2 must be usable fabric repeats; row 3 must be clean transparent placement motifs with alpha backgrounds.",
+        "Rows 1-2 must be usable fabric repeats; row 3 must be isolated transparent placement motifs with real alpha backgrounds.",
     ])
     return "\n".join(lines)
 
@@ -129,11 +129,11 @@ def build_collection_board_prompt_zh(panel_prompts: dict, style: dict | None = N
             f"整体：{style.get('overall_impression', '商业畅销款打样')}，"
             f"{style.get('mood', '优雅安静')}，{style.get('medium', '水彩')}风格。{direction}"
         ),
-        "第一行是大身可平铺底纹；第二行是中调点缀/纯色可平铺纹理；第三行是透明PNG定位图案，必须是真 alpha 透明背景。",
+        "第一行是大身可平铺底纹；第二行是中调点缀/纯色可平铺纹理；第三行是孤立前景透明PNG定位图案，必须由 AI 直接生成真 alpha 透明背景。",
         "9个面板必须像同一设计师的同一系列：同色板、同纸纹、同手绘语言、同饱和度范围。",
         "禁止在同一看板中混入明显跨风格资产，例如米底线稿蘑菇与绿色水彩草地并列，除非色板和笔触已完全统一。",
         "第一、二行只能是面料 repeat，不要把动物、角色、蘑菇、花丛、完整场景、风景、环境画面做成大身主纹理。每个面板必须是面料小样，不能是绘画或场景。",
-        "第三行定位图案必须是干净透明 cutout，禁止纯色底框、矩形底、半透明整张贴片。",
+        "第三行定位图案必须是干净孤立透明 cutout，禁止背景画面、风景、纯色底框、矩形底、半透明整张贴片。",
     ]
     for label, panel_id in BOARD_POSITIONS_ZH:
         prompt = panel_prompts.get(panel_id) or PANEL_DEFAULTS_ZH[panel_id]
@@ -141,7 +141,7 @@ def build_collection_board_prompt_zh(panel_prompts: dict, style: dict | None = N
     lines.extend([
         "9个面板必须像同一设计师的同一系列：同色板、同面料纹理、同手绘语言、同成衣气质。",
         BOARD_NEGATIVE_ZH + "。",
-        "第一、二行必须可作为连续面料小样；第三行必须是透明背景定位图案。",
+        "第一、二行必须可作为连续面料小样；第三行必须是孤立前景透明背景定位图案。",
     ])
     return "\n".join(lines)
 
