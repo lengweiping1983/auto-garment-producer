@@ -72,6 +72,12 @@ def _copy_stable(src: Path, out_dir: Path, label: str = "theme_image") -> Path:
     dest_dir = out_dir / "theme_inputs"
     dest_dir.mkdir(parents=True, exist_ok=True)
     digest = _sha256(src)[:12]
+
+    # 检查目标目录下是否已有相同 digest 的文件，直接复用
+    for existing in dest_dir.iterdir():
+        if existing.is_file() and digest in existing.name:
+            return existing.resolve()
+
     dest = dest_dir / f"{label}_{digest}{_safe_suffix(src)}"
     if src.resolve() != dest.resolve():
         shutil.copy2(src, dest)
@@ -187,6 +193,7 @@ def _auto_discover(out_dir: Path) -> list[Path]:
                 p.is_file()
                 and p.suffix.lower() in IMAGE_EXTS
                 and (name.startswith("theme") or name.startswith("input") or name.startswith("reference"))
+                and not name.startswith("theme_image_")
             ):
                 candidates.append(p)
     return sorted(candidates, key=lambda p: p.name.lower())
