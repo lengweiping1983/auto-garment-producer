@@ -130,26 +130,26 @@
       "garment_role": "trim_strip",
       "zone": "trim",
       "symmetry_group": "",
-      "same_shape_group": "",
+      "same_shape_group": "ssg_vertical_trim",
       "texture_direction_hint": "longitudinal",
       "grain_direction": "horizontal",
-      "notes": "从通用模板继承: 门襟. 面积排名#8, 实际面积=479909, 宽高比=0.264"
+      "notes": "竖向长窄饰边A. 面积排名#8, 实际面积=479909, 宽高比=0.264"
     },
     {
       "slot_index": 8,
-      "piece_name": "下摆",
-      "piece_name_en": "hem",
+      "piece_name": "竖向窄条",
+      "piece_name_en": "vertical_trim",
       "expected_area_rank": 9,
       "expected_aspect_min": 0.1,
       "expected_aspect_max": 0.33,
       "expected_zone": "center",
-      "garment_role": "hem_or_lower_trim",
+      "garment_role": "trim_strip",
       "zone": "trim",
       "symmetry_group": "",
-      "same_shape_group": "",
-      "texture_direction_hint": "transverse",
+      "same_shape_group": "ssg_vertical_trim",
+      "texture_direction_hint": "longitudinal",
       "grain_direction": "horizontal",
-      "notes": "从通用模板继承: 下摆. 面积排名#9, 实际面积=315614, 宽高比=0.166"
+      "notes": "竖向长窄饰边B，与slot 7保持同组同向填充. 面积排名#9, 实际面积=315614, 宽高比=0.166"
     }
   ]
 }

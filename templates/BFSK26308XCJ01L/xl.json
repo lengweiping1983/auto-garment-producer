@@ -3,6 +3,21 @@
   "template_id": "BFSK26308XCJ01L",
   "size_label": "xl",
   "overrides": {
-    "pieces": []
+    "pieces": [
+      {
+        "slot_index": 7,
+        "piece_name": "横向窄条",
+        "piece_name_en": "horizontal_trim",
+        "same_shape_group": "",
+        "expected_aspect_min": 2.37,
+        "expected_aspect_max": 5.64,
+        "notes": "XL码该裁片横向摆放，不与竖向窄条slot 8强制同组"
+      },
+      {
+        "slot_index": 8,
+        "same_shape_group": "",
+        "notes": "XL码竖向窄条独立处理，避免与横向slot 7错误同相位"
+      }
+    ]
   }
 }

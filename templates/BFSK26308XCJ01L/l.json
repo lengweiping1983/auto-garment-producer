@@ -3,6 +3,21 @@
   "template_id": "BFSK26308XCJ01L",
   "size_label": "l",
   "overrides": {
-    "pieces": []
+    "pieces": [
+      {
+        "slot_index": 5,
+        "symmetry_group": "",
+        "same_shape_group": "",
+        "expected_aspect_min": 0.84,
+        "expected_aspect_max": 1.97,
+        "notes": "L码该领/上饰边片横向摆放，几何与slot 6差异较大，不强制同形同步"
+      },
+      {
+        "slot_index": 6,
+        "symmetry_group": "",
+        "same_shape_group": "",
+        "notes": "L码该领/上饰边片独立处理，避免与slot 5错误同相位"
+      }
+    ]
   }
 }
