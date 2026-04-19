@@ -24,15 +24,16 @@
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-# 从当前文件位置推导 skills 根目录（当前文件在 auto-garment-producer/scripts/ 下，上两级为 skills 根）
-_SKILLS_ROOT = Path(__file__).resolve().parents[2]
+# 与端到端脚本保持一致：当前文件在 auto-garment-producer/scripts/ 下，
+# SKILL_DIR 是 auto-garment-producer，SKILL_DIR.parent 是同级 skills 目录。
+SKILL_DIR = Path(__file__).resolve().parents[1]
+_SKILLS_ROOT = SKILL_DIR.parent
 _HOME = Path.home()
 
 def _first_existing_path(candidates: list[Path]) -> Path:
@@ -49,7 +50,7 @@ def resolve_neo_ai_script() -> Path:
     if override:
         candidates.append(Path(override).expanduser())
     candidates.extend([
-        _SKILLS_ROOT / "neo-ai" / "scripts" / "generate_texture_collection_board.py",
+        SKILL_DIR.parent / "neo-ai" / "scripts" / "generate_texture_collection_board.py",
         _HOME / ".agents" / "skills" / "neo-ai" / "scripts" / "generate_texture_collection_board.py",
         _HOME / ".codex" / "skills" / "neo-ai" / "scripts" / "generate_texture_collection_board.py",
     ])
@@ -63,7 +64,7 @@ def resolve_libtv_script_dir() -> Path:
     if override:
         candidates.append(Path(override).expanduser())
     candidates.extend([
-        _SKILLS_ROOT / "libtv-skill" / "scripts",
+        SKILL_DIR.parent / "libtv-skill" / "scripts",
         _HOME / ".agents" / "skills" / "libtv-skill" / "scripts",
         _HOME / ".codex" / "skills" / "libtv-skill" / "scripts",
     ])
@@ -105,6 +106,23 @@ def _run_subprocess(cmd: list[str], env: dict | None = None, timeout: int = 300)
         stderr = result.stderr.strip()[:500] if result.stderr else ""
         raise RuntimeError(f"子进程失败 (rc={result.returncode}): {stderr}")
     return result.stdout
+
+
+def _run_subprocess_capture(cmd: list[str], env: dict | None = None, timeout: int = 300) -> subprocess.CompletedProcess:
+    """运行子进程，保留 stdout/stderr，调用方负责解释 returncode。"""
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=timeout,
+    )
+
+
+def _truncate(text: str, limit: int = 1200) -> str:
+    if not text:
+        return ""
+    return text if len(text) <= limit else text[:limit] + "...[truncated]"
 
 
 def _redact_cmd(cmd: list[str]) -> list[str]:
@@ -174,12 +192,14 @@ class DualBoardGenerator:
         self.neo_size = neo_size
         self.neo_script = resolve_neo_ai_script()
         self.libtv_script_dir = resolve_libtv_script_dir()
+        self.libtv_generate_script = self.libtv_script_dir / "generate_texture_collection_board.py"
         self.health_report_path = self.out_dir / "dual_source_health_report.json"
         self.invocations: list[dict] = []
 
     def preflight(self) -> dict:
         """检查 Neo AI 与 libtv-skill 是否可调用，并写出健康报告。"""
-        libtv_required = ["create_session.py", "query_session.py", "download_results.py"]
+        libtv_required = ["generate_texture_collection_board.py", "create_session.py", "query_session.py", "download_results.py"]
+        source_summary = self._source_summary()
         report = {
             "neo": {
                 "script": str(self.neo_script),
@@ -219,6 +239,8 @@ class DualBoardGenerator:
                 ],
             },
             "invocations": list(self.invocations),
+            "source_summary": source_summary,
+            "dual_run_status": source_summary.get("dual_run_status", "not_started"),
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
 
@@ -241,6 +263,35 @@ class DualBoardGenerator:
         self.health_report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         return report
 
+    def _source_summary(self) -> dict:
+        summary = {}
+        for source in ("neo", "libtv"):
+            events = [item for item in self.invocations if item.get("source") == source]
+            statuses = [item.get("status", "") for item in events]
+            summary[source] = {
+                "called": bool(events),
+                "succeeded": any(status == "succeeded" for status in statuses),
+                "failed": any(status.endswith("_failed") or status in {"failed", "poll_timeout", "no_image_result"} for status in statuses),
+                "last_status": statuses[-1] if statuses else "not_started",
+                "event_count": len(events),
+            }
+        neo_ok = summary["neo"]["succeeded"]
+        libtv_ok = summary["libtv"]["succeeded"]
+        if neo_ok and libtv_ok:
+            dual_run_status = "both_succeeded"
+        elif neo_ok and summary["libtv"]["failed"]:
+            dual_run_status = "neo_only_libtv_failed"
+        elif libtv_ok and summary["neo"]["failed"]:
+            dual_run_status = "libtv_only_neo_failed"
+        elif summary["neo"]["failed"] and summary["libtv"]["failed"]:
+            dual_run_status = "both_failed"
+        elif summary["neo"]["called"] or summary["libtv"]["called"]:
+            dual_run_status = "in_progress"
+        else:
+            dual_run_status = "not_started"
+        summary["dual_run_status"] = dual_run_status
+        return summary
+
     def ensure_preflight_ok(self) -> None:
         report = self.preflight()
         if report.get("overall_ok"):
@@ -256,15 +307,53 @@ class DualBoardGenerator:
             f" 报告: {self.health_report_path}；问题: {' | '.join(problems)}"
         )
 
-    def _record_invocation(self, source: str, cmd: list[str], status: str, message: str = "") -> None:
-        self.invocations.append({
+    def _record_invocation(
+        self,
+        source: str,
+        cmd: list[str] | None,
+        status: str,
+        message: str = "",
+        **extra,
+    ) -> None:
+        event = {
             "source": source,
-            "cmd": _redact_cmd(cmd),
+            "cmd": _redact_cmd(cmd or []),
             "status": status,
             "message": message,
             "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        })
+        }
+        event.update({k: v for k, v in extra.items() if v not in (None, "")})
+        self.invocations.append(event)
         self.preflight()
+
+    def _ingest_libtv_metadata_events(self, metadata_path: Path, cmd: list[str]) -> dict:
+        if not metadata_path.exists():
+            return {}
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            self._record_invocation(
+                "libtv",
+                cmd,
+                "metadata_read_failed",
+                f"无法读取 libtv metadata: {exc}",
+                metadata_path=str(metadata_path),
+            )
+            return {}
+        for event in metadata.get("events", []):
+            if not isinstance(event, dict):
+                continue
+            status = event.get("status", "")
+            if not status:
+                continue
+            extra = {
+                key: value
+                for key, value in event.items()
+                if key not in {"status", "message", "time"}
+            }
+            extra["metadata_path"] = str(metadata_path.resolve())
+            self._record_invocation("libtv", cmd, status, event.get("message", ""), **extra)
+        return metadata
 
     # ------------------------------------------------------------------
     # Neo AI
@@ -310,159 +399,111 @@ class DualBoardGenerator:
     # libtv
     # ------------------------------------------------------------------
     def run_libtv(self, description: str) -> Path:
-        """调用 libtv 生成看板。
-
-        流程：
-        1. create_session.py "description" → 获取 session_id
-        2. query_session.py session_id 轮询 → 检测 assistant 消息中的图片 URL
-        3. download_results.py session_id --output-dir → 下载图片
-        4. 取第一张图片重命名为 collection_board_B.png
-
-        返回看板图像的绝对路径。
-        """
-        libtv_out_dir = self.out_dir / "libtv_collection_board"
+        """调用 libtv-skill 的稳定入口生成看板，并只读取本次 run 目录产物。"""
+        run_id = f"run_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{int(time.time() * 1000) % 100000}"
+        libtv_out_dir = self.out_dir / "libtv_collection_board" / run_id
         libtv_out_dir.mkdir(parents=True, exist_ok=True)
+        prompt_file = libtv_out_dir / "libtv_collection_prompt.txt"
+        prompt_file.write_text(description, encoding="utf-8")
 
+        cmd = [
+            sys.executable,
+            str(self.libtv_generate_script),
+            "--prompt-file", str(prompt_file),
+            "--output-dir", str(libtv_out_dir),
+            "--output-format", "png",
+            "--prefix", "collection_board",
+            "--timeout", str(self.timeout),
+            "--access-key", self.libtv_key,
+        ]
         env = os.environ.copy()
         env["LIBTV_ACCESS_KEY"] = self.libtv_key
+        metadata_path = libtv_out_dir / "metadata.json"
 
-        # ---- 1. 创建会话 ----
-        create_cmd = [
-            sys.executable,
-            str(self.libtv_script_dir / "create_session.py"),
-            description,
-        ]
-        print(f"[libtv] 创建会话并发送生成请求...")
-        self._record_invocation("libtv", create_cmd, "started")
+        print(f"[libtv] 启动 libtv-skill 看板生成: {self.libtv_generate_script}")
+        self._record_invocation("libtv", cmd, "generate_board_started", "调用 libtv-skill generate_texture_collection_board.py", output_dir=str(libtv_out_dir))
         try:
-            stdout = _run_subprocess(create_cmd, env=env, timeout=60)
-        except Exception as exc:
-            self._record_invocation("libtv", create_cmd, "failed", str(exc))
-            raise
+            proc = _run_subprocess_capture(cmd, env=env, timeout=self.timeout + 180)
+        except subprocess.TimeoutExpired as exc:
+            metadata = self._ingest_libtv_metadata_events(metadata_path, cmd)
+            self._record_invocation(
+                "libtv",
+                cmd,
+                "generate_board_failed",
+                "libtv-skill generate_texture_collection_board.py 超时",
+                error_type="libtv_generate_timeout",
+                metadata_path=str(metadata_path) if metadata else "",
+                stdout=_truncate(exc.stdout or ""),
+                stderr=_truncate(exc.stderr or ""),
+            )
+            raise RuntimeError("libtv_generate_timeout: libtv-skill 生成脚本超时")
 
-        try:
-            session_data = json.loads(stdout)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"[libtv] 无法解析 create_session 输出: {exc}\nstdout: {stdout[:300]}")
+        metadata = self._ingest_libtv_metadata_events(metadata_path, cmd)
+        if proc.returncode != 0:
+            self._record_invocation(
+                "libtv",
+                cmd,
+                "generate_board_failed",
+                _truncate(proc.stderr or proc.stdout),
+                error_type="libtv_generate_failed",
+                returncode=proc.returncode,
+                metadata_path=str(metadata_path) if metadata else "",
+                stdout=_truncate(proc.stdout),
+                stderr=_truncate(proc.stderr),
+            )
+            raise RuntimeError(f"libtv_generate_failed: rc={proc.returncode}, stderr={_truncate(proc.stderr, 300)}")
 
-        session_id = session_data.get("sessionId", "")
-        project_uuid = session_data.get("projectUuid", "")
-        if not session_id:
-            raise RuntimeError("[libtv] create_session 未返回 sessionId")
-        print(f"[libtv] 会话已创建: session_id={session_id}, project_uuid={project_uuid}")
+        images = metadata.get("images", []) if isinstance(metadata, dict) else []
+        board_path = None
+        if images and isinstance(images[0], dict) and images[0].get("path"):
+            board_path = Path(images[0]["path"])
+        if not board_path:
+            # fallback 也只允许在本次 run 目录查找，绝不捞历史 libtv_collection_board 文件。
+            candidates = (
+                sorted(libtv_out_dir.glob("collection_board_*.png"))
+                + sorted(libtv_out_dir.glob("collection_board_*.jpg"))
+                + sorted(libtv_out_dir.glob("collection_board_*.jpeg"))
+                + sorted(libtv_out_dir.glob("collection_board_*.webp"))
+            )
+            if candidates:
+                board_path = candidates[0]
+        if not board_path or not board_path.exists():
+            self._record_invocation(
+                "libtv",
+                cmd,
+                "generate_board_failed",
+                f"本次 run 目录未找到新生成的 libtv 看板: {libtv_out_dir}",
+                error_type="libtv_generate_no_files",
+                metadata_path=str(metadata_path) if metadata else "",
+                stdout=_truncate(proc.stdout),
+                stderr=_truncate(proc.stderr),
+            )
+            raise RuntimeError(f"libtv_generate_no_files: 本次 run 目录未找到新生成的 libtv 看板: {libtv_out_dir}")
 
-        # ---- 2. 轮询等待结果 ----
-        image_urls: list[str] = []
-        poll_interval = 8  # 秒
-        max_poll_time = self.timeout
-        poll_start = time.time()
-        query_fail_count = 0
-        max_query_fails = 3
-
-        url_pattern = re.compile(r'https?://[^\s"\'<>]+\.(?:png|jpg|jpeg|webp)')
-
-        while time.time() - poll_start < max_poll_time:
-            time.sleep(poll_interval)
-
-            query_cmd = [
-                sys.executable,
-                str(self.libtv_script_dir / "query_session.py"),
-                session_id,
-                "--after-seq", "0",
-            ]
-            if project_uuid:
-                query_cmd.extend(["--project-id", project_uuid])
-
-            try:
-                stdout = _run_subprocess(query_cmd, env=env, timeout=30)
-                query_fail_count = 0  # 重置失败计数
-            except Exception as exc:
-                query_fail_count += 1
-                print(f"[libtv] 查询失败 ({query_fail_count}/{max_query_fails}): {exc}")
-                if query_fail_count >= max_query_fails:
-                    raise RuntimeError(f"[libtv] 连续 {max_query_fails} 次查询失败，放弃轮询")
-                continue
-
-            try:
-                query_data = json.loads(stdout)
-            except json.JSONDecodeError:
-                continue
-
-            messages = query_data.get("messages", [])
-            for msg in messages:
-                if msg.get("role") == "assistant":
-                    content = msg.get("content", "")
-                    if isinstance(content, str):
-                        found = url_pattern.findall(content)
-                        if found:
-                            image_urls.extend(found)
-
-            # 同时检查 tool 消息中的 task_result
-            for msg in messages:
-                if msg.get("role") == "tool":
-                    try:
-                        data = json.loads(msg.get("content", "{}"))
-                        task_result = data.get("task_result", {})
-                        for img in task_result.get("images", []):
-                            preview = img.get("previewPath", "")
-                            if preview:
-                                image_urls.append(preview)
-                        for vid in task_result.get("videos", []):
-                            preview = vid.get("previewPath", vid.get("url", ""))
-                            if preview:
-                                image_urls.append(preview)
-                    except (json.JSONDecodeError, AttributeError):
-                        pass
-
-            # 去重
-            seen = set()
-            unique_urls = []
-            for u in image_urls:
-                if u not in seen:
-                    seen.add(u)
-                    unique_urls.append(u)
-            image_urls = unique_urls
-
-            if image_urls:
-                print(f"[libtv] 检测到 {len(image_urls)} 个结果 URL")
-                break
-        else:
-            raise RuntimeError(f"[libtv] 轮询超时（{self.timeout}s），未检测到生成结果")
-
-        if not image_urls:
-            raise RuntimeError("[libtv] 轮询结束但未找到任何图片 URL")
-
-        # ---- 3. 下载结果 ----
-        print(f"[libtv] 开始下载结果...")
-        download_cmd = [
-            sys.executable,
-            str(self.libtv_script_dir / "download_results.py"),
-            session_id,
-            "--output-dir", str(libtv_out_dir),
-            "--prefix", "collection_board",
-        ]
-        try:
-            _run_subprocess(download_cmd, env=env, timeout=120)
-        except Exception as exc:
-            self._record_invocation("libtv", download_cmd, "failed", str(exc))
-            raise
-
-        # ---- 4. 定位下载的图片 ----
-        downloaded = sorted(libtv_out_dir.glob("collection_board_*.png")) + \
-                     sorted(libtv_out_dir.glob("collection_board_*.jpg")) + \
-                     sorted(libtv_out_dir.glob("collection_board_*.jpeg")) + \
-                     sorted(libtv_out_dir.glob("collection_board_*.webp"))
-
-        if not downloaded:
-            raise RuntimeError(f"[libtv] 下载完成但未在 {libtv_out_dir} 找到图片文件")
-
-        board_path = downloaded[0]
         validation = validate_collection_board_shape(board_path)
         if not validation.get("ok"):
-            self._record_invocation("libtv", download_cmd, "failed", validation.get("message", "invalid board"))
+            self._record_invocation(
+                "libtv",
+                cmd,
+                "generate_board_failed",
+                validation.get("message", "invalid board"),
+                error_type="libtv_invalid_board_output",
+                output_path=str(board_path.resolve()),
+                metadata_path=str(metadata_path) if metadata else "",
+            )
             raise RuntimeError(validation.get("message", "libtv 输出不是有效面料看板"))
-        self._record_invocation("libtv", download_cmd, "succeeded", str(board_path))
-        print(f"[libtv] 看板已下载: {board_path}")
+
+        # metadata 中的 succeeded 已经被 ingest；这里补一条上游适配器成功事件。
+        self._record_invocation(
+            "libtv",
+            cmd,
+            "succeeded",
+            str(board_path),
+            output_path=str(board_path.resolve()),
+            metadata_path=str(metadata_path.resolve()) if metadata_path.exists() else "",
+            stdout=_truncate(proc.stdout),
+        )
+        print(f"[libtv] 看板已生成: {board_path}")
         return board_path.resolve()
 
     # ------------------------------------------------------------------

@@ -278,6 +278,8 @@ def build_production_context(
                 "neo_ok": health_payload.get("neo", {}).get("ok", False),
                 "libtv_ok": health_payload.get("libtv", {}).get("ok", False),
                 "invocation_count": len(health_payload.get("invocations", [])),
+                "dual_run_status": health_payload.get("dual_run_status", "not_started"),
+                "source_summary": health_payload.get("source_summary", {}),
                 "policy": health_payload.get("policy", {}),
             }
         except Exception as exc:
@@ -1859,8 +1861,17 @@ def main() -> int:
         if getattr(args, "user_prompt", ""):
             brief_cmd.extend(["--user-prompt", args.user_prompt])
         run_step(brief_cmd)
-        # 构造看板候选选择请求
-        if not args.skip_collection_selection and not args.selected_collection:
+        # 构造看板候选选择请求。
+        # 双源资产路径会直接使用 dual_collection_prompts.json，不应停在旧单源候选选择 gate。
+        dual_source_asset_path = bool(
+            (args.dual_source or args.theme_images or args.visual_elements)
+            and not args.texture_set
+            and not args.collection_board
+        )
+        if dual_source_asset_path:
+            args.dual_source = True
+            print("[双源模式] 跳过旧单源看板候选选择 gate，直接使用 dual_collection_prompts.json 调用 Neo AI + libtv-skill。")
+        elif not args.skip_collection_selection and not args.selected_collection:
             selection_cmd = [
                 sys.executable,
                 str(SKILL_DIR / "scripts" / "构造看板选择请求.py"),
@@ -1897,7 +1908,7 @@ def main() -> int:
             else:
                 print(f"[警告] 选择结果不存在: {selected_path}，回退到直接构造 prompt")
 
-        if not args.prompt_file:
+        if not args.prompt_file and not dual_source_asset_path:
             ve_path_obj = Path(args.visual_elements) if args.visual_elements else None
             generated_prompt = _build_collection_prompt_from_visual_elements(out_dir, ve_path_obj)
             if generated_prompt:
@@ -2171,6 +2182,8 @@ def main() -> int:
                         item[key] = scheme[key]
                 scheme_summaries.append(item)
 
+            dual_health_path = out_dir / "dual_source_health_report.json"
+            dual_health = load_json(dual_health_path) if dual_health_path.exists() else {}
             summary = {
                 "面料看板": [str(r["path"]) for r in board_results],
                 "面料组合_A": str(ts_a["path"]) if ts_a else "",
@@ -2185,6 +2198,8 @@ def main() -> int:
                 "失败方案": failed_schemes,
                 "渲染目录": [str((out_dir / f"rendered{sc['suffix']}").resolve()) for sc in schemes],
                 "双源健康报告": str((out_dir / "dual_source_health_report.json").resolve()),
+                "双源状态": dual_health.get("dual_run_status", "unknown"),
+                "双源来源摘要": dual_health.get("source_summary", {}),
                 "说明": "预览图/contact sheet 仅为裁片与纹理检查，不是正面成衣效果图。",
             }
             write_json(out_dir / "automation_summary.json", summary)
@@ -2211,11 +2226,15 @@ def main() -> int:
                 return rc
 
         # 双源模式下，后续渲染已在 _run_render_pipeline 中完成，直接返回
+        dual_health_path = out_dir / "dual_source_health_report.json"
+        dual_health = load_json(dual_health_path) if dual_health_path.exists() else {}
         summary = {
             "面料看板": [str(r["path"]) for r in board_results],
             "面料组合": [str(ts["path"]) for ts in texture_sets],
             "渲染目录": [str((out_dir / f"rendered{ts['suffix']}").resolve()) for ts in texture_sets],
             "双源健康报告": str((out_dir / "dual_source_health_report.json").resolve()),
+            "双源状态": dual_health.get("dual_run_status", "unknown"),
+            "双源来源摘要": dual_health.get("source_summary", {}),
             "说明": "预览图/contact sheet 仅为裁片与纹理检查，不是正面成衣效果图。",
         }
         write_json(out_dir / "automation_summary.json", summary)
