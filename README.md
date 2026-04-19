@@ -1,6 +1,6 @@
 # auto-garment-producer
 
-自动化成衣生产 skill：从主题图或已批准面料生成商业成衣裁片样品。短入口规则见 `SKILL.md`，详细约束见 `references/`。
+自动化成衣生产 skill：从主题图或面料资产生成商业成衣裁片样品。短入口规则见 `SKILL.md`，详细约束见 `references/`。
 
 ## 常用入口
 
@@ -12,10 +12,10 @@ python3 scripts/端到端自动化.py --theme-image /path/to/theme.png --out /pa
 
 普通 `--dual-source` 会分别渲染 Neo AI 与 libtv-skill 的来源结果；`--dual-source --multi-scheme` 会先合并双源 9+9 资产池，再要求 AI 输出 `ai_multi_production_plan.json` 的多套 `schemes` 方案。
 
-主题图不会被直接贴满裁片。流程会先把主题拆成“大身低噪氛围底纹 / 1 个 hero motif / 小面积点缀 / 安静区域”，再用色板、风格一致性和 motif 透明度质检过滤明显跳脱的资产。
+有主题图时，程序会裁剪第一张主题图的主体区域，竖向切为左右两半，分别生成 `theme_front_left.png` 和 `theme_front_right.png`，并强制落到正面两片裁片上。
 
 ## 关键目录
 
-- `scripts/`：端到端流程、prompt 构造、纹理裁剪、裁片渲染和质检。
-- `templates/`：内置多尺寸模板、mask、pieces 与固定 garment map。
-- `references/`：数据契约、艺术指导、提示词策略、质检和渲染规则。
+- `scripts/`：端到端流程、prompt 构造、纹理裁剪和裁片渲染。
+- `templates/`：内置固定模板、mask、pieces 与固定 garment map。
+- `references/`：数据契约、艺术指导、提示词策略和渲染规则。

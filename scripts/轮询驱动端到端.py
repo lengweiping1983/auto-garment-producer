@@ -55,8 +55,6 @@ def build_end_to_end_cmd(args: argparse.Namespace) -> list[str]:
         cmd.extend(["--garment-type", args.garment_type])
     if args.template:
         cmd.extend(["--template", args.template])
-    if args.template_size:
-        cmd.extend(["--template-size", args.template_size])
     if args.mode:
         cmd.extend(["--mode", args.mode])
     if args.brief:
@@ -87,8 +85,6 @@ def build_end_to_end_cmd(args: argparse.Namespace) -> list[str]:
         cmd.extend(["--crop-inset", str(args.crop_inset)])
     if args.construct_ai_request:
         cmd.append("--construct-ai-request")
-    if args.commercial_review:
-        cmd.append("--commercial-review")
     if args.no_tile_repair:
         cmd.append("--no-tile-repair")
     if args.reuse_cache:
@@ -101,16 +97,10 @@ def build_end_to_end_cmd(args: argparse.Namespace) -> list[str]:
         cmd.append("--multi-scheme")
     if args.max_schemes is not None:
         cmd.extend(["--max-schemes", str(args.max_schemes)])
-    if args.full_set:
-        cmd.append("--full-set")
     if args.user_prompt:
         cmd.extend(["--user-prompt", args.user_prompt])
     if args.selected_collection:
         cmd.extend(["--selected-collection", args.selected_collection])
-    if args.auto_retry is not None:
-        cmd.extend(["--auto-retry", str(args.auto_retry)])
-    if args.retry_agent_cmd:
-        cmd.extend(["--retry-agent-cmd", args.retry_agent_cmd])
     if args.require_theme_image:
         cmd.append("--require-theme-image")
     if args.font_file:
@@ -140,11 +130,10 @@ def main() -> int:
     parser.add_argument("--theme-images", default="", help="多张主题/参考图像")
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument("--collection-board", default="", help="已有的面料看板")
-    parser.add_argument("--texture-set", default="", help="已审批的面料组合")
+    parser.add_argument("--texture-set", default="", help="已有面料组合")
     parser.add_argument("--pattern", default="", help="透明纸样 mask PNG/WebP")
     parser.add_argument("--garment-type", default="", help="服装类型")
     parser.add_argument("--template", default="", help="模板编号")
-    parser.add_argument("--template-size", default="s", help="模板尺码")
     parser.add_argument("--mode", default="standard", choices=["fast", "standard", "production", "legacy"])
     parser.add_argument("--brief", default="", help="商业设计简报路径")
     parser.add_argument("--visual-elements", default="", help="已完成的 visual_elements.json")
@@ -160,18 +149,14 @@ def main() -> int:
     parser.add_argument("--max-retries", type=int, default=None)
     parser.add_argument("--crop-inset", type=int, default=None)
     parser.add_argument("--construct-ai-request", action="store_true")
-    parser.add_argument("--commercial-review", action="store_true")
     parser.add_argument("--no-tile-repair", action="store_true")
     parser.add_argument("--reuse-cache", action="store_true")
     parser.add_argument("--skip-collection-selection", action="store_true")
     parser.add_argument("--dual-source", action="store_true")
     parser.add_argument("--multi-scheme", action="store_true")
     parser.add_argument("--max-schemes", type=int, default=None)
-    parser.add_argument("--full-set", action="store_true")
     parser.add_argument("--user-prompt", default="", help="用户补充说明")
     parser.add_argument("--selected-collection", default="", help="已选择的 selected_variants.json")
-    parser.add_argument("--auto-retry", type=int, default=None)
-    parser.add_argument("--retry-agent-cmd", default="", help="自动重试时调用子 Agent 的命令")
     parser.add_argument("--require-theme-image", action="store_true")
     parser.add_argument("--font-file", default="", help="字体文件路径")
 

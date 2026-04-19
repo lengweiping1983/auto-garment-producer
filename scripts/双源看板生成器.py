@@ -256,7 +256,7 @@ class DualBoardGenerator:
                     "texture_set.json",
                     "transparent pattern-piece PNG",
                     "pattern-piece preview/contact sheet",
-                    "QC report",
+                    "pattern-piece contact sheet",
                 ],
             },
             "invocations": list(self.invocations),

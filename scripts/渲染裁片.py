@@ -570,8 +570,6 @@ def main() -> int:
     parser.add_argument("--texture-set", required=True, help="面料组合 JSON 路径")
     parser.add_argument("--fill-plan", default="", help="裁片填充计划 JSON 路径（可选）")
     parser.add_argument("--out", required=True, help="输出目录")
-    parser.add_argument("--scale-factor", type=float, default=1.0, help="全局纹理缩放因子（用于多尺寸映射）。默认1.0。")
-    parser.add_argument("--size-label", default="", help="尺寸标签后缀（如 s/m/l），用于输出文件名区分。")
     args = parser.parse_args()
 
     pieces_payload = load_json(args.pieces)
@@ -585,33 +583,17 @@ def main() -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 应用全局缩放因子（用于多尺寸映射）
-    if abs(args.scale_factor - 1.0) > 0.001:
-        for entry in fill_plan.get("pieces", []):
-            if entry.get("fill_type") == "texture":
-                entry["scale"] = entry.get("scale", 1.0) * args.scale_factor
-            # 多层计划也处理
-            for layer_key in ("base", "overlay", "trim"):
-                layer = entry.get(layer_key)
-                if isinstance(layer, dict) and layer.get("fill_type") == "texture":
-                    layer["scale"] = layer.get("scale", 1.0) * args.scale_factor
-        print(f"[渲染] 应用全局缩放因子: {args.scale_factor:.4f}")
-
     if not args.fill_plan:
-        plan_path = out_dir / f"piece_fill_plan{'_' + args.size_label if args.size_label else ''}.json"
+        plan_path = out_dir / "piece_fill_plan.json"
         plan_path.write_text(json.dumps(fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
     rendered = render_all(pieces_payload, texture_set, fill_plan, out_dir, texture_set_path)
 
-    # 输出文件名加尺寸后缀
-    preview_name = f"preview{'_' + args.size_label if args.size_label else ''}.png"
-    preview = compose_preview(pieces_payload, rendered, out_dir / preview_name)
+    preview = compose_preview(pieces_payload, rendered, out_dir / "preview.png")
 
-    sheet_name = f"piece_contact_sheet{'_' + args.size_label if args.size_label else ''}.jpg"
-    sheet = write_contact_sheet(rendered, out_dir / sheet_name)
+    sheet = write_contact_sheet(rendered, out_dir / "piece_contact_sheet.jpg")
 
-    manifest_name = f"texture_fill_manifest{'_' + args.size_label if args.size_label else ''}.json"
-    manifest = write_manifest(texture_set, fill_plan, rendered, preview, out_dir / manifest_name)
+    manifest = write_manifest(texture_set, fill_plan, rendered, preview, out_dir / "texture_fill_manifest.json")
     print(json.dumps(
         {"裁片数量": len(rendered), "预览图": str(preview.resolve()), "联络单": str(sheet.resolve()), "清单": str(manifest.resolve())},
         ensure_ascii=False,

@@ -92,11 +92,11 @@ def inspect_mask(mask_path: Path) -> dict:
         "extrema": list(extrema),
         "binary_pixel_ratio": round(binary_pixels / total, 6),
         "non_binary_pixels": non_binary_pixels,
-        "approved_binary_mask": non_binary_pixels == 0 and extrema == (0, 255),
+        "valid_binary_mask": non_binary_pixels == 0 and extrema == (0, 255),
     }
 
 
-def resolve_size_dirs(template_id: str = "", size: str = "", all_templates: bool = False) -> list[Path]:
+def resolve_size_dirs(template_id: str = "", size: str = "s", all_templates: bool = False) -> list[Path]:
     if all_templates:
         template_ids = [entry.get("template_id", "") for entry in load_index().get("templates", []) if entry.get("template_id")]
     elif template_id:
@@ -139,7 +139,7 @@ def preprocess_size_dir(size_dir: Path, check_only: bool = False) -> dict:
         info = inspect_mask(mask_path)
         info["piece_id"] = piece.get("piece_id", "")
         info["path"] = rel(mask_path, size_dir)
-        if not info["approved_binary_mask"]:
+        if not info["valid_binary_mask"]:
             errors.append(f"mask is not strict binary: {mask_ref}")
         production_masks.append(info)
 
@@ -225,14 +225,14 @@ def preprocess_size_dir(size_dir: Path, check_only: bool = False) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description="预处理内置模板资产，生成 Kimi JPEG 预览和 template_assets manifest。")
     parser.add_argument("--template", default="", help="模板 ID；为空时处理 index 中所有模板。")
-    parser.add_argument("--size", default="", help="尺寸，如 s/m/l/xl/xxl；为空时处理该模板所有尺寸。")
-    parser.add_argument("--all", action="store_true", help="处理 index 中所有模板和所有尺寸。")
+    parser.add_argument("--size", default="s", help="模板资产目录，固定为 s。")
+    parser.add_argument("--all", action="store_true", help="处理 index 中所有模板。")
     parser.add_argument("--check-only", action="store_true", help="只校验，不生成 JPEG/manifest。")
     args = parser.parse_args()
 
     size_dirs = resolve_size_dirs(args.template, args.size, args.all)
     if not size_dirs:
-        print(json.dumps({"ok": False, "error": "未找到可处理的模板尺寸目录"}, ensure_ascii=False, indent=2))
+        print(json.dumps({"ok": False, "error": "未找到可处理的模板资产目录"}, ensure_ascii=False, indent=2))
         return 1
 
     results = [preprocess_size_dir(path, check_only=args.check_only) for path in size_dirs]

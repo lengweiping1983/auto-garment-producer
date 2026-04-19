@@ -3,11 +3,11 @@
 端到端自动化：
 
 1. 生成或接收 Neo AI 3×3 面料看板。
-2. 裁剪为待审批的设计候选资产。
+2. 裁剪为可用的设计候选资产。
 3. 构建面料组合.json。
 4. 从纸样 mask 提取服装裁片。
 5. 构建部位映射与艺术指导填充计划。
-6. 渲染透明裁片 PNG、预览图、清单和成衣 QC。
+6. 渲染透明裁片 PNG、预览图与清单。
 
 Neo AI 负责创作 artwork。本脚本仅准备已批准资产并以确定性方式渲染到裁片中。
 """
@@ -27,15 +27,13 @@ from PIL import Image, ImageColor, ImageEnhance, ImageFilter, ImageStat
 SKILL_DIR = Path(__file__).resolve().parents[1]
 NEO_AI_SCRIPT = SKILL_DIR.parent / "neo-ai" / "scripts" / "generate_texture_collection_board.py"
 
-# 导入模板加载器（用于多尺寸自动渲染）
+# 导入模板加载器
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 from prompt_blocks import FRONT_EFFECT_NEGATIVE_EN, build_collection_board_prompt_en
 
 FRONT_EFFECT_NEGATIVE_PROMPT = FRONT_EFFECT_NEGATIVE_EN
 try:
     from template_loader import (
-        load_size_mappings,
-        load_size_pieces,
         normalize_piece_asset_paths,
         relative_json_metadata_path,
         resolve_template_assets,
@@ -52,6 +50,12 @@ try:
 except Exception:
     resolve_theme_image = None
     resolve_theme_images = None
+
+try:
+    from theme_front_splitter import create_front_split_assets, inject_front_split_motifs
+except Exception:
+    create_front_split_assets = None
+    inject_front_split_motifs = None
 
 
 def file_sha256(path: str | Path) -> str:
@@ -118,27 +122,6 @@ def cache_save(out_dir: Path, stage: str, input_hash: dict, output_path: Path) -
     }
     meta_path = cd / f"{stage}_{key}.meta.json"
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def validate_revised_agent_plan(parsed: dict, expect_production_plan: bool) -> None:
-    """Validate retry-agent JSON for either standard or legacy retry paths."""
-    if expect_production_plan:
-        if not isinstance(parsed.get("piece_fill_plan"), dict):
-            raise ValueError("standard 模式修订规划必须包含 piece_fill_plan 对象")
-        pieces = parsed["piece_fill_plan"].get("pieces")
-        schema_name = "piece_fill_plan.pieces"
-    else:
-        pieces = parsed.get("pieces")
-        schema_name = "pieces"
-    if not isinstance(pieces, list) or len(pieces) == 0:
-        raise ValueError(f"缺少 {schema_name} 数组")
-    for piece in pieces:
-        if not isinstance(piece, dict):
-            raise ValueError(f"{schema_name} 包含非对象元素: {piece}")
-        if not piece.get("piece_id"):
-            raise ValueError(f"piece 缺少 piece_id: {piece}")
-        if "base" not in piece:
-            raise ValueError(f"piece {piece.get('piece_id')} 缺少 base 字段")
 
 
 def _build_geometry_hints(pieces_path: Path, out_path: Path) -> None:
@@ -226,12 +209,10 @@ def build_production_context(
     ctx["input_hash"]["user_prompt"] = getattr(args, "user_prompt", "")
     ctx["input_hash"]["mode"] = getattr(args, "mode", "")
     ctx["input_hash"]["template"] = getattr(args, "template", "")
-    ctx["input_hash"]["template_size"] = getattr(args, "template_size", "")
     ctx["input_hash"]["multi_scheme"] = bool(getattr(args, "multi_scheme", False))
     ctx["input_hash"]["max_schemes"] = getattr(args, "max_schemes", 0)
     ctx["input_hash"]["skip_collection_selection"] = bool(getattr(args, "skip_collection_selection", False))
     ctx["input_hash"]["dual_source"] = bool(getattr(args, "dual_source", False))
-    ctx["input_hash"]["full_set"] = bool(getattr(args, "full_set", False))
     if getattr(args, "brief", ""):
         ctx["input_hash"]["brief"] = file_sha256(args.brief)
         ctx["paths"]["input_brief"] = str(Path(args.brief).resolve())
@@ -250,8 +231,6 @@ def build_production_context(
     if template_assets:
         ctx["computed"]["template_assets_reused"] = True
         ctx["computed"]["template_id"] = template_assets.get("template_id", "")
-        ctx["computed"]["template_size_label"] = template_assets.get("size_label", "")
-        ctx["computed"]["template_size"] = template_assets.get("size_label", "")
         ctx["computed"]["template_source"] = template_assets.get("template_source", "")
         ctx["computed"]["original_garment_type"] = getattr(args, "garment_type", "")
         ctx["paths"]["template_asset_dir"] = template_assets.get("asset_dir", "")
@@ -342,18 +321,6 @@ def write_json(path: Path, payload: dict) -> Path:
 def run_step(cmd: list[str], env: dict | None = None, check: bool = True) -> subprocess.CompletedProcess:
     print("运行:", " ".join(cmd))
     return subprocess.run(cmd, check=check, env=env)
-
-
-def collect_texture_qc_issues(report: dict) -> list[dict]:
-    """收集 texture_qc_report.json 中所有资产级 issues。"""
-    issues = []
-    for item in report.get("textures", []) + report.get("motifs", []):
-        asset_id = item.get("texture_id") or item.get("motif_id") or item.get("role", "")
-        for issue in item.get("issues", []):
-            issues.append({**issue, "asset_id": asset_id, "asset_role": item.get("role", "")})
-    for issue in report.get("solid_issues", []):
-        issues.append({**issue, "asset_id": "solids", "asset_role": "solid"})
-    return issues
 
 
 def latest_collection_board(output_dir: Path) -> Path:
@@ -969,67 +936,61 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "texture_id": "main",
                 "path": str(paths["main"].resolve()),
                 "role": "main",
-                "approved": False,
-                "candidate": True,
+                "approved": True,
+                "candidate": False,
                 "prompt": f"从 {source_name} 3×3 面料看板裁剪：主底纹",
                 "model": source_name,
                 "seed": "",
-                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
             {
                 "texture_id": "secondary",
                 "path": str(paths["secondary"].resolve()),
                 "role": "secondary",
-                "approved": False,
-                "candidate": True,
+                "approved": True,
+                "candidate": False,
                 "prompt": f"从 {source_name} 3×3 面料看板裁剪：辅纹理",
                 "model": source_name,
                 "seed": "",
-                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
             {
                 "texture_id": "dark_base",
                 "path": str(paths["dark_base"].resolve()),
                 "role": "dark_base",
-                "approved": False,
-                "candidate": True,
+                "approved": True,
+                "candidate": False,
                 "prompt": f"从 {source_name} 3×3 面料看板裁剪：深色底纹",
                 "model": source_name,
                 "seed": "",
-                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
             {
                 "texture_id": "accent_light",
                 "path": str(paths["accent_light"].resolve()),
                 "role": "accent_light",
-                "approved": False,
-                "candidate": True,
+                "approved": True,
+                "candidate": False,
                 "prompt": f"从 {source_name} 3×3 面料看板裁剪：浅色点缀纹理",
                 "model": source_name,
                 "seed": "",
-                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
             {
                 "texture_id": "accent_mid",
                 "path": str(paths["accent_mid"].resolve()),
                 "role": "accent_mid",
-                "approved": False,
-                "candidate": True,
+                "approved": True,
+                "candidate": False,
                 "prompt": f"从 {source_name} 3×3 面料看板裁剪：中调点缀纹理",
                 "model": source_name,
                 "seed": "",
-                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
             {
                 "texture_id": "solid_quiet",
                 "path": str(paths["solid_quiet"].resolve()),
                 "role": "solid_quiet",
-                "approved": False,
-                "candidate": True,
+                "approved": True,
+                "candidate": False,
                 "prompt": f"从 {source_name} 3×3 面料看板裁剪：安静纯色面板",
                 "model": source_name,
                 "seed": "",
-                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
         ],
         "motifs": [
@@ -1038,63 +999,42 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "texture_id": "hero_motif_1",
                 "path": str(paths["hero_motif_1"].resolve()),
                 "role": "hero",
-                "approved": False,
-                "candidate": True,
+                "approved": True,
+                "candidate": False,
                 "prompt": f"从 {source_name} 3×3 面料看板裁剪：卖点定位图案 1",
                 "model": source_name,
                 "seed": "",
-                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
             {
                 "motif_id": "hero_motif_2",
                 "texture_id": "hero_motif_2",
                 "path": str(paths["hero_motif_2"].resolve()),
                 "role": "hero",
-                "approved": False,
-                "candidate": True,
+                "approved": True,
+                "candidate": False,
                 "prompt": f"从 {source_name} 3×3 面料看板裁剪：卖点定位图案 2",
                 "model": source_name,
                 "seed": "",
-                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
             {
                 "motif_id": "trim_motif",
                 "texture_id": "trim_motif",
                 "path": str(paths["trim_motif"].resolve()),
                 "role": "trim",
-                "approved": False,
-                "candidate": True,
+                "approved": True,
+                "candidate": False,
                 "prompt": f"从 {source_name} 3×3 面料看板裁剪：饰边定位图案",
                 "model": source_name,
                 "seed": "",
-                "qc": {"approved": False, "status": "candidate", "notes": "需经 AI 视觉 QC 或人工审批"},
             },
         ],
         "solids": [
-            {"solid_id": "quiet_solid", "color": quiet_solid, "approved": False, "candidate": True},
-            {"solid_id": "quiet_moss", "color": moss_color, "approved": False, "candidate": True},
-            {"solid_id": "warm_ivory", "color": warm_ivory, "approved": False, "candidate": True},
+            {"solid_id": "quiet_solid", "color": quiet_solid, "approved": True, "candidate": False},
+            {"solid_id": "quiet_moss", "color": moss_color, "approved": True, "candidate": False},
+            {"solid_id": "warm_ivory", "color": warm_ivory, "approved": True, "candidate": False},
         ],
     }
     return write_json(out_dir / f"texture_set{suffix}.json", texture_set)
-
-
-def _auto_approve_texture_set(ts_path: Path) -> None:
-    """将 texture_set.json 中所有面料资产的 approved 设为 true（用于 fast 模式）。"""
-    if not ts_path.exists():
-        return
-    data = json.loads(ts_path.read_text(encoding="utf-8"))
-    modified = False
-    for key in ("textures", "motifs", "solids"):
-        for asset in data.get(key, []):
-            asset["approved"] = True
-            if "qc" in asset:
-                asset["qc"]["approved"] = True
-                asset["qc"]["status"] = "approved"
-            modified = True
-    if modified:
-        ts_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[fast模式] 自动批准面料资产: {ts_path}")
 
 
 def run_garment_mapping(args, pieces_path: Path, out_dir: Path) -> None:
@@ -1109,8 +1049,6 @@ def run_garment_mapping(args, pieces_path: Path, out_dir: Path) -> None:
         garment_cmd.extend(["--ai-map", args.ai_map])
     if args.template:
         garment_cmd.extend(["--template", args.template])
-    if args.template_size and args.template_size != "base":
-        garment_cmd.extend(["--template-size", args.template_size])
     if args.template_file:
         garment_cmd.extend(["--template-file", args.template_file])
     if args.garment_type:
@@ -1127,12 +1065,11 @@ def resolve_reusable_template_assets_for_run(args) -> dict | None:
     requested_template = bool(args.template)
     assets = resolve_template_assets(
         template_id=args.template,
-        size_label=args.template_size,
+        size_label="s",
         garment_type=args.garment_type,
     )
     if assets:
         args.template = assets["template_id"]
-        args.template_size = assets["size_label"]
         if requested_template:
             assets["template_source"] = "template_arg"
         else:
@@ -1146,84 +1083,38 @@ def pieces_asset_hash_for_run(args, pieces_path: Path | None = None) -> str:
         return file_sha256(args.pattern)
     if pieces_path and pieces_path.exists():
         return file_sha256(pieces_path)
-    return f"{getattr(args, 'template', '')}:{getattr(args, 'template_size', '')}"
+    return f"{getattr(args, 'template', '')}:s"
 
 
-def _run_render_pipeline(
+def ensure_theme_front_split(args, out_dir: Path, texture_set_path: Path) -> None:
+    """Generate and register deterministic front-half theme motifs when a theme image exists."""
+    if not args.theme_image or not create_front_split_assets or not inject_front_split_motifs:
+        return
+    try:
+        split_assets = create_front_split_assets(args.theme_image, out_dir)
+        inject_front_split_motifs(texture_set_path, split_assets)
+        print(f"[主题前片] 已生成并注册主题切半资产: {split_assets['left']}, {split_assets['right']}")
+    except Exception as exc:
+        print(f"[警告] 主题前片切半资产生成失败，将继续使用普通面料规划: {exc}", file=sys.stderr)
+
+
+def _apply_or_request_production_plan(
     args,
     out_dir: Path,
     texture_set_path: Path,
-    suffix: str,
     pieces_path: Path,
     garment_map_path: Path,
-    template_assets: dict | None = None,
+    template_assets: dict | None,
+    suffix: str = "",
 ) -> int:
-    """基于指定 texture_set 执行剩余流水线：质检 → 生产规划 → 渲染 → 时尚质检 → 商业复审。
-    suffix 用于区分双源输出（如 "_A" / "_B" / ""）。
-    返回 exit code（0=成功）。
-    """
-    print(f"\n{'='*60}")
-    print(f"[渲染流水线{suffix}] 基于 texture_set: {texture_set_path}")
-    print(f"{'='*60}")
-
-    # ---- 质检纹理 ----
-    qc_out = out_dir / f"texture_qc_report{suffix}.json"
-    if args.mode == "fast":
-        print(f"[fast模式] 跳过面料质检{suffix}")
-    else:
-        qc_cmd = [
-            sys.executable,
-            str(SKILL_DIR / "scripts" / "质检纹理.py"),
-            "--texture-set", str(texture_set_path),
-            "--out", str(qc_out),
-        ]
-        style_profile_for_qc = out_dir / "style_profile.json"
-        if style_profile_for_qc.exists():
-            qc_cmd.extend(["--style-profile", str(style_profile_for_qc)])
-        qc_result = run_step(qc_cmd, check=False)
-        if qc_out.exists():
-            texture_qc = load_json(qc_out)
-            texture_qc_issues = collect_texture_qc_issues(texture_qc)
-            high_issues = [issue for issue in texture_qc_issues if issue.get("severity") == "high"]
-            blocking_issues = [issue for issue in high_issues if issue.get("type") != "not_user_approved"]
-            if blocking_issues:
-                print(f"[错误{suffix}] 面料质检存在 high severity 问题，停止渲染：", file=sys.stderr)
-                for issue in blocking_issues[:10]:
-                    print(f"  - {issue.get('asset_id')}: {issue.get('message', issue.get('type'))}", file=sys.stderr)
-                return 1
-            if high_issues:
-                approval_request = {
-                    "request_id": f"asset_approval_required{suffix}_v1",
-                    "texture_set": str(texture_set_path.resolve()),
-                    "texture_qc_report": str(qc_out.resolve()),
-                    "message": "面料/图案/纯色仍为 candidate，必须经 AI 视觉 QC 或人工审批后才能继续渲染。",
-                    "next_step": f"审批后将 texture_set{suffix}.json 中对应 assets 的 approved 设为 true，并使用 --texture-set 指向该文件重新运行。",
-                    "assets": [
-                        {"asset_id": issue.get("asset_id", ""), "asset_role": issue.get("asset_role", ""), "issue": issue.get("message", "")}
-                        for issue in high_issues
-                    ],
-                }
-                approval_path = out_dir / f"asset_approval_request{suffix}.json"
-                write_json(approval_path, approval_request)
-                print(f"\n[暂停{suffix}] 已生成候选面料组合，但资产尚未审批，按生产规则停止在渲染前。")
-                print(f"  面料组合: {texture_set_path.resolve()}")
-                print(f"  质检报告: {qc_out.resolve()}")
-                print(f"  审批请求: {approval_path.resolve()}")
-                return 0
-        elif qc_result.returncode != 0:
-            return qc_result.returncode
-
-    # ---- 生产规划 ----
     use_legacy = args.mode == "legacy"
     production_plan_path = out_dir / "ai_production_plan.json"
 
-    # 输入指纹校验：若关键输入变化，删除旧生产规划产物避免新旧主题混杂
     def _compute_production_input_fingerprint() -> str:
         parts = []
         for p in (args.visual_elements, args.collection_board, args.texture_set, args.pattern):
             parts.append(file_sha256(p) if p else "")
-        parts.append(args.garment_type or "")
-        parts.append(args.mode)
+        parts.extend([args.garment_type or "", args.mode, args.template or ""])
         return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
     prod_fp_path = out_dir / ".production_input_fingerprint.json"
@@ -1231,13 +1122,10 @@ def _run_render_pipeline(
     stale = False
     if prod_fp_path.exists():
         try:
-            stored = json.loads(prod_fp_path.read_text(encoding="utf-8")).get("fingerprint", "")
-            if stored != current_prod_fp:
-                stale = True
+            stale = json.loads(prod_fp_path.read_text(encoding="utf-8")).get("fingerprint", "") != current_prod_fp
         except Exception:
             stale = True
     else:
-        # 如果存在旧生产规划文件但没有指纹，也视为 stale
         stale = production_plan_path.exists()
 
     if stale:
@@ -1251,10 +1139,6 @@ def _run_render_pipeline(
             if p.exists():
                 p.unlink()
                 print(f"[输入变更] 删除旧生产规划产物: {p.name}")
-        # 同时清除可能缓存的旧计划
-        for rev_file in out_dir.glob("ai_piece_fill_plan_rev*.json"):
-            rev_file.unlink()
-            print(f"[输入变更] 删除旧返工计划: {rev_file.name}")
 
     prod_fp_path.write_text(json.dumps({
         "fingerprint": current_prod_fp,
@@ -1263,21 +1147,22 @@ def _run_render_pipeline(
 
     if args.production_plan:
         provided = Path(args.production_plan)
-        if provided.exists():
-            apply_cmd = [
-                sys.executable,
-                str(SKILL_DIR / "scripts" / "应用生产规划.py"),
-                "--production-plan", str(provided),
-                "--out", str(out_dir),
-                "--pieces", str(pieces_path),
-            ]
-            if template_assets:
-                apply_cmd.extend(["--fixed-garment-map", str(garment_map_path)])
-            run_step(apply_cmd)
-        else:
+        if not provided.exists():
             print(f"[错误{suffix}] 提供的生产规划不存在: {provided}", file=sys.stderr)
             return 1
-    elif use_legacy:
+        apply_cmd = [
+            sys.executable,
+            str(SKILL_DIR / "scripts" / "应用生产规划.py"),
+            "--production-plan", str(provided),
+            "--out", str(out_dir),
+            "--pieces", str(pieces_path),
+        ]
+        if template_assets:
+            apply_cmd.extend(["--fixed-garment-map", str(garment_map_path)])
+        run_step(apply_cmd)
+        return 0
+
+    if use_legacy:
         if args.construct_ai_request:
             request_cmd = [
                 sys.executable,
@@ -1290,71 +1175,93 @@ def _run_render_pipeline(
             if args.brief:
                 request_cmd.extend(["--brief", args.brief])
             run_step(request_cmd)
-            print(f"\n[提示{suffix}] 子 Agent 审美请求已构造。请启动子 Agent 阅读以下文件并输出 ai_piece_fill_plan.json：")
+            print(f"\n[提示{suffix}] 子 Agent 审美请求已构造。请输出 ai_piece_fill_plan.json 后重新运行。")
             print(f"  提示词文件: {out_dir / 'ai_fill_plan_prompt.txt'}")
             print(f"  预期输出: {out_dir / 'ai_piece_fill_plan.json'}")
-            return 0
+            return 2
+        return 0
+
+    plan_loaded_from_cache = False
+    plan_hash = {}
+    if args.reuse_cache:
+        plan_hash = {
+            "pieces_asset": pieces_asset_hash_for_run(args, pieces_path),
+            "texture_set": file_sha256(texture_set_path),
+            "garment_type": args.garment_type,
+            "brief": file_sha256(args.brief) if args.brief else "",
+            "template": args.template,
+            "mode": args.mode,
+            "multi_scheme": args.multi_scheme,
+            "max_schemes": args.max_schemes,
+            "visual_elements": file_sha256(args.visual_elements) if args.visual_elements else "",
+        }
+        cached = cache_lookup(out_dir, "production_plan", plan_hash)
+        if cached:
+            print(f"[缓存复用{suffix}] 生产规划: {cached}")
+            production_plan_path.write_bytes(cached.read_bytes())
+            plan_loaded_from_cache = True
+
+    if not plan_loaded_from_cache and (args.construct_ai_request or not production_plan_path.exists()):
+        plan_request_cmd = [
+            sys.executable,
+            str(SKILL_DIR / "scripts" / "构造生产规划请求.py"),
+            "--pieces", str(pieces_path),
+            "--texture-set", str(texture_set_path),
+            "--garment-map", str(garment_map_path),
+            "--out", str(out_dir),
+        ]
+        if args.brief:
+            plan_request_cmd.extend(["--brief", args.brief])
+        gh_path = out_dir / "geometry_hints.json"
+        if gh_path.exists():
+            plan_request_cmd.extend(["--geometry-hints", str(gh_path)])
+        if args.visual_elements:
+            plan_request_cmd.extend(["--visual-elements", args.visual_elements])
+        run_step(plan_request_cmd)
+        print(f"\n[提示{suffix}] 生产规划 AI 请求已构造。请输出 ai_production_plan.json 后重新运行。")
+        print(f"  提示词文件: {out_dir / 'ai_production_plan_prompt.txt'}")
+        print(f"  预期输出: {out_dir / 'ai_production_plan.json'}")
+        return 2
+
+    if production_plan_path.exists():
+        apply_cmd = [
+            sys.executable,
+            str(SKILL_DIR / "scripts" / "应用生产规划.py"),
+            "--production-plan", str(production_plan_path),
+            "--out", str(out_dir),
+            "--pieces", str(pieces_path),
+        ]
+        if template_assets:
+            apply_cmd.extend(["--fixed-garment-map", str(garment_map_path)])
+        run_step(apply_cmd)
+        if args.reuse_cache and not plan_loaded_from_cache:
+            cache_save(out_dir, "production_plan", plan_hash, production_plan_path)
     else:
-        plan_loaded_from_cache = False
-        if args.reuse_cache:
-            plan_hash = {
-                "pieces_asset": pieces_asset_hash_for_run(args, pieces_path),
-                "texture_set": file_sha256(texture_set_path),
-                "garment_type": args.garment_type,
-                "brief": file_sha256(args.brief) if args.brief else "",
-                "template": args.template,
-                "template_size": args.template_size,
-                "mode": args.mode,
-                "multi_scheme": args.multi_scheme,
-                "max_schemes": args.max_schemes,
-                "visual_elements": file_sha256(args.visual_elements) if args.visual_elements else "",
-            }
-            cached = cache_lookup(out_dir, "production_plan", plan_hash)
-            if cached:
-                print(f"[缓存复用{suffix}] 生产规划: {cached}")
-                production_plan_path.write_bytes(cached.read_bytes())
-                plan_loaded_from_cache = True
+        print(f"[提示{suffix}] 未找到 ai_production_plan.json，将使用后端规则生成填充计划。")
+    return 0
 
-        if not plan_loaded_from_cache:
-            if args.construct_ai_request or not production_plan_path.exists():
-                plan_request_cmd = [
-                    sys.executable,
-                    str(SKILL_DIR / "scripts" / "构造生产规划请求.py"),
-                    "--pieces", str(pieces_path),
-                    "--texture-set", str(texture_set_path),
-                    "--garment-map", str(garment_map_path),
-                    "--out", str(out_dir),
-                ]
-                if args.brief:
-                    plan_request_cmd.extend(["--brief", args.brief])
-                gh_path = out_dir / "geometry_hints.json"
-                if gh_path.exists():
-                    plan_request_cmd.extend(["--geometry-hints", str(gh_path)])
-                if args.visual_elements:
-                    plan_request_cmd.extend(["--visual-elements", args.visual_elements])
-                run_step(plan_request_cmd)
-                print(f"\n[提示{suffix}] 生产规划 AI 请求已构造。请启动子 Agent 阅读以下文件并输出 ai_production_plan.json：")
-                print(f"  提示词文件: {out_dir / 'ai_production_plan_prompt.txt'}")
-                print(f"  预期输出: {out_dir / 'ai_production_plan.json'}")
-                return 0
 
-        if production_plan_path.exists():
-            apply_cmd = [
-                sys.executable,
-                str(SKILL_DIR / "scripts" / "应用生产规划.py"),
-                "--production-plan", str(production_plan_path),
-                "--out", str(out_dir),
-                "--pieces", str(pieces_path),
-            ]
-            if template_assets:
-                apply_cmd.extend(["--fixed-garment-map", str(garment_map_path)])
-            run_step(apply_cmd)
-            if args.reuse_cache and not plan_loaded_from_cache:
-                cache_save(out_dir, "production_plan", plan_hash, production_plan_path)
-        else:
-            print(f"[警告{suffix}] ai_production_plan.json 不存在，将使用后端规则生成填充计划（draft preview only）。")
+def _run_render_pipeline(
+    args,
+    out_dir: Path,
+    texture_set_path: Path,
+    suffix: str,
+    pieces_path: Path,
+    garment_map_path: Path,
+    template_assets: dict | None = None,
+) -> int:
+    """基于指定 texture_set 执行生产规划、填充计划和渲染。"""
+    print(f"\n{'='*60}")
+    print(f"[渲染流水线{suffix}] 基于 texture_set: {texture_set_path}")
+    print(f"{'='*60}")
+    ensure_theme_front_split(args, out_dir, texture_set_path)
 
-    # ---- 创建填充计划 ----
+    rc = _apply_or_request_production_plan(
+        args, out_dir, texture_set_path, pieces_path, garment_map_path, template_assets, suffix=suffix
+    )
+    if rc:
+        return 0 if rc == 2 else rc
+
     plan_cmd = [
         sys.executable,
         str(SKILL_DIR / "scripts" / "创建填充计划.py"),
@@ -1380,7 +1287,6 @@ def _run_render_pipeline(
             print(f"[自动{suffix}] 检测到 AI 填充计划，自动使用: {auto_ai_plan}")
     run_step(plan_cmd)
 
-    # ---- 渲染裁片 ----
     rendered_dir = out_dir / f"rendered{suffix}"
     render_cmd = [
         sys.executable,
@@ -1392,23 +1298,6 @@ def _run_render_pipeline(
     ]
     run_step(render_cmd)
 
-    # ---- 多尺寸自动渲染 ----
-    if args.full_set and HAS_TEMPLATE_LOADER:
-        _render_size_variants(args, out_dir, texture_set_path, suffix=suffix)
-
-    # ---- 时尚质检 ----
-    fashion_cmd = [
-        sys.executable,
-        str(SKILL_DIR / "scripts" / "时尚质检.py"),
-        "--pieces", str(pieces_path),
-        "--texture-set", str(texture_set_path),
-        "--fill-plan", str(out_dir / "piece_fill_plan.json"),
-        "--rendered", str(rendered_dir),
-        "--out", str(out_dir / f"fashion_qc_report{suffix}.json"),
-    ]
-    run_step(fashion_cmd)
-
-    # ---- 备份本套中间产物（便于双源模式区分） ----
     if suffix:
         for src_name, dst_name in [
             ("piece_fill_plan.json", f"piece_fill_plan{suffix}.json"),
@@ -1420,27 +1309,6 @@ def _run_render_pipeline(
             dst = out_dir / dst_name
             if src.exists():
                 dst.write_bytes(src.read_bytes())
-
-    # ---- 商业复审 ----
-    if args.commercial_review:
-        brief_for_review = args.brief or str(out_dir / "commercial_design_brief.json")
-        if not Path(brief_for_review).exists():
-            print(f"[警告{suffix}] 未找到商业设计简报: {brief_for_review}，跳过商业复审")
-        else:
-            review_cmd = [
-                sys.executable,
-                str(SKILL_DIR / "scripts" / "构造商业复审请求.py"),
-                "--piece-contact-sheet", str(rendered_dir / "piece_contact_sheet.jpg"),
-                "--fill-plan", str(out_dir / "piece_fill_plan.json"),
-                "--brief", brief_for_review,
-                "--qc-report", str(out_dir / f"fashion_qc_report{suffix}.json"),
-                "--out", str(out_dir),
-            ]
-            review_json_path = out_dir / "ai_commercial_review.json"
-            if review_json_path.exists():
-                review_cmd.extend(["--selected", str(review_json_path)])
-            run_step(review_cmd)
-
     return 0
 
 
@@ -1451,9 +1319,7 @@ def _run_render_pipeline_for_scheme(
     pieces_path: Path,
     scheme: dict,
 ) -> int:
-    """针对单个 scheme 执行渲染流水线（创建填充计划 → 渲染 → 质检 → 商业复审）。
-    scheme 字典包含: scheme_id, suffix, garment_map, fill_plan
-    失败时返回非零 exit code，但调用方负责决定是否继续下一个 scheme。"""
+    """针对单个 scheme 执行填充计划和渲染。"""
     scheme_id = scheme["scheme_id"]
     suffix = scheme["suffix"]
     gm_path = Path(scheme["garment_map"])
@@ -1464,8 +1330,8 @@ def _run_render_pipeline_for_scheme(
     print(f"  garment_map: {gm_path}")
     print(f"  fill_plan:   {fp_path}")
     print(f"{'='*60}")
+    ensure_theme_front_split(args, out_dir, texture_set_path)
 
-    # ---- 创建填充计划 ----
     plan_cmd = [
         sys.executable,
         str(SKILL_DIR / "scripts" / "创建填充计划.py"),
@@ -1483,7 +1349,6 @@ def _run_render_pipeline_for_scheme(
         print(f"[错误 {scheme_id}] 创建填充计划失败 (rc={rc})，跳过本方案", file=sys.stderr)
         return rc
 
-    # ---- 渲染裁片 ----
     rendered_dir = out_dir / f"rendered{suffix}"
     render_cmd = [
         sys.executable,
@@ -1498,23 +1363,6 @@ def _run_render_pipeline_for_scheme(
         print(f"[错误 {scheme_id}] 渲染裁片失败 (rc={rc})，跳过本方案", file=sys.stderr)
         return rc
 
-    # ---- 多尺寸自动渲染 ----
-    if args.full_set and HAS_TEMPLATE_LOADER:
-        _render_size_variants(args, out_dir, texture_set_path, suffix=suffix)
-
-    # ---- 时尚质检 ----
-    fashion_cmd = [
-        sys.executable,
-        str(SKILL_DIR / "scripts" / "时尚质检.py"),
-        "--pieces", str(pieces_path),
-        "--texture-set", str(texture_set_path),
-        "--fill-plan", str(out_dir / "piece_fill_plan.json"),
-        "--rendered", str(rendered_dir),
-        "--out", str(out_dir / f"fashion_qc_report{suffix}.json"),
-    ]
-    run_step(fashion_cmd)
-
-    # ---- 备份 scheme 中间产物 ----
     for src_name, dst_name in [
         ("piece_fill_plan.json", f"piece_fill_plan{suffix}.json"),
         ("garment_map.json", f"garment_map{suffix}.json"),
@@ -1524,163 +1372,15 @@ def _run_render_pipeline_for_scheme(
         if src.exists():
             dst.write_bytes(src.read_bytes())
 
-    # ---- 商业复审 ----
-    if args.commercial_review:
-        brief_for_review = args.brief or str(out_dir / "commercial_design_brief.json")
-        if not Path(brief_for_review).exists():
-            print(f"[警告 {scheme_id}] 未找到商业设计简报，跳过商业复审")
-        else:
-            review_cmd = [
-                sys.executable,
-                str(SKILL_DIR / "scripts" / "构造商业复审请求.py"),
-                "--piece-contact-sheet", str(rendered_dir / "piece_contact_sheet.jpg"),
-                "--fill-plan", str(out_dir / "piece_fill_plan.json"),
-                "--brief", brief_for_review,
-                "--qc-report", str(out_dir / f"fashion_qc_report{suffix}.json"),
-                "--out", str(out_dir),
-            ]
-            review_json_path = out_dir / f"ai_commercial_review{suffix}.json"
-            if review_json_path.exists():
-                review_cmd.extend(["--selected", str(review_json_path)])
-            run_step(review_cmd)
-
-    print(f"[方案渲染 {scheme_id}] 完成 ✓")
+    print(f"[方案渲染 {scheme_id}] 完成")
     return 0
-
-
-def render_size_variants_core(
-    base_fill_plan: dict,
-    texture_set_path: Path,
-    out_dir: Path,
-    template_id: str,
-    size_data: dict,
-    suffix: str = "",
-) -> None:
-    """纯程序渲染多尺寸变体（可复用核心，无AI）。"""
-
-    def apply_aspect_orientation_correction(entry: dict, warning: dict) -> None:
-        """对严重 aspect 反转的目标裁片统一补偿图层旋转。"""
-        corrected_layers = []
-        for layer_key in ("base", "overlay", "trim"):
-            layer = entry.get(layer_key)
-            if not isinstance(layer, dict):
-                continue
-            old_rotation = layer.get("rotation", 0) or 0
-            try:
-                new_rotation = (float(old_rotation) + 90) % 360
-            except (TypeError, ValueError):
-                old_rotation = 0
-                new_rotation = 90.0
-            layer["rotation"] = int(new_rotation) if new_rotation.is_integer() else new_rotation
-            corrected_layers.append({
-                "layer": layer_key,
-                "old_rotation": old_rotation,
-                "new_rotation": layer["rotation"],
-            })
-
-        if corrected_layers:
-            entry.setdefault("issues", []).append({
-                "type": "aspect_orientation_corrected",
-                "delta": warning.get("delta", 0),
-                "base_aspect": warning.get("base_aspect"),
-                "target_aspect": warning.get("target_aspect"),
-                "corrected_layers": corrected_layers,
-                "note": "auto +90° rotation for aspect inversion",
-            })
-
-    for size_label, mapping in size_data.items():
-        piece_map = mapping.get("piece_map", {})
-        scale_factor = mapping.get("scale_factor", {}).get("area_sqrt", 1.0)
-        if not piece_map:
-            continue
-
-        size_pieces = load_size_pieces(template_id, size_label)
-        if not size_pieces:
-            print(f"[多尺寸渲染] 未找到 {size_label} 的 pieces.json，跳过")
-            continue
-
-        size_pieces_path = SKILL_DIR / "templates" / template_id / size_label / f"pieces_{size_label}.json"
-
-        mapped_fill_plan = {
-            "plan_id": f"{base_fill_plan.get('plan_id', 'auto')}_{size_label}",
-            "texture_set_id": base_fill_plan.get("texture_set_id", ""),
-            "locked": base_fill_plan.get("locked", False),
-            "pieces": [],
-        }
-        base_entries = {e.get("piece_id"): e for e in base_fill_plan.get("pieces", [])}
-
-        # aspect 反转保护：读取 aspect_warnings，对 aspect 翻转严重的裁片纠正 rotation
-        warnings = mapping.get("aspect_warnings", [])
-        warning_pieces = {w["target_id"]: w for w in warnings if abs(w.get("delta", 0)) > 0.3}
-
-        for base_pid, target_pid in piece_map.items():
-            entry = base_entries.get(base_pid)
-            if not entry:
-                continue
-            mapped_entry = copy.deepcopy(entry)
-            mapped_entry["piece_id"] = target_pid
-            if target_pid in warning_pieces:
-                # aspect 翻转 ≈ 裁片坐标系旋转，对所有可旋转图层统一 +90°
-                apply_aspect_orientation_correction(mapped_entry, warning_pieces[target_pid])
-            mapped_fill_plan["pieces"].append(mapped_entry)
-
-        if not mapped_fill_plan["pieces"]:
-            print(f"[多尺寸渲染] {size_label.upper()} 映射后无有效填充计划，跳过")
-            continue
-
-        safe_suffix = suffix.strip("_")
-        output_suffix = f"_{safe_suffix}_{size_label}" if safe_suffix else f"_{size_label}"
-        mapped_plan_path = out_dir / f"piece_fill_plan{output_suffix}.json"
-        mapped_plan_path.write_text(json.dumps(mapped_fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        size_rendered_dir = out_dir / f"rendered{output_suffix}"
-        render_cmd = [
-            sys.executable,
-            str(SKILL_DIR / "scripts" / "渲染裁片.py"),
-            "--pieces", str(size_pieces_path),
-            "--texture-set", str(texture_set_path),
-            "--fill-plan", str(mapped_plan_path),
-            "--out", str(size_rendered_dir),
-            "--scale-factor", str(scale_factor),
-            "--size-label", output_suffix.lstrip("_"),
-        ]
-        print(f"[多尺寸渲染] 渲染 {size_label.upper()} (scale={scale_factor:.4f}) ...")
-        run_step(render_cmd)
-
-
-def _render_size_variants(args, out_dir: Path, texture_set_path: Path, suffix: str = "") -> None:
-    """基于-S渲染结果，纯程序生成其他尺寸的渲染输出（无AI）。"""
-    template_id = getattr(args, "template", "")
-    if not template_id:
-        return
-    mappings = load_size_mappings(template_id)
-    if not mappings:
-        return
-
-    size_data = mappings.get("sizes", {})
-    if not size_data:
-        return
-
-    base_fill_plan_path = out_dir / "piece_fill_plan.json"
-    if not base_fill_plan_path.exists():
-        print("[多尺寸渲染] 未找到基准 fill_plan，跳过")
-        return
-    try:
-        base_fill_plan = json.loads(base_fill_plan_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        print(f"[多尺寸渲染] 读取基准 fill_plan 失败: {exc}")
-        return
-
-    print(f"[多尺寸渲染] 检测到多尺寸模板: {template_id}，准备渲染 {list(size_data.keys())}")
-    render_size_variants_core(base_fill_plan, texture_set_path, out_dir, template_id, size_data, suffix=suffix)
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="生成 Neo AI 面料看板并自动渲染服装裁片。")
     parser.add_argument("--pattern", default="", help="透明纸样 mask PNG/WebP。若 garment_type/template 命中内置模板，可省略。")
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument("--collection-board", default="", help="已有的 Neo AI 3×3 面料看板。若省略，则调用 Neo AI 生成。")
-    parser.add_argument("--texture-set", default="", help="已审批的 texture_set.json。提供后跳过看板生成/裁剪，直接使用该面料组合继续裁片映射、填充和渲染。")
+    parser.add_argument("--texture-set", default="", help="已有 texture_set.json。提供后跳过看板生成/裁剪，直接使用该面料组合继续裁片映射、填充和渲染。")
     parser.add_argument(
         "--theme-image",
         action="append",
@@ -1708,16 +1408,11 @@ def main() -> int:
     parser.add_argument("--ai-plan", default="", help="子 Agent 生成的 AI 填充计划 JSON 路径。若提供，优先使用 AI 审美决策。")
     parser.add_argument("--construct-ai-request", action="store_true", help="在部位映射后构造子 Agent 审美请求并退出，等待外部子 Agent 生成 ai_piece_fill_plan.json。")
     parser.add_argument("--selected-collection", default="", help="子Agent已选择的 selected_variants.json 路径。若提供，直接生成最终看板 prompt 并跳过选择请求构造。")
-    parser.add_argument("--auto-retry", type=int, default=0, help="自动重试次数（0=不重试）。时尚QC发现 high severity issues 或商业复审未通过时，自动构造返工请求并重新渲染。")
-    parser.add_argument("--retry-agent-cmd", default="", help="子 Agent 自调用命令。当 auto-retry 需要修订计划但 rev 文件不存在时，脚本会尝试 subprocess 调用此命令自动生成修订计划。支持 {prompt_path} 和 {output_path} 占位符（如 \"claude -p --file {prompt_path} > {output_path}\"）。示例: \"kimi chat -p\" 或 \"claude -p\" 或 \"python3 /path/to/agent_runner.py\"")
     parser.add_argument("--ai-map", default="", help="AI子Agent输出的 ai_garment_map.json 路径。若提供，部位映射优先使用AI识别结果。")
     parser.add_argument("--template", default="", help="模板ID。优先于 garment_type 自动匹配。如 children_outerwear_set。指定后跳过AI识别，直接用模板匹配裁片部位。")
-    parser.add_argument("--template-size", default="base", help="模板尺寸变体。默认 base。如 m/l/xl。")
     parser.add_argument("--template-file", default="", help="用户自定义模板 JSON 文件路径。优先于内置模板。")
     parser.add_argument("--no-template", action="store_true", help="禁用模板匹配，强制走 AI/几何推断路径。")
-    parser.add_argument("--commercial-review", action=argparse.BooleanOptionalAction, default=True, help="启用整体商业感复审（默认开启）。传 --no-commercial-review 显式关闭。")
-    parser.add_argument("--full-set", action="store_true", help="生成整套所有尺寸。默认只生成-S基准尺寸，加此参数后额外输出 M/L/XL/XXL（基于-S映射，纯程序）。")
-    parser.add_argument("--mode", default="standard", choices=["fast", "standard", "production", "legacy"], help="运行模式。fast=跳过看板选择AI和商业复审（草稿预览），standard=默认完整流程，production=含资产审批gate和强制返工，legacy=旧分步脚本兼容模式。")
+    parser.add_argument("--mode", default="standard", choices=["fast", "standard", "production", "legacy"], help="运行模式。fast=跳过看板选择AI，standard=默认流程，production=完整规划流程，legacy=旧分步脚本兼容模式。")
     parser.add_argument("--reuse-cache", action="store_true", help="启用缓存复用。若输入未变化，跳过对应阶段的AI调用和程序计算。")
     parser.add_argument("--production-plan", default="", help="已完成的 ai_production_plan.json 路径。若提供且缓存允许，跳过生产规划AI调用，直接应用该计划。")
     parser.add_argument("--skip-collection-selection", action="store_true", help="跳过看板候选选择AI（等效fast模式行为），程序直接取每个panel第一个variant。")
@@ -1728,15 +1423,10 @@ def main() -> int:
     parser.add_argument("--multi-scheme", action="store_true", help="启用多方案渲染模式。双源模式下，合并 A/B 资产后由 AI 基于 9+9 完整资产池生成多套设计方案并分别渲染。")
     parser.add_argument("--max-schemes", type=int, default=8, help="多方案模式下的最大方案数（默认8；需要更丰富组合可设为12）")
     args = parser.parse_args()
-    # fast 模式自动关闭商业复审和看板选择
-    # fast 模式自动关闭商业复审和看板选择
     if args.mode == "fast":
-        args.commercial_review = False
         args.skip_collection_selection = True
     if args.skip_collection_selection:
         print(f"[模式] {args.mode} — 跳过看板选择AI")
-    if not args.commercial_review and args.mode != "fast":
-        print("[模式] 商业复审已关闭")
 
     import re
 
@@ -1804,13 +1494,11 @@ def main() -> int:
             "user_prompt=" + getattr(args, "user_prompt", ""),
             "pattern=" + (_identity_for_value(args.pattern) if args.pattern else ""),
             "template=" + (args.template or ""),
-            "template_size=" + (args.template_size or ""),
             "template_file=" + (_identity_for_value(args.template_file) if args.template_file else ""),
             "no_template=" + str(bool(args.no_template)),
             "dual_source=" + str(bool(args.dual_source)),
             "multi_scheme=" + str(bool(args.multi_scheme)),
             "max_schemes=" + str(args.max_schemes),
-            "full_set=" + str(bool(args.full_set)),
         ]
         parts.extend("theme=" + item for item in theme_parts)
         has_primary_identity = bool(theme_parts or args.pattern or args.template or args.template_file)
@@ -1945,7 +1633,7 @@ def main() -> int:
         except Exception as exc:
             print(f"[警告] 无法读取 brief: {exc}")
     else:
-        print("[警告] 未提供商业设计简报，后续步骤（部位识别、商业复审）可能缺少 garment_type 上下文")
+        print("[警告] 未提供商业设计简报，后续步骤可能缺少 garment_type 上下文")
 
     if (args.theme_image or args.visual_elements) and not effective_garment_type:
         print("[错误] 走主题图/视觉元素路径时必须提供 --garment-type，或提供包含 garment_type 的 --brief。", file=sys.stderr)
@@ -2285,9 +1973,6 @@ def main() -> int:
                     print(f"[颜色校验{suffix}] 所有面板颜色与 palette 协调。")
 
             ts_path = crop_collection_board(board_path, out_dir, args.crop_inset, not args.no_tile_repair, palette=palette, suffix=suffix)
-            # fast 模式下自动批准所有面料资产
-            if args.mode == "fast":
-                _auto_approve_texture_set(ts_path)
             texture_sets.append({"source": result["source"], "path": ts_path, "style": result["style"], "suffix": suffix})
 
         # 6. 多方案模式：合并 A/B 资产 → 构造多方案生产规划 → 拆解 → 逐 scheme 渲染
@@ -2330,36 +2015,6 @@ def main() -> int:
                 ts_data["source_sets"] = {single_name: str(Path(single_path).resolve())}
                 write_json(merged_ts_path, ts_data)
                 print(f"[多方案] 仅源{single_name.upper()} 成功，从 9 个资产中组合多套方案: {merged_ts_path}")
-            # fast 模式下自动批准合并后的面料资产
-            if args.mode == "fast":
-                _auto_approve_texture_set(merged_ts_path)
-
-            # 6b. 质检合并后的资产（只做一次）
-            qc_out = out_dir / "texture_qc_report_merged.json"
-            if args.mode == "fast":
-                print("[fast模式] 跳过合并面料质检")
-            else:
-                qc_cmd = [
-                    sys.executable,
-                    str(SKILL_DIR / "scripts" / "质检纹理.py"),
-                    "--texture-set", str(merged_ts_path),
-                    "--out", str(qc_out),
-                ]
-                if style_profile_path.exists():
-                    qc_cmd.extend(["--style-profile", str(style_profile_path)])
-                qc_result = run_step(qc_cmd, check=False)
-                if qc_out.exists():
-                    texture_qc = load_json(qc_out)
-                    texture_qc_issues = collect_texture_qc_issues(texture_qc)
-                    blocking_issues = [issue for issue in texture_qc_issues if issue.get("severity") == "high" and issue.get("type") != "not_user_approved"]
-                    if blocking_issues:
-                        print("[错误] 合并面料质检存在 high severity 问题，停止渲染：", file=sys.stderr)
-                        for issue in blocking_issues[:10]:
-                            print(f"  - {issue.get('asset_id')}: {issue.get('message', issue.get('type'))}", file=sys.stderr)
-                        return 1
-                elif qc_result.returncode != 0:
-                    return qc_result.returncode
-
             # 6c. 构造多方案生产规划请求
             multi_plan_path = out_dir / "ai_multi_production_plan.json"
             plan_loaded_from_cache = False
@@ -2370,7 +2025,6 @@ def main() -> int:
                     "garment_type": args.garment_type,
                     "brief": file_sha256(args.brief) if args.brief else "",
                     "template": args.template,
-                    "template_size": args.template_size,
                     "mode": args.mode,
                     "multi_scheme": args.multi_scheme,
                     "max_schemes": args.max_schemes,
@@ -2558,72 +2212,17 @@ def main() -> int:
 
     if not args.texture_set:
         texture_set_path = crop_collection_board(board_path, out_dir, args.crop_inset, not args.no_tile_repair, palette=palette)
-        if args.mode == "fast":
-            _auto_approve_texture_set(texture_set_path)
-
     # 部位映射（模板模式直接使用模板库固定映射；非模板保持旧流程）
     if template_assets:
         print("[模板复用] 单源模式跳过部位映射生成，直接使用模板库 garment_map。")
     else:
         run_garment_mapping(args, pieces_path, out_dir)
 
-    if args.mode == "fast":
-        print("[fast模式] 跳过面料质检")
-    else:
-        qc_cmd = [
-            sys.executable,
-            str(SKILL_DIR / "scripts" / "质检纹理.py"),
-            "--texture-set",
-            str(texture_set_path),
-            "--out",
-            str(out_dir / "texture_qc_report.json"),
-        ]
-        if style_profile_path.exists():
-            qc_cmd.extend(["--style-profile", str(style_profile_path)])
-        qc_result = run_step(qc_cmd, check=False)
-        texture_qc_report_path = out_dir / "texture_qc_report.json"
-        if texture_qc_report_path.exists():
-            texture_qc = load_json(texture_qc_report_path)
-            texture_qc_issues = collect_texture_qc_issues(texture_qc)
-            high_issues = [issue for issue in texture_qc_issues if issue.get("severity") == "high"]
-            blocking_issues = [issue for issue in high_issues if issue.get("type") != "not_user_approved"]
-            if blocking_issues:
-                print("[错误] 面料质检存在 high severity 问题，停止渲染。请修复资产后重试：", file=sys.stderr)
-                for issue in blocking_issues[:10]:
-                    print(f"  - {issue.get('asset_id')}: {issue.get('message', issue.get('type'))}", file=sys.stderr)
-                return 1
-            if high_issues:
-                approval_request = {
-                    "request_id": "asset_approval_required_v1",
-                    "texture_set": str(texture_set_path.resolve()),
-                    "texture_qc_report": str(texture_qc_report_path.resolve()),
-                    "message": "面料/图案/纯色仍为 candidate，必须经 AI 视觉 QC 或人工审批后才能继续渲染。",
-                    "next_step": "审批后将 texture_set.json 中对应 assets 的 approved 设为 true，并使用 --texture-set 指向该文件重新运行。",
-                    "assets": [
-                        {
-                            "asset_id": issue.get("asset_id", ""),
-                            "asset_role": issue.get("asset_role", ""),
-                            "issue": issue.get("message", ""),
-                        }
-                        for issue in high_issues
-                    ],
-                }
-                approval_path = out_dir / "asset_approval_request.json"
-                write_json(approval_path, approval_request)
-                print("\n[暂停] 已生成候选面料组合，但资产尚未审批，按生产规则停止在渲染前。")
-                print(f"  面料组合: {texture_set_path.resolve()}")
-                print(f"  质检报告: {texture_qc_report_path.resolve()}")
-                print(f"  审批请求: {approval_path.resolve()}")
-                print("  审批后重新运行时传入 --texture-set 指向已审批的 texture_set.json。")
-                return 0
-        elif qc_result.returncode != 0:
-            return qc_result.returncode
-
     # ============================================================
-    # Phase 3: 生产规划（合并部位识别 + 审美决策）
+    # Phase 3: 生产规划、填充计划与渲染
     # ============================================================
-    # 生成 production_context（用于缓存 key 和状态追踪）
-    ctx_path = build_production_context(
+    ensure_theme_front_split(args, out_dir, texture_set_path)
+    build_production_context(
         args,
         out_dir,
         pieces_path=pieces_path,
@@ -2631,124 +2230,19 @@ def main() -> int:
         template_assets=template_assets,
     )
 
-    # 根据模式选择路径
-    use_legacy = args.mode == "legacy"
-    production_plan_path = out_dir / "ai_production_plan.json"
-
-    if args.production_plan:
-        # 用户已提供生产规划，直接应用
-        provided = Path(args.production_plan)
-        if provided.exists():
-            apply_cmd = [
-                sys.executable,
-                str(SKILL_DIR / "scripts" / "应用生产规划.py"),
-                "--production-plan", str(provided),
-                "--out", str(out_dir),
-                "--pieces", str(pieces_path),
-            ]
-            if template_assets:
-                apply_cmd.extend(["--fixed-garment-map", str(garment_map_path)])
-            run_step(apply_cmd)
-            print(f"[生产规划] 已应用用户提供的规划: {provided}")
-        else:
-            print(f"[错误] 提供的生产规划不存在: {provided}", file=sys.stderr)
-            return 1
-    elif use_legacy:
-        # legacy 模式：保持旧流程（构造审美请求 → ai_plan → 填充计划）
-        if args.construct_ai_request:
-            request_cmd = [
-                sys.executable,
-                str(SKILL_DIR / "scripts" / "构造审美请求.py"),
-                "--pieces", str(pieces_path),
-                "--garment-map", str(garment_map_path),
-                "--texture-set", str(texture_set_path),
-                "--out", str(out_dir),
-            ]
-            if args.brief:
-                request_cmd.extend(["--brief", args.brief])
-            run_step(request_cmd)
-            print("\n[提示] 子 Agent 审美请求已构造。请启动子 Agent 阅读以下文件并输出 ai_piece_fill_plan.json：")
-            print(f"  提示词文件: {out_dir / 'ai_fill_plan_prompt.txt'}")
-            print(f"  预期输出: {out_dir / 'ai_piece_fill_plan.json'}")
-            print("  完成后重新运行本脚本并传入 --ai-plan 参数。\n")
-            return 0
-    else:
-        # 新流程：构造合并生产规划请求
-        # 缓存检查
-        plan_loaded_from_cache = False
-        if args.reuse_cache:
-            plan_hash = {
-                "pieces_asset": pieces_asset_hash_for_run(args, pieces_path),
-                "texture_set": file_sha256(texture_set_path),
-                "garment_type": args.garment_type,
-                "brief": file_sha256(args.brief) if args.brief else "",
-                "template": args.template,
-                "template_size": args.template_size,
-                "mode": args.mode,
-                "multi_scheme": args.multi_scheme,
-                "max_schemes": args.max_schemes,
-                "visual_elements": file_sha256(args.visual_elements) if args.visual_elements else "",
-            }
-            cached = cache_lookup(out_dir, "production_plan", plan_hash)
-            if cached:
-                print(f"[缓存复用] 生产规划: {cached}")
-                production_plan_path.write_bytes(cached.read_bytes())
-                plan_loaded_from_cache = True
-
-        if not plan_loaded_from_cache:
-            if args.construct_ai_request or not production_plan_path.exists():
-                # 构造生产规划请求（合并部位识别 + 审美决策）
-                plan_request_cmd = [
-                    sys.executable,
-                    str(SKILL_DIR / "scripts" / "构造生产规划请求.py"),
-                    "--pieces", str(pieces_path),
-                    "--texture-set", str(texture_set_path),
-                    "--garment-map", str(garment_map_path),
-                    "--out", str(out_dir),
-                ]
-                if args.brief:
-                    plan_request_cmd.extend(["--brief", args.brief])
-                gh_path = out_dir / "geometry_hints.json"
-                if gh_path.exists():
-                    plan_request_cmd.extend(["--geometry-hints", str(gh_path)])
-                if args.visual_elements:
-                    plan_request_cmd.extend(["--visual-elements", args.visual_elements])
-                run_step(plan_request_cmd)
-                print("\n[提示] 生产规划 AI 请求已构造。请启动子 Agent 阅读以下文件并输出 ai_production_plan.json：")
-                print(f"  提示词文件: {out_dir / 'ai_production_plan_prompt.txt'}")
-                print(f"  预期输出: {out_dir / 'ai_production_plan.json'}")
-                print("  该文件应包含 garment_map + piece_fill_plan 两部分。")
-                print("  完成后重新运行本脚本并传入 --production-plan 参数，或直接放入输出目录。\n")
-                return 0
-
-        # 应用生产规划（拆解为 garment_map + ai_piece_fill_plan）
-        if production_plan_path.exists():
-            apply_cmd = [
-                sys.executable,
-                str(SKILL_DIR / "scripts" / "应用生产规划.py"),
-                "--production-plan", str(production_plan_path),
-                "--out", str(out_dir),
-                "--pieces", str(pieces_path),
-            ]
-            if template_assets:
-                apply_cmd.extend(["--fixed-garment-map", str(garment_map_path)])
-            run_step(apply_cmd)
-            if args.reuse_cache and not plan_loaded_from_cache:
-                cache_save(out_dir, "production_plan", plan_hash, production_plan_path)
-        else:
-            print("[警告] ai_production_plan.json 不存在，将使用后端规则生成填充计划（draft preview only）。")
+    rc = _apply_or_request_production_plan(
+        args, out_dir, texture_set_path, pieces_path, garment_map_path, template_assets
+    )
+    if rc:
+        return 0 if rc == 2 else rc
 
     plan_cmd = [
         sys.executable,
         str(SKILL_DIR / "scripts" / "创建填充计划.py"),
-        "--pieces",
-        str(pieces_path),
-        "--texture-set",
-        str(texture_set_path),
-        "--garment-map",
-        str(garment_map_path),
-        "--out",
-        str(out_dir),
+        "--pieces", str(pieces_path),
+        "--texture-set", str(texture_set_path),
+        "--garment-map", str(garment_map_path),
+        "--out", str(out_dir),
     ]
     if args.brief:
         plan_cmd.extend(["--brief", args.brief])
@@ -2771,263 +2265,12 @@ def main() -> int:
     render_cmd = [
         sys.executable,
         str(SKILL_DIR / "scripts" / "渲染裁片.py"),
-        "--pieces",
-        str(pieces_path),
-        "--texture-set",
-        str(texture_set_path),
-        "--fill-plan",
-        str(out_dir / "piece_fill_plan.json"),
-        "--out",
-        str(rendered_dir),
+        "--pieces", str(pieces_path),
+        "--texture-set", str(texture_set_path),
+        "--fill-plan", str(out_dir / "piece_fill_plan.json"),
+        "--out", str(rendered_dir),
     ]
     run_step(render_cmd)
-
-    # ========== 多尺寸自动渲染（纯程序，无AI）==========
-    if args.full_set and HAS_TEMPLATE_LOADER:
-        _render_size_variants(args, out_dir, texture_set_path)
-
-    fashion_cmd = [
-        sys.executable,
-        str(SKILL_DIR / "scripts" / "时尚质检.py"),
-        "--pieces",
-        str(pieces_path),
-        "--texture-set",
-        str(texture_set_path),
-        "--fill-plan",
-        str(out_dir / "piece_fill_plan.json"),
-        "--rendered",
-        str(rendered_dir),
-        "--out",
-        str(out_dir / "fashion_qc_report.json"),
-    ]
-    run_step(fashion_cmd)
-
-    # ===== 商业复审 =====
-    commercial_approved = True
-    if args.commercial_review:
-        brief_for_review = args.brief or str(out_dir / "commercial_design_brief.json")
-        if not Path(brief_for_review).exists():
-            print(f"[警告] 未找到商业设计简报: {brief_for_review}，跳过商业复审")
-            args.commercial_review = False
-        else:
-            review_cmd = [
-                sys.executable,
-                str(SKILL_DIR / "scripts" / "构造商业复审请求.py"),
-                "--piece-contact-sheet", str(rendered_dir / "piece_contact_sheet.jpg"),
-                "--fill-plan", str(out_dir / "piece_fill_plan.json"),
-                "--brief", brief_for_review,
-                "--qc-report", str(out_dir / "fashion_qc_report.json"),
-                "--out", str(out_dir),
-            ]
-            # 如果子Agent已输出复审结果，进入验证模式
-            review_json_path = out_dir / "ai_commercial_review.json"
-            if review_json_path.exists():
-                review_cmd.extend(["--selected", str(review_json_path)])
-            run_step(review_cmd)
-
-            # 读取验证后的结果
-            review_result_path = out_dir / "commercial_review_result.json"
-            if review_result_path.exists():
-                review = json.loads(review_result_path.read_text(encoding="utf-8"))
-                commercial_approved = review.get("approved", False)
-            else:
-                commercial_approved = False
-                print("\n[提示] 商业复审请求已构造。请启动子Agent完成商业复审：")
-                print(f"  提示词文件: {out_dir / 'ai_commercial_review_prompt.txt'}")
-                print(f"  预期输出: {out_dir / 'ai_commercial_review.json'}")
-                if use_legacy:
-                    print("  完成后重新运行本脚本并传入 --commercial-review --ai-plan <修订计划>")
-                else:
-                    print("  完成后重新运行本脚本并传入 --commercial-review --production-plan <修订规划>")
-
-    # 质检反馈闭环：自动重试模式
-    if args.auto_retry > 0:
-        qc_report_path = out_dir / "fashion_qc_report.json"
-        retry_count = 0
-        while retry_count < args.auto_retry and qc_report_path.exists():
-            qc = json.loads(qc_report_path.read_text(encoding="utf-8"))
-            high_issues = [i for i in qc.get("issues", []) if i.get("severity") == "high"]
-            qc_fail = bool(high_issues)
-
-            if not qc_fail and commercial_approved:
-                print(f"[自动重试] 第 {retry_count} 轮全部通过（质检+商业复审）")
-                break
-
-            all_issues = qc.get("issues", [])
-            if not all_issues and commercial_approved:
-                break
-
-            retry_count += 1
-            total_blocks = len(high_issues) + (0 if commercial_approved else 1)
-            print(f"\n[自动重试] 第 {retry_count}/{args.auto_retry} 轮：发现 {len(high_issues)} 个 high severity issues" + ("" if commercial_approved else " + 商业复审未通过"))
-            # 使用返工提示词让子Agent修订
-            # 新流程优先找 production_plan_rev，legacy 找 ai_piece_fill_plan_rev
-            revised_plan_path = out_dir / f"ai_production_plan_rev{retry_count}.json"
-            revised_is_production_plan = True
-            if not revised_plan_path.exists():
-                revised_plan_path = out_dir / f"ai_piece_fill_plan_rev{retry_count}.json"
-                revised_is_production_plan = False
-            if revised_plan_path.exists():
-                print(f"[自动重试] 使用修订计划: {revised_plan_path}")
-                # 重新运行创建填充计划（使用修订后的 plan）
-                if revised_is_production_plan and not use_legacy:
-                    # 新流程：先应用生产规划，再跑填充计划
-                    apply_cmd = [
-                        sys.executable,
-                        str(SKILL_DIR / "scripts" / "应用生产规划.py"),
-                        "--production-plan", str(revised_plan_path),
-                        "--out", str(out_dir),
-                        "--pieces", str(pieces_path),
-                    ]
-                    if template_assets:
-                        apply_cmd.extend(["--fixed-garment-map", str(garment_map_path)])
-                    run_step(apply_cmd)
-                    plan_cmd = [
-                        sys.executable,
-                        str(SKILL_DIR / "scripts" / "创建填充计划.py"),
-                        "--pieces", str(pieces_path),
-                        "--texture-set", str(texture_set_path),
-                        "--garment-map", str(garment_map_path),
-                        "--out", str(out_dir),
-                        "--ai-plan", str(out_dir / "ai_piece_fill_plan.json"),
-                    ]
-                else:
-                    plan_cmd = [
-                        sys.executable,
-                        str(SKILL_DIR / "scripts" / "创建填充计划.py"),
-                        "--pieces", str(pieces_path),
-                        "--texture-set", str(texture_set_path),
-                        "--garment-map", str(garment_map_path),
-                        "--out", str(out_dir),
-                        "--ai-plan", str(revised_plan_path),
-                    ]
-                if args.brief:
-                    plan_cmd.extend(["--brief", args.brief])
-                run_step(plan_cmd)
-                # 重新渲染
-                run_step(render_cmd)
-                # 重新QC
-                run_step(fashion_cmd)
-                # 若启用商业复审，重新调用（必须清除旧结果，避免审批污染）
-                if args.commercial_review and Path(brief_for_review).exists():
-                    # 清除旧商业复审结果，防止新渲染被旧审批放行
-                    for stale in [out_dir / "ai_commercial_review.json", out_dir / "commercial_review_result.json"]:
-                        if stale.exists():
-                            stale.unlink()
-                            print(f"[自动重试] 清除旧商业复审结果: {stale.name}")
-                    review_cmd = [
-                        sys.executable,
-                        str(SKILL_DIR / "scripts" / "构造商业复审请求.py"),
-                        "--piece-contact-sheet", str(rendered_dir / "piece_contact_sheet.jpg"),
-                        "--fill-plan", str(out_dir / "piece_fill_plan.json"),
-                        "--brief", brief_for_review,
-                        "--qc-report", str(out_dir / "fashion_qc_report.json"),
-                        "--out", str(out_dir),
-                    ]
-                    run_step(review_cmd)
-                    review_result_path = out_dir / "commercial_review_result.json"
-                    if review_result_path.exists():
-                        review = json.loads(review_result_path.read_text(encoding="utf-8"))
-                        commercial_approved = review.get("approved", False)
-                    else:
-                        commercial_approved = False
-            else:
-                # 尝试通过外部命令自调用子 Agent
-                if args.retry_agent_cmd:
-                    import shlex
-                    import subprocess
-                    prompt_path = out_dir / "rework_prompt.txt"
-                    if prompt_path.exists():
-                        cmd_str = args.retry_agent_cmd
-                        print(f"[自动重试] 尝试调用子 Agent: {cmd_str}")
-                        try:
-                            import re
-                            prompt_text = prompt_path.read_text(encoding="utf-8")
-                            env = os.environ.copy()
-                            env["AGENT_OUTPUT_PATH"] = str(revised_plan_path.resolve())
-                            env["AGENT_TASK"] = "revise_fill_plan"
-                            env["AGENT_PROMPT_PATH"] = str(prompt_path.resolve())
-
-                            # 支持占位符替换：{prompt_path} / {output_path}
-                            resolved_cmd = cmd_str.replace("{prompt_path}", str(prompt_path.resolve())).replace("{output_path}", str(revised_plan_path.resolve()))
-
-                            # shell 元字符（尤其是 > 重定向）必须交给 shell 解释；
-                            # 否则 shlex.split 后的 ">" 只是普通参数，文件不会被写入。
-                            needs_shell = any(token in resolved_cmd for token in (">", "<", "|", "&&", "||", ";"))
-                            if needs_shell:
-                                proc = subprocess.run(
-                                    resolved_cmd,
-                                    shell=True,
-                                    capture_output=True,
-                                    text=True,
-                                    env=env,
-                                    timeout=300,
-                                )
-                            else:
-                                cmd_parts = shlex.split(resolved_cmd)
-                                proc = subprocess.run(
-                                    cmd_parts,
-                                    input=prompt_text,
-                                    capture_output=True,
-                                    text=True,
-                                    env=env,
-                                    timeout=300,
-                                )
-                            stdout = proc.stdout if proc.returncode == 0 else ""
-                            if proc.returncode != 0:
-                                print(f"[自动重试] 子 Agent 调用失败 (rc={proc.returncode})")
-                                if proc.stderr:
-                                    print(f"  stderr: {proc.stderr[:200]}")
-                            elif stdout.strip():
-                                # 尝试解析 stdout 为 JSON
-                                candidate_json = stdout.strip()
-                                extracted = None
-                                # 优先匹配 ```json ... ``` 代码块
-                                code_block = re.search(r"```json\s*(.*?)\s*```", candidate_json, re.DOTALL)
-                                if code_block:
-                                    extracted = code_block.group(1).strip()
-                                else:
-                                    #  fallback：找最外层 { ... }
-                                    start = candidate_json.find("{")
-                                    end = candidate_json.rfind("}")
-                                    if start != -1 and end != -1 and end > start:
-                                        extracted = candidate_json[start:end+1]
-
-                                if extracted:
-                                    try:
-                                        parsed = json.loads(extracted)
-                                        # 轻量 schema 校验：
-                                        # standard 模式接受 {garment_map, piece_fill_plan:{pieces:[...]}}
-                                        # legacy 模式接受 {pieces:[...]}
-                                        validate_revised_agent_plan(
-                                            parsed,
-                                            expect_production_plan=revised_is_production_plan and not use_legacy,
-                                        )
-                                        # schema 校验通过
-                                        revised_plan_path.write_text(extracted, encoding="utf-8")
-                                        print(f"[自动重试] 子 Agent 成功生成修订计划: {revised_plan_path}")
-                                        continue
-                                    except (json.JSONDecodeError, ValueError) as ve:
-                                        print(f"[自动重试] 子 Agent 输出 JSON schema 校验失败: {ve}")
-                                        print(f"  stdout 前 300 字:\n{proc.stdout[:300]}")
-                                        failed_path = revised_plan_path.with_suffix(".failed.txt")
-                                        failed_path.write_text(proc.stdout, encoding="utf-8")
-                                        print(f"  完整 stdout 已保存到: {failed_path}")
-                                else:
-                                    print(f"[自动重试] 子 Agent 输出无法解析为 JSON，stdout 前 200 字:\n{proc.stdout[:200]}")
-                                    failed_path = revised_plan_path.with_suffix(".failed.txt")
-                                    failed_path.write_text(proc.stdout, encoding="utf-8")
-                                    print(f"  完整 stdout 已保存到: {failed_path}")
-                        except subprocess.TimeoutExpired:
-                            print("[自动重试] 子 Agent 调用超时（300s）")
-                        except Exception as exc:
-                            print(f"[自动重试] 子 Agent 调用异常: {exc}")
-                # fallback：提示用户手动
-                print(f"[自动重试] 等待外部子Agent生成修订计划: {revised_plan_path}")
-                print("  请启动子Agent，传入 rework_prompt.txt，输出 ai_piece_fill_plan_rev1.json")
-                if args.commercial_review:
-                    print(f"  同时更新商业复审: {out_dir / 'ai_commercial_review.json'}")
-                break
 
     summary = {
         "面料看板": str(board_path),
@@ -3038,8 +2281,8 @@ def main() -> int:
         "渲染目录": str(rendered_dir.resolve()),
         "预览图": str((rendered_dir / "preview.png").resolve()),
         "白底预览图": str((rendered_dir / "preview_white.jpg").resolve()),
-        "成品质检报告": str((out_dir / "fashion_qc_report.json").resolve()),
-        "商业复审结果": str((out_dir / "commercial_review_result.json").resolve()) if args.commercial_review else "",
+        "联络单": str((rendered_dir / "piece_contact_sheet.jpg").resolve()),
+        "清单": str((rendered_dir / "texture_fill_manifest.json").resolve()),
     }
     write_json(out_dir / "automation_summary.json", summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))

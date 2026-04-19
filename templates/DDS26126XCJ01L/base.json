@@ -3,7 +3,7 @@
   "template_name": "DDS26126XCJ01L",
   "template_name_en": "DDS26126XCJ01L",
   "garment_type": "t-shirt",
-  "description": "DDS26126XCJ01L T恤多尺寸基准模板，9片结构：后片、前左片、前右片、左袖、右袖、领子左、领子右、门襟、下摆。基于-S实际裁片数据初始化。",
+  "description": "DDS26126XCJ01L T恤固定模板，9片结构：后片、前左片、前右片、左袖、右袖、领子左、领子右、门襟、下摆。",
   "piece_count": 9,
   "version": "1.0.0",
   "pieces": [

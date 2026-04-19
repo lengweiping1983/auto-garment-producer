@@ -27,10 +27,6 @@ except Exception:
         return ""
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
-STYLE_REFERENCE_DISABLED_NOTE = (
-    "references/styles/*-style-reference.jpg 与 *-wearable-zoning.jpg 属于历史效果参考资产，"
-    "不得进入生产规划 prompt 或 kimi_images；模板部位信息以 garment_map 和 piece_overview 为准。"
-)
 
 
 def load_json(path: str | Path) -> dict:
@@ -273,7 +269,7 @@ def build_production_plan_prompt(
         "  若 A/B 的 palette、底色、饱和度、笔触、媒介不一致，必须放弃混用并在 rejected_assets 说明。",
         "",
         "--- 模板 zone 规则 ---",
-        "  若固定模板 garment_map 中提供 zone/garment_role/symmetry_group，必须直接按这些结构化生产事实执行；不得依赖任何款式效果参考图或 wearable-zoning 图片。",
+        "  若固定模板 garment_map 中提供 zone/garment_role/symmetry_group，必须直接按这些结构化生产事实执行。",
         "",
     ])
 
@@ -625,8 +621,6 @@ def main() -> int:
         "texture_contact_sheet": contact_sheet,
         "texture_thumbnails_debug": texture_thumbnails_debug,
         "texture_thumbnails": texture_kimi_images,
-        "style_references": [],
-        "style_reference_policy": STYLE_REFERENCE_DISABLED_NOTE,
         "prompt_path": str(prompt_path.resolve()),
         "expected_output": str((out_dir / ("ai_multi_production_plan.json" if args.multi_scheme else "ai_production_plan.json")).resolve()),
         "multi_scheme": args.multi_scheme,
@@ -648,7 +642,7 @@ def main() -> int:
         ] if args.multi_scheme else [],
         "payload_budget": payload_budget,
         "kimi_images": kimi_images,
-        "kimi_input_note": "默认只传 piece_overview 和 texture_contact_sheet 的 Kimi 压缩图；不要传 style_references、wearable-zoning、texture_thumbnails_debug 中的单张原图/调试图。",
+        "kimi_input_note": "默认只传 piece_overview 和 texture_contact_sheet 的 Kimi 压缩图；不要传 texture_thumbnails_debug 中的单张原图/调试图。",
     }
     request_path.write_text(json.dumps(request_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -658,7 +652,6 @@ def main() -> int:
         "纸样总览图": overview_path,
         "Kimi纸样总览图": overview_for_kimi,
         "Kimi面料ContactSheet": contact_sheet.get("sheet_path", ""),
-        "款式参考图": "已禁用，不进入生产规划 prompt 或 kimi_images",
         "预期输出": request_summary["expected_output"],
         "多方案模式": args.multi_scheme,
         "最大方案数": args.max_schemes if args.multi_scheme else 1,

@@ -4,7 +4,7 @@
 
 功能：
 1. 加载内置模板或用户自定义模板文件
-2. 解析模板继承链（尺寸变体继承基准模板）
+2. 固定解析内置模板的 s 资产
 3. 将提取的 pieces 与模板 slot 按面积排名匹配
 4. 验证匹配质量，返回 garment_map 列表
 """
@@ -67,11 +67,8 @@ def _find_index_entry_by_garment_type(garment_type: str) -> dict | None:
     return None
 
 
-def _resolve_asset_size(entry: dict, size_label: str = "base") -> str:
-    requested = (size_label or "").lower().strip()
-    if requested and requested != "base":
-        return requested
-    return str(entry.get("default_size") or "s").lower()
+def _resolve_asset_size(entry: dict, size_label: str = "s") -> str:
+    return "s"
 
 
 def resolve_asset_path(value: str | Path, base_dir: Path) -> Path:
@@ -144,7 +141,7 @@ def template_kimi_preview_for_pieces(pieces_json_path: str | Path, image_kind: s
 
 def resolve_template_assets(
     template_id: str = "",
-    size_label: str = "base",
+    size_label: str = "s",
     garment_type: str = "",
 ) -> dict | None:
     """解析可直接复用的内置模板资产。
@@ -220,17 +217,15 @@ def resolve_template_assets(
     return result
 
 
-def find_template_by_id(template_id: str, size: str = "base") -> dict | None:
-    """按 template_id 和 size 查找并加载模板。"""
+def find_template_by_id(template_id: str, size: str = "s") -> dict | None:
+    """按 template_id 查找并加载固定模板。"""
     template_dir = TEMPLATES_DIR / template_id
     if not template_dir.exists():
         return None
-    size_file = template_dir / f"{size}.json"
-    if not size_file.exists():
-        size_file = template_dir / "base.json"
+    size_file = template_dir / "base.json"
     if not size_file.exists():
         return None
-    return _resolve_template(_load_json(size_file))
+    return _load_json(size_file)
 
 
 def find_template_by_garment_type(garment_type: str) -> dict | None:
@@ -239,14 +234,14 @@ def find_template_by_garment_type(garment_type: str) -> dict | None:
     gt_norm = _normalize_match_text(garment_type)
     for entry in index.get("templates", []):
         if _normalize_match_text(entry.get("garment_type", "")) == gt_norm:
-            return find_template_by_id(entry["template_id"], entry.get("default_size", "base"))
+            return find_template_by_id(entry["template_id"])
         # 也匹配 template_name
         if _normalize_match_text(entry.get("template_name", "")) == gt_norm:
-            return find_template_by_id(entry["template_id"], entry.get("default_size", "base"))
+            return find_template_by_id(entry["template_id"])
         # 匹配 aliases（支持中文别名如"T恤"、"防晒服"等）
         for alias in entry.get("aliases", []):
             if _normalize_match_text(alias) == gt_norm:
-                return find_template_by_id(entry["template_id"], entry.get("default_size", "base"))
+                return find_template_by_id(entry["template_id"])
     return None
 
 
@@ -254,46 +249,7 @@ def load_template_file(path: Path) -> dict | None:
     """加载用户自定义模板文件。"""
     if not path.exists():
         return None
-    return _resolve_template(_load_json(path))
-
-
-def _resolve_template(template: dict) -> dict:
-    """解析模板继承链。尺寸变体可覆盖基准模板的字段。"""
-    inherits = template.get("inherits")
-    if not inherits:
-        return template
-    # inherits 格式: "template_id/size" 或 "template_id"（默认 base）
-    parts = inherits.split("/")
-    base_id = parts[0]
-    base_size = parts[1] if len(parts) > 1 else "base"
-    base = find_template_by_id(base_id, base_size)
-    if not base:
-        return template
-    # 深拷贝基准模板
-    resolved = _deep_copy(base)
-    # 应用覆盖
-    overrides = template.get("overrides", {})
-    if "pieces" in overrides:
-        # 按 slot_index 合并 piece 覆盖
-        piece_overrides = {p["slot_index"]: p for p in overrides["pieces"]}
-        for piece in resolved.get("pieces", []):
-            slot_idx = piece.get("slot_index")
-            if slot_idx in piece_overrides:
-                piece.update(piece_overrides[slot_idx])
-    # 覆盖顶层字段（除了 pieces）
-    for key, value in template.items():
-        if key not in ("inherits", "overrides", "pieces"):
-            resolved[key] = value
-    return resolved
-
-
-def _deep_copy(data):
-    """简单的深拷贝（仅处理 dict/list/primitive）。"""
-    if isinstance(data, dict):
-        return {k: _deep_copy(v) for k, v in data.items()}
-    if isinstance(data, list):
-        return [_deep_copy(v) for v in data]
-    return data
+    return _load_json(path)
 
 
 def match_pieces_to_template(pieces: list[dict], template: dict) -> tuple[list[dict], float]:
@@ -391,19 +347,3 @@ def format_template_garment_map(entries: list[dict], template: dict) -> dict:
         "template_name": template.get("template_name", ""),
         "pieces": entries,
     }
-
-
-def load_size_mappings(template_id: str) -> dict | None:
-    """加载指定模板的多尺寸映射关系。"""
-    path = TEMPLATES_DIR / template_id / "size_mappings.json"
-    if not path.exists():
-        return None
-    return _load_json(path)
-
-
-def load_size_pieces(template_id: str, size_label: str) -> dict | None:
-    """加载指定模板某个尺寸的 pieces.json。"""
-    path = TEMPLATES_DIR / template_id / size_label / f"pieces_{size_label}.json"
-    if not path.exists():
-        return None
-    return normalize_piece_asset_paths(_load_json(path), path)

@@ -287,6 +287,67 @@ def infer_map_from_pieces(pieces_payload: dict) -> dict:
     }
 
 
+def find_front_pair_piece_ids(pieces_payload: dict, garment_map: dict) -> tuple[str, str] | tuple[None, None]:
+    """Find front-left/front-right pieces from fixed template metadata."""
+    gm_entries = garment_map.get("pieces", [])
+    left_id = right_id = None
+    for item in gm_entries:
+        text = " ".join(str(item.get(k, "")) for k in ("piece_name", "reason", "garment_role", "same_shape_group", "symmetry_group"))
+        if "前左片" in text or "front_left" in text:
+            left_id = item.get("piece_id")
+        if "前右片" in text or "front_right" in text:
+            right_id = item.get("piece_id")
+    if left_id and right_id:
+        return left_id, right_id
+
+    piece_by_id = {p["piece_id"]: p for p in pieces_payload.get("pieces", [])}
+    front_candidates = [
+        item.get("piece_id")
+        for item in gm_entries
+        if item.get("garment_role") in {"front_body", "front_hero"}
+    ]
+    front_candidates = [pid for pid in front_candidates if pid in piece_by_id]
+    if len(front_candidates) >= 2:
+        front_candidates.sort(key=lambda pid: piece_by_id[pid].get("source_x", piece_by_id[pid].get("x", 0)))
+        return front_candidates[0], front_candidates[1]
+    return None, None
+
+
+def force_theme_front_split_overlays(entries: list[dict], pieces_payload: dict, texture_set: dict, garment_map: dict) -> list[dict]:
+    """Force generated theme halves onto the two front pieces when available."""
+    motif_ids = {m.get("motif_id") for m in texture_set.get("motifs", [])}
+    if not {"theme_front_left", "theme_front_right"}.issubset(motif_ids):
+        return entries
+    left_id, right_id = find_front_pair_piece_ids(pieces_payload, garment_map)
+    if not left_id or not right_id:
+        return entries
+
+    by_id = {e.get("piece_id"): e for e in entries}
+    for pid, motif_id, side in (
+        (left_id, "theme_front_left", "左前片"),
+        (right_id, "theme_front_right", "右前片"),
+    ):
+        entry = by_id.get(pid)
+        if not entry:
+            continue
+        entry["overlay"] = make_layer(
+            "motif",
+            f"用户主题主体切半强制落位到{side}",
+            motif_id=motif_id,
+            anchor="center",
+            scale=0.98,
+            rotation=0,
+            opacity=1.0,
+            offset_x=0,
+            offset_y=0,
+        )
+        entry["garment_role"] = "front_body"
+        entry["zone"] = "body"
+        entry["theme_front_split_forced"] = True
+        entry["reason"] = (entry.get("reason", "") + f"；{side}使用程序生成的主题半幅").strip("；")
+    return entries
+
+
 def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: dict, brief: dict, motif_geometries: dict = None) -> tuple[dict, dict]:
     """后端回退规则生成填充计划（当 AI 计划不可用时）。"""
     texture_ids = approved_ids(texture_set, "textures", "texture_id")
@@ -1326,6 +1387,7 @@ def main() -> int:
 
     # 阶段 2：强制校验修正
     entries, fix_issues = enforce_validation(entries, pieces_payload, texture_set, garment_map, motif_geometries, brief)
+    entries = force_theme_front_split_overlays(entries, pieces_payload, texture_set, garment_map)
 
     # 重新组装 art_direction
     hero_ids = [e["piece_id"] for e in entries if (e.get("overlay") or {}).get("fill_type") == "motif"]
@@ -1348,7 +1410,7 @@ def main() -> int:
             "trim_piece_ids": trim_ids,
             "strategy": "单一卖点定位，低噪身片，协调副片，安静饰边",
             "validation_fixes": fix_issues,
-            "risk_notes": ["使用后端规则生成，仅作草稿预览，不得作为生产审批稿"] if not ai_plan_used else [],
+            "risk_notes": ["使用后端规则生成，仅作草稿预览"] if not ai_plan_used else [],
             "draft_preview_only": True,
             "production_ready": False,
         }

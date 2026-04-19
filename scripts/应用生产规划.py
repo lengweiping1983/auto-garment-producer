@@ -127,19 +127,6 @@ def apply_production_plan(
     fill_plan_path = out_dir / "ai_piece_fill_plan.json"
     fill_plan_path.write_text(json.dumps(fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # 3. 额外：输出 asset_approval_request.json（若 production 模式需要）
-    risk_notes = plan.get("risk_notes", [])
-    if risk_notes:
-        approval = {
-            "request_id": "ai_plan_risk_review_v1",
-            "source_plan": str(plan_path.resolve()),
-            "risk_notes": risk_notes,
-            "message": "AI 生产规划中标记了风险项，建议人工复核。",
-        }
-        approval_path = out_dir / "asset_approval_request.json"
-        approval_path.write_text(json.dumps(approval, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[风险标记] AI 规划中发现 {len(risk_notes)} 项风险，已写入: {approval_path}")
-
     return garment_map_path, fill_plan_path
 
 

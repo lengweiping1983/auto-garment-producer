@@ -8,13 +8,7 @@
       "aliases": ["防晒服", "防晒衣", "sun protection clothing"],
       "description": "BFSK26308XCJ01L 防晒服，9片结构：后片、前左片、前右片、左袖、右袖、领子左、领子右、门襟、下摆",
       "piece_count": 9,
-      "sizes": [
-        "s",
-        "m",
-        "l",
-        "xl",
-        "xxl"
-      ],
+      "sizes": ["s"],
       "default_size": "s"
     },
     {
@@ -25,13 +19,7 @@
       "aliases": ["t恤", "T 恤", "T恤", "男士T恤", "男士 T 恤", "t-shirt", "t shirt", "tee", "tee shirt", "衬衫", "男士衬衫", "shirt", "men shirt", "mens shirt", "men's shirt"],
       "description": "DDS26126XCJ01L 上装/T恤/衬衫通用模板，9片结构：后片、前左片、前右片、左袖、右袖、领子左、领子右、门襟、下摆",
       "piece_count": 9,
-      "sizes": [
-        "s",
-        "m",
-        "l",
-        "xl",
-        "xxl"
-      ],
+      "sizes": ["s"],
       "default_size": "s"
     }
   ],

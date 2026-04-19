@@ -262,7 +262,6 @@ def main() -> int:
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument("--ai-map", default="", help="AI子Agent输出的 ai_garment_map.json 路径。若提供，优先使用。")
     parser.add_argument("--template", default="", help="模板ID。如 children_outerwear_set。优先于 garment_type 自动匹配。")
-    parser.add_argument("--template-size", default="base", help="模板尺寸变体。默认 base。")
     parser.add_argument("--template-file", default="", help="用户自定义模板 JSON 文件路径。优先于内置模板。")
     parser.add_argument("--garment-type", default="", help="服装类型。若未指定模板，尝试按 garment_type 匹配内置模板。")
     parser.add_argument("--no-template", action="store_true", help="禁用模板匹配，强制走 AI/几何推断路径。")
@@ -286,9 +285,9 @@ def main() -> int:
                 print(f"[模板] 加载用户自定义模板: {args.template_file}")
         # 1b. 内置模板（按ID）
         if not template and args.template:
-            template = find_template_by_id(args.template, args.template_size)
+            template = find_template_by_id(args.template)
             if template:
-                print(f"[模板] 加载内置模板: {args.template}/{args.template_size}")
+                print(f"[模板] 加载内置模板: {args.template}")
         # 1c. 内置模板（按 garment_type 自动匹配）
         if not template and args.garment_type:
             template = find_template_by_garment_type(args.garment_type)
