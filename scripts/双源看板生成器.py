@@ -135,7 +135,7 @@ def _redact_cmd(cmd: list[str]) -> list[str]:
             hide_next = False
             continue
         redacted.append(item)
-        if item in {"--token", "--libtv-key"}:
+        if item in {"--token", "--libtv-key", "--access-key"}:
             hide_next = True
     return redacted
 
@@ -154,10 +154,10 @@ def validate_collection_board_shape(board_path: Path) -> dict:
         }
 
     ratio = width / max(1, height)
-    ok = 0.5 <= ratio <= 2.0 and min(width, height) >= 512
+    ok = 0.92 <= ratio <= 1.08 and min(width, height) >= 512
     message = "ok" if ok else (
         f"看板尺寸异常: {width}x{height} (ratio={ratio:.2f})。"
-        "期望为 3x3 面料九宫格看板，宽高比应在 0.5~2.0 之间且短边不低于 512px。"
+        "期望为 3x3 面料九宫格看板，宽高比应接近 1:1 且短边不低于 512px。"
         "请确认输出不是正面成衣效果图、模特上身图或产品照。"
     )
     return {
@@ -266,14 +266,21 @@ class DualBoardGenerator:
 
     def _source_summary(self) -> dict:
         summary = {}
+        failure_statuses = {"failed", "poll_timeout", "no_image_result", "no_valid_3x3_board"}
         for source in ("neo", "libtv"):
             events = [item for item in self.invocations if item.get("source") == source]
             statuses = [item.get("status", "") for item in events]
+            last_status = statuses[-1] if statuses else "not_started"
+            failed = bool(
+                last_status.endswith("_failed")
+                or last_status in failure_statuses
+                or any(item.get("error_type") for item in events if item.get("status") == last_status)
+            )
             summary[source] = {
                 "called": bool(events),
-                "succeeded": any(status == "succeeded" for status in statuses),
-                "failed": any(status.endswith("_failed") or status in {"failed", "poll_timeout", "no_image_result"} for status in statuses),
-                "last_status": statuses[-1] if statuses else "not_started",
+                "succeeded": last_status == "succeeded",
+                "failed": failed,
+                "last_status": last_status,
                 "event_count": len(events),
             }
         neo_ok = summary["neo"]["succeeded"]
@@ -355,6 +362,49 @@ class DualBoardGenerator:
             extra["metadata_path"] = str(metadata_path.resolve())
             self._record_invocation("libtv", cmd, status, event.get("message", ""), **extra)
         return metadata
+
+    def _path_within(self, path: Path, parent: Path) -> bool:
+        try:
+            path.resolve().relative_to(parent.resolve())
+            return True
+        except Exception:
+            return False
+
+    def _select_libtv_board_from_metadata(self, metadata: dict, libtv_out_dir: Path) -> Path | None:
+        """Select only a valid board from the current libtv run directory."""
+        selected = metadata.get("selected_board_path") if isinstance(metadata, dict) else ""
+        if selected:
+            selected_path = Path(selected)
+            if selected_path.exists() and self._path_within(selected_path, libtv_out_dir):
+                validation = validate_collection_board_shape(selected_path)
+                if validation.get("ok"):
+                    return selected_path
+
+        images = metadata.get("images", []) if isinstance(metadata, dict) else []
+        candidates: list[Path] = []
+        for image in images:
+            if not isinstance(image, dict) or not image.get("path"):
+                continue
+            path = Path(image["path"])
+            if path.exists() and self._path_within(path, libtv_out_dir):
+                candidates.append(path)
+
+        if not candidates:
+            candidates = (
+                sorted(libtv_out_dir.glob("collection_board_*.png"))
+                + sorted(libtv_out_dir.glob("collection_board_*.jpg"))
+                + sorted(libtv_out_dir.glob("collection_board_*.jpeg"))
+                + sorted(libtv_out_dir.glob("collection_board_*.webp"))
+            )
+
+        valid: list[tuple[int, Path]] = []
+        for path in candidates:
+            validation = validate_collection_board_shape(path)
+            if validation.get("ok"):
+                valid.append((int(validation.get("width", 0)) * int(validation.get("height", 0)), path))
+        if not valid:
+            return None
+        return sorted(valid, key=lambda item: item[0], reverse=True)[0][1]
 
     # ------------------------------------------------------------------
     # Neo AI
@@ -454,32 +504,19 @@ class DualBoardGenerator:
             )
             raise RuntimeError(f"libtv_generate_failed: rc={proc.returncode}, stderr={_truncate(proc.stderr, 300)}")
 
-        images = metadata.get("images", []) if isinstance(metadata, dict) else []
-        board_path = None
-        if images and isinstance(images[0], dict) and images[0].get("path"):
-            board_path = Path(images[0]["path"])
-        if not board_path:
-            # fallback 也只允许在本次 run 目录查找，绝不捞历史 libtv_collection_board 文件。
-            candidates = (
-                sorted(libtv_out_dir.glob("collection_board_*.png"))
-                + sorted(libtv_out_dir.glob("collection_board_*.jpg"))
-                + sorted(libtv_out_dir.glob("collection_board_*.jpeg"))
-                + sorted(libtv_out_dir.glob("collection_board_*.webp"))
-            )
-            if candidates:
-                board_path = candidates[0]
+        board_path = self._select_libtv_board_from_metadata(metadata, libtv_out_dir)
         if not board_path or not board_path.exists():
             self._record_invocation(
                 "libtv",
                 cmd,
                 "generate_board_failed",
-                f"本次 run 目录未找到新生成的 libtv 看板: {libtv_out_dir}",
-                error_type="libtv_generate_no_files",
+                f"本次 run 目录未找到合格 3x3 libtv 看板: {libtv_out_dir}",
+                error_type="libtv_no_valid_3x3_board",
                 metadata_path=str(metadata_path) if metadata else "",
                 stdout=_truncate(proc.stdout),
                 stderr=_truncate(proc.stderr),
             )
-            raise RuntimeError(f"libtv_generate_no_files: 本次 run 目录未找到新生成的 libtv 看板: {libtv_out_dir}")
+            raise RuntimeError(f"libtv_no_valid_3x3_board: 本次 run 目录未找到合格 3x3 libtv 看板: {libtv_out_dir}")
 
         validation = validate_collection_board_shape(board_path)
         if not validation.get("ok"):
