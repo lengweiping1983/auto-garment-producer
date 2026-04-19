@@ -27,6 +27,11 @@ from PIL import Image, ImageColor, ImageEnhance, ImageFilter, ImageStat
 SKILL_DIR = Path(__file__).resolve().parents[1]
 NEO_AI_SCRIPT = SKILL_DIR.parent / "neo-ai" / "scripts" / "generate_texture_collection_board.py"
 
+FRONT_EFFECT_NEGATIVE_PROMPT = (
+    "no garment mockup, no front-view clothing render, no fashion model, no mannequin, "
+    "no person wearing garment, no on-body render, no T-shirt mockup, no product photo, no lookbook"
+)
+
 # 导入模板加载器（用于多尺寸自动渲染）
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 try:
@@ -259,10 +264,28 @@ def build_production_context(
         ("visual_elements", "visual_elements.json"),
         ("brief", "commercial_design_brief.json"),
         ("geometry_hints", "geometry_hints.json"),
+        ("dual_source_health_report", "dual_source_health_report.json"),
     ]:
         p = out_dir / fname
         if p.exists():
             ctx["paths"][name] = str(p.resolve())
+    health_path = out_dir / "dual_source_health_report.json"
+    if health_path.exists():
+        try:
+            health_payload = json.loads(health_path.read_text(encoding="utf-8"))
+            ctx["computed"]["dual_source_health"] = {
+                "overall_ok": health_payload.get("overall_ok", False),
+                "neo_ok": health_payload.get("neo", {}).get("ok", False),
+                "libtv_ok": health_payload.get("libtv", {}).get("ok", False),
+                "invocation_count": len(health_payload.get("invocations", [])),
+                "policy": health_payload.get("policy", {}),
+            }
+        except Exception as exc:
+            ctx.setdefault("warnings", []).append({
+                "type": "dual_source_health_read_failed",
+                "path": str(health_path),
+                "message": str(exc),
+            })
     resolved_pieces_path = pieces_path or (out_dir / "pieces.json")
     if resolved_pieces_path.exists():
         ctx_path = out_dir / "production_context.json"
@@ -392,6 +415,7 @@ def _build_collection_prompt_from_visual_elements(out_dir: Path, visual_elements
         "All nine panels must look like one coordinated textile collection by the same fashion print designer, identical palette, identical paper texture, identical hand-painted brush style, identical commercial apparel mood.",
         "",
         "No animals other than approved subjects, no characters, no faces, no people, no text, no logo, no watermark, no house, no river, no full landscape scene, no poster composition, no sticker sheet, no harsh black outlines, no dense confetti, no neon colors, no muddy dark colors, no gradient backgrounds inside individual panels.",
+        FRONT_EFFECT_NEGATIVE_PROMPT + ".",
         "",
         "Row 1 and Row 2 panels should be seamless tileable textile swatches usable as fabric repeats. Row 3 panels should be clean placement motifs with plain light backgrounds suitable for background removal.",
     ]
@@ -1645,7 +1669,7 @@ def main() -> int:
     parser.add_argument("--reuse-cache", action="store_true", help="启用缓存复用。若输入未变化，跳过对应阶段的AI调用和程序计算。")
     parser.add_argument("--production-plan", default="", help="已完成的 ai_production_plan.json 路径。若提供且缓存允许，跳过生产规划AI调用，直接应用该计划。")
     parser.add_argument("--skip-collection-selection", action="store_true", help="跳过看板候选选择AI（等效fast模式行为），程序直接取每个panel第一个variant。")
-    parser.add_argument("--dual-source", action="store_true", help="启用双源并行看板生成（Neo AI + libtv）")
+    parser.add_argument("--dual-source", action="store_true", help="启用双源并行看板生成（Neo AI + libtv-skill）。主题图/视觉元素路径且未提供 texture_set/collection_board 时会自动启用。")
     parser.add_argument("--libtv-key", default="", help="libtv Access Key。优先使用 LIBTV_ACCESS_KEY 环境变量。")
     parser.add_argument("--dual-prompts", default="", help="dual_collection_prompts.json 路径。若提供，跳过设计简报中的双提示词生成，直接使用该文件。")
     parser.add_argument("--max-retries", type=int, default=2, help="双源均失败时的最大重试次数")
@@ -1894,6 +1918,13 @@ def main() -> int:
         except Exception:
             pass
 
+    # 主题图/视觉元素走“先提取元素，再生成连续面料纹理”的路径。
+    # 没有外部 texture_set 或已有看板时，必须自动调用 Neo AI + libtv-skill 双源。
+    theme_to_texture = bool((args.theme_images or args.visual_elements) and not args.texture_set and not args.collection_board)
+    if theme_to_texture and not args.dual_source:
+        args.dual_source = True
+        print("[双源模式] 主题图/视觉元素路径未提供 texture_set/collection_board，自动启用 Neo AI + libtv-skill 双源纹理生成。")
+
     # ============================================================
     # 双源模式（Neo AI + libtv 并行生成）
     # ============================================================
@@ -1942,6 +1973,13 @@ def main() -> int:
         if not board_results:
             print("[错误] 双源看板生成全部失败", file=sys.stderr)
             return 1
+        build_production_context(
+            args,
+            out_dir,
+            pieces_path=pieces_path,
+            garment_map_path=garment_map_path,
+            template_assets=template_assets,
+        )
 
         # 5. 分别裁剪每套看板为 texture_set
         texture_sets = []
@@ -2146,6 +2184,8 @@ def main() -> int:
                 "成功方案": success_schemes,
                 "失败方案": failed_schemes,
                 "渲染目录": [str((out_dir / f"rendered{sc['suffix']}").resolve()) for sc in schemes],
+                "双源健康报告": str((out_dir / "dual_source_health_report.json").resolve()),
+                "说明": "预览图/contact sheet 仅为裁片与纹理检查，不是正面成衣效果图。",
             }
             write_json(out_dir / "automation_summary.json", summary)
             print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -2175,6 +2215,8 @@ def main() -> int:
             "面料看板": [str(r["path"]) for r in board_results],
             "面料组合": [str(ts["path"]) for ts in texture_sets],
             "渲染目录": [str((out_dir / f"rendered{ts['suffix']}").resolve()) for ts in texture_sets],
+            "双源健康报告": str((out_dir / "dual_source_health_report.json").resolve()),
+            "说明": "预览图/contact sheet 仅为裁片与纹理检查，不是正面成衣效果图。",
         }
         write_json(out_dir / "automation_summary.json", summary)
         print(json.dumps(summary, ensure_ascii=False, indent=2))

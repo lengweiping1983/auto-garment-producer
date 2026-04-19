@@ -22,6 +22,16 @@ except Exception:
         return data
 
 
+FRONT_EFFECT_NEGATIVE_EN = (
+    "no garment mockup, no front-view clothing render, no fashion model, no mannequin, "
+    "no person wearing garment, no on-body render, no T-shirt mockup, no product photo, no lookbook"
+)
+FRONT_EFFECT_NEGATIVE_ZH = (
+    "不要正面成衣效果图、不要服装mockup、不要模特上身图、不要假人、不要穿在人身上的衣服、"
+    "不要T恤产品图、不要商品摄影、不要lookbook；只生成面料九宫格看板、连续纹理小样和干净定位图案"
+)
+
+
 def rgb_to_hex(rgb: tuple[int, int, int]) -> str:
     return "#{:02x}{:02x}{:02x}".format(*rgb)
 
@@ -279,7 +289,18 @@ def _generate_outputs(
             "饰边和窄条保持安静",
             "图案是简化的成衣定位，而非故事裁剪",
         ],
-        "avoid": ["直接叙事裁剪", "人脸", "文字", "商标", "水印", "过度堆砌袖口", "均匀密度全身填充"],
+        "avoid": [
+            "直接叙事裁剪",
+            "人脸",
+            "文字",
+            "商标",
+            "水印",
+            "过度堆砌袖口",
+            "均匀密度全身填充",
+            "正面成衣效果图",
+            "模特上身图",
+            "服装mockup",
+        ],
     }
 
     style_profile = {
@@ -304,7 +325,11 @@ def _generate_outputs(
             "texture_id": texture_id,
             "purpose": purpose,
             "prompt": prompt_text,
-            "negative_prompt": "animals, characters, faces, people, text, labels, captions, titles, typography, words, letters, logo, watermark, house, full landscape, poster, sticker, harsh black outline, dense confetti, neon colors, muddy colors",
+            "negative_prompt": (
+                "animals, characters, faces, people, text, labels, captions, titles, typography, words, "
+                "letters, logo, watermark, house, full landscape, poster, sticker, harsh black outline, "
+                "dense confetti, neon colors, muddy colors, " + FRONT_EFFECT_NEGATIVE_EN
+            ),
         }
         if panel:
             item["panel"] = panel
@@ -405,7 +430,7 @@ def _generate_outputs(
                 "motif_id": "hero_motif",
                 "purpose": "单一卖点定位，置于一个 hero 裁片",
                 "prompt": sanitize_prompt(generated_prompts.get("hero_motif", f"elegant placement print motif, simplified {hero_selling_point}, balanced negative space, plain light background, soft fading edges, suitable for background removal, no text, no watermark"), domain="fashion") if generated_prompts else sanitize_prompt(f"elegant placement print motif, simplified {hero_selling_point}, balanced negative space, plain light background, soft fading edges, suitable for background removal, no text, no watermark", domain="fashion"),
-                "negative_prompt": "complex background, full scene, poster, text, logo, watermark, faces, multiple subjects, frame",
+                "negative_prompt": "complex background, full scene, poster, text, logo, watermark, faces, multiple subjects, frame, " + FRONT_EFFECT_NEGATIVE_EN,
             }
         ],
     }
@@ -491,6 +516,7 @@ def _build_collection_prompt_from_prompts(prompts: list[dict], style: dict) -> s
         "All nine panels must look like one coordinated textile collection by the same fashion print designer, identical palette, identical paper texture, identical hand-painted brush style, identical commercial apparel mood.",
         "",
         "No animals other than approved subjects, no characters, no faces, no people, no text, no logo, no watermark, no house, no river, no full landscape scene, no poster composition, no sticker sheet, no harsh black outlines, no dense confetti, no neon colors, no muddy dark colors, no gradient backgrounds inside individual panels.",
+        FRONT_EFFECT_NEGATIVE_EN + ".",
         "",
         "Row 1 and Row 2 panels should be seamless tileable textile swatches usable as fabric repeats. Row 3 panels should be clean placement motifs with plain light backgrounds suitable for background removal.",
     ]
@@ -587,6 +613,7 @@ def _build_libtv_description_from_prompts(prompts: list[dict], style: dict, dire
         "所有9个面板必须是同一个设计师的同一个系列作品，完全相同的调色板、纸质纹理、手绘风格、商业成衣氛围。",
         "",
         "不要动物（除非明确批准的主题元素）、不要人物、不要人脸、不要文字、不要商标、不要水印、不要房屋、不要河流、不要完整风景场景、不要海报构图、不要贴纸页、不要粗黑轮廓、不要密集纸屑、不要霓虹色、不要浑浊深色、不要单个面板内的渐变背景。",
+        FRONT_EFFECT_NEGATIVE_ZH + "。",
         "",
         "第一行和第二行面板应该是可平铺无缝的面料小样。第三行面板应该是干净背景的定位图案，适合背景去除。",
     ]
@@ -617,7 +644,7 @@ def generate_dual_collection_prompts_programmatic(
     # ---- Set A：商业稳妥款 ----
     prompts_a = _apply_direction_style(prompts, _MASS_PRODUCTION_INJECT)
     prompt_a = _build_collection_prompt_from_prompts(prompts_a, style)
-    negative_prompt_a = "animals, characters, faces, people, text, labels, captions, titles, typography, words, letters, logo, watermark, house, full landscape, poster, sticker, harsh black outline, dense confetti, neon colors, muddy colors"
+    negative_prompt_a = "animals, characters, faces, people, text, labels, captions, titles, typography, words, letters, logo, watermark, house, full landscape, poster, sticker, harsh black outline, dense confetti, neon colors, muddy colors, " + FRONT_EFFECT_NEGATIVE_EN
     prompt_a_file = out_dir / "style_a_collection_prompt.txt"
     prompt_a_file.write_text(prompt_a, encoding="utf-8")
 

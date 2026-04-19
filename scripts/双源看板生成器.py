@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-双源看板生成器：并行调用 Neo AI 和 libtv-skills 生成面料看板。
+双源看板生成器：并行调用 Neo AI 和 libtv-skill 生成面料看板。
 
 职责：
 - 读取 dual_collection_prompts.json，获取两套不同但风格一致的提示词
 - 使用 ThreadPoolExecutor 并行提交 Neo AI 和 libtv 生成任务
-- 任一源成功即返回；双源均失败则自动重试
+- 两个源都必须被调用并等待结果；一源成功且另一源明确失败/超时后可继续
+- 双源均失败才重试，重试会重新发起 AI 生成
 - 返回可用的看板路径列表
 
 使用方式（独立运行）：
@@ -32,22 +33,45 @@ from pathlib import Path
 
 # 从当前文件位置推导 skills 根目录（当前文件在 auto-garment-producer/scripts/ 下，上两级为 skills 根）
 _SKILLS_ROOT = Path(__file__).resolve().parents[2]
+_HOME = Path.home()
 
-# Neo AI 脚本路径：支持环境变量覆盖，默认从同级 skill 目录推导
-NEO_AI_SCRIPT = Path(
-    os.environ.get(
-        "NEO_AI_SCRIPT",
-        str(_SKILLS_ROOT / "neo-ai" / "scripts" / "generate_texture_collection_board.py"),
-    )
-)
+def _first_existing_path(candidates: list[Path]) -> Path:
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
 
-# libtv 脚本目录：支持环境变量覆盖，默认从同级 skill 目录推导
-LIBTV_SCRIPT_DIR = Path(
-    os.environ.get(
-        "LIBTV_SCRIPT_DIR",
-        str(_SKILLS_ROOT / "libtv-skills" / "skills" / "libtv-skill" / "scripts"),
-    )
-)
+
+def resolve_neo_ai_script() -> Path:
+    """解析 Neo AI 面料看板脚本路径，兼容 .agents 与 .codex skill 安装位置。"""
+    override = os.environ.get("NEO_AI_SCRIPT", "").strip()
+    candidates = []
+    if override:
+        candidates.append(Path(override).expanduser())
+    candidates.extend([
+        _SKILLS_ROOT / "neo-ai" / "scripts" / "generate_texture_collection_board.py",
+        _HOME / ".agents" / "skills" / "neo-ai" / "scripts" / "generate_texture_collection_board.py",
+        _HOME / ".codex" / "skills" / "neo-ai" / "scripts" / "generate_texture_collection_board.py",
+    ])
+    return _first_existing_path(candidates)
+
+
+def resolve_libtv_script_dir() -> Path:
+    """解析 libtv-skill 脚本目录，默认与本 skill 同级。"""
+    override = os.environ.get("LIBTV_SCRIPT_DIR", "").strip()
+    candidates = []
+    if override:
+        candidates.append(Path(override).expanduser())
+    candidates.extend([
+        _SKILLS_ROOT / "libtv-skill" / "scripts",
+        _HOME / ".agents" / "skills" / "libtv-skill" / "scripts",
+        _HOME / ".codex" / "skills" / "libtv-skill" / "scripts",
+    ])
+    return _first_existing_path(candidates)
+
+
+NEO_AI_SCRIPT = resolve_neo_ai_script()
+LIBTV_SCRIPT_DIR = resolve_libtv_script_dir()
 
 
 class DualBoardGenerationError(Exception):
@@ -83,6 +107,50 @@ def _run_subprocess(cmd: list[str], env: dict | None = None, timeout: int = 300)
     return result.stdout
 
 
+def _redact_cmd(cmd: list[str]) -> list[str]:
+    """隐藏命令中的 token/key，避免健康报告泄露凭证。"""
+    redacted = []
+    hide_next = False
+    for item in cmd:
+        if hide_next:
+            redacted.append("***")
+            hide_next = False
+            continue
+        redacted.append(item)
+        if item in {"--token", "--libtv-key"}:
+            hide_next = True
+    return redacted
+
+
+def validate_collection_board_shape(board_path: Path) -> dict:
+    """轻量验证输出是纹理看板，不接受明显的正面效果图/产品照形态。"""
+    try:
+        from PIL import Image
+        with Image.open(board_path) as img:
+            width, height = img.size
+    except Exception as exc:
+        return {
+            "path": str(board_path),
+            "ok": False,
+            "message": f"无法读取看板图片: {exc}",
+        }
+
+    ratio = width / max(1, height)
+    ok = 0.75 <= ratio <= 1.34 and min(width, height) >= 64
+    message = "ok" if ok else (
+        f"看板尺寸不符合正方形/近正方形纹理看板要求: {width}x{height}。"
+        "禁止把正面成衣效果图、模特上身图或产品照作为面料看板输入。"
+    )
+    return {
+        "path": str(board_path),
+        "ok": ok,
+        "width": width,
+        "height": height,
+        "aspect_ratio": round(ratio, 3),
+        "message": message,
+    }
+
+
 class DualBoardGenerator:
     """双源看板生成器：并行调用 Neo AI 和 libtv。"""
 
@@ -97,12 +165,106 @@ class DualBoardGenerator:
         neo_size: str = "2K",
     ):
         self.out_dir = Path(out_dir)
-        self.neo_token = neo_token
-        self.libtv_key = libtv_key
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.neo_token = neo_token or os.environ.get("NEODOMAIN_ACCESS_TOKEN", "")
+        self.libtv_key = libtv_key or os.environ.get("LIBTV_ACCESS_KEY", "")
         self.max_retries = max_retries
         self.timeout = timeout
         self.neo_model = neo_model
         self.neo_size = neo_size
+        self.neo_script = resolve_neo_ai_script()
+        self.libtv_script_dir = resolve_libtv_script_dir()
+        self.health_report_path = self.out_dir / "dual_source_health_report.json"
+        self.invocations: list[dict] = []
+
+    def preflight(self) -> dict:
+        """检查 Neo AI 与 libtv-skill 是否可调用，并写出健康报告。"""
+        libtv_required = ["create_session.py", "query_session.py", "download_results.py"]
+        report = {
+            "neo": {
+                "script": str(self.neo_script),
+                "script_exists": self.neo_script.exists(),
+                "token_present": bool(self.neo_token),
+                "ok": False,
+                "errors": [],
+            },
+            "libtv": {
+                "script_dir": str(self.libtv_script_dir),
+                "script_dir_exists": self.libtv_script_dir.exists(),
+                "required_scripts": {
+                    name: (self.libtv_script_dir / name).exists()
+                    for name in libtv_required
+                },
+                "token_present": bool(self.libtv_key),
+                "ok": False,
+                "errors": [],
+            },
+            "policy": {
+                "both_sources_must_be_invoked": True,
+                "one_success_after_other_failure_can_continue": True,
+                "retry_only_when_both_sources_fail": True,
+                "forbidden_outputs": [
+                    "front-view garment render",
+                    "garment mockup",
+                    "model wearing garment",
+                    "mannequin render",
+                    "product photo",
+                ],
+                "allowed_outputs": [
+                    "textile collection board",
+                    "texture_set.json",
+                    "transparent pattern-piece PNG",
+                    "pattern-piece preview/contact sheet",
+                    "QC report",
+                ],
+            },
+            "invocations": list(self.invocations),
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+
+        if not report["neo"]["script_exists"]:
+            report["neo"]["errors"].append("Neo AI 面料看板脚本不存在")
+        if not report["neo"]["token_present"]:
+            report["neo"]["errors"].append("缺少 NEODOMAIN_ACCESS_TOKEN 或 --token")
+        report["neo"]["ok"] = not report["neo"]["errors"]
+
+        if not report["libtv"]["script_dir_exists"]:
+            report["libtv"]["errors"].append("libtv-skill scripts 目录不存在")
+        missing_libtv = [name for name, exists in report["libtv"]["required_scripts"].items() if not exists]
+        if missing_libtv:
+            report["libtv"]["errors"].append(f"libtv-skill 缺少脚本: {', '.join(missing_libtv)}")
+        if not report["libtv"]["token_present"]:
+            report["libtv"]["errors"].append("缺少 LIBTV_ACCESS_KEY 或 --libtv-key")
+        report["libtv"]["ok"] = not report["libtv"]["errors"]
+
+        report["overall_ok"] = bool(report["neo"]["ok"] and report["libtv"]["ok"])
+        self.health_report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return report
+
+    def ensure_preflight_ok(self) -> None:
+        report = self.preflight()
+        if report.get("overall_ok"):
+            print(f"[双源健康检查] 通过: {self.health_report_path}")
+            return
+        problems = []
+        for source in ("neo", "libtv"):
+            errors = report.get(source, {}).get("errors", [])
+            if errors:
+                problems.append(f"{source}: {'; '.join(errors)}")
+        raise DualBoardGenerationError(
+            "双源健康检查失败，不能进入主题图纹理生成。"
+            f" 报告: {self.health_report_path}；问题: {' | '.join(problems)}"
+        )
+
+    def _record_invocation(self, source: str, cmd: list[str], status: str, message: str = "") -> None:
+        self.invocations.append({
+            "source": source,
+            "cmd": _redact_cmd(cmd),
+            "status": status,
+            "message": message,
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        })
+        self.preflight()
 
     # ------------------------------------------------------------------
     # Neo AI
@@ -118,7 +280,7 @@ class DualBoardGenerator:
 
         cmd = [
             sys.executable,
-            str(NEO_AI_SCRIPT),
+            str(self.neo_script),
             "--model", self.neo_model,
             "--size", self.neo_size,
             "--output-format", "png",
@@ -128,9 +290,19 @@ class DualBoardGenerator:
         ]
 
         print(f"[Neo AI] 启动看板生成: model={self.neo_model}, size={self.neo_size}")
-        _run_subprocess(cmd, timeout=self.timeout)
+        self._record_invocation("neo", cmd, "started")
+        try:
+            _run_subprocess(cmd, timeout=self.timeout)
+        except Exception as exc:
+            self._record_invocation("neo", cmd, "failed", str(exc))
+            raise
 
         board_path = _latest_collection_board(neo_out_dir)
+        validation = validate_collection_board_shape(board_path)
+        if not validation.get("ok"):
+            self._record_invocation("neo", cmd, "failed", validation.get("message", "invalid board"))
+            raise RuntimeError(validation.get("message", "Neo AI 输出不是有效面料看板"))
+        self._record_invocation("neo", cmd, "succeeded", str(board_path))
         print(f"[Neo AI] 看板已生成: {board_path}")
         return board_path.resolve()
 
@@ -157,11 +329,16 @@ class DualBoardGenerator:
         # ---- 1. 创建会话 ----
         create_cmd = [
             sys.executable,
-            str(LIBTV_SCRIPT_DIR / "create_session.py"),
+            str(self.libtv_script_dir / "create_session.py"),
             description,
         ]
         print(f"[libtv] 创建会话并发送生成请求...")
-        stdout = _run_subprocess(create_cmd, env=env, timeout=60)
+        self._record_invocation("libtv", create_cmd, "started")
+        try:
+            stdout = _run_subprocess(create_cmd, env=env, timeout=60)
+        except Exception as exc:
+            self._record_invocation("libtv", create_cmd, "failed", str(exc))
+            raise
 
         try:
             session_data = json.loads(stdout)
@@ -189,7 +366,7 @@ class DualBoardGenerator:
 
             query_cmd = [
                 sys.executable,
-                str(LIBTV_SCRIPT_DIR / "query_session.py"),
+                str(self.libtv_script_dir / "query_session.py"),
                 session_id,
                 "--after-seq", "0",
             ]
@@ -259,12 +436,16 @@ class DualBoardGenerator:
         print(f"[libtv] 开始下载结果...")
         download_cmd = [
             sys.executable,
-            str(LIBTV_SCRIPT_DIR / "download_results.py"),
+            str(self.libtv_script_dir / "download_results.py"),
             session_id,
             "--output-dir", str(libtv_out_dir),
             "--prefix", "collection_board",
         ]
-        _run_subprocess(download_cmd, env=env, timeout=120)
+        try:
+            _run_subprocess(download_cmd, env=env, timeout=120)
+        except Exception as exc:
+            self._record_invocation("libtv", download_cmd, "failed", str(exc))
+            raise
 
         # ---- 4. 定位下载的图片 ----
         downloaded = sorted(libtv_out_dir.glob("collection_board_*.png")) + \
@@ -276,6 +457,11 @@ class DualBoardGenerator:
             raise RuntimeError(f"[libtv] 下载完成但未在 {libtv_out_dir} 找到图片文件")
 
         board_path = downloaded[0]
+        validation = validate_collection_board_shape(board_path)
+        if not validation.get("ok"):
+            self._record_invocation("libtv", download_cmd, "failed", validation.get("message", "invalid board"))
+            raise RuntimeError(validation.get("message", "libtv 输出不是有效面料看板"))
+        self._record_invocation("libtv", download_cmd, "succeeded", str(board_path))
         print(f"[libtv] 看板已下载: {board_path}")
         return board_path.resolve()
 
@@ -286,8 +472,8 @@ class DualBoardGenerator:
         """并行生成双源看板，返回成功结果列表。
 
         Returns:
-            list[dict]: 每个元素为 {"source": "neo|libtv", "path": Path, "style": "style_a|style_b"}
-            只要任一源成功即返回（可能只有 1 个元素）。
+            list[dict]: 每个元素为 {"source": "neo|libtv", "path": Path, "style": "style_a|style_b"}。
+            两个源都会被调用并等待结果；至少一个源成功时返回。
             双源均失败且重试耗尽则抛出 DualBoardGenerationError。
         """
         dual_prompts_path = Path(dual_prompts_path)
@@ -304,6 +490,12 @@ class DualBoardGenerator:
         neo_prompt_file.write_text(neo_prompt_text, encoding="utf-8")
 
         libtv_description = style_b.get("description", "")
+        if not neo_prompt_text.strip():
+            raise DualBoardGenerationError("dual_collection_prompts.json 中 style_a.prompt 为空")
+        if not libtv_description.strip():
+            raise DualBoardGenerationError("dual_collection_prompts.json 中 style_b.description 为空")
+
+        self.ensure_preflight_ok()
 
         for attempt in range(self.max_retries + 1):
             print(f"\n[双源生成] 第 {attempt + 1}/{self.max_retries + 1} 轮尝试...")
@@ -316,7 +508,7 @@ class DualBoardGenerator:
                     executor.submit(self.run_libtv, libtv_description): ("libtv", "style_b"),
                 }
 
-                for future in as_completed(future_to_source, timeout=self.timeout + 30):
+                for future in as_completed(future_to_source):
                     source, style = future_to_source[future]
                     try:
                         path = future.result()
@@ -327,17 +519,21 @@ class DualBoardGenerator:
                         print(f"[双源生成] ❌ {source} ({style}) 失败: {exc}")
 
             if results:
-                print(f"[双源生成] 本轮成功 {len(results)}/{2} 个源，继续下游流程")
-                return results
+                if len(results) == 1:
+                    failed_sources = sorted(set(["neo", "libtv"]) - {results[0]["source"]})
+                    print(f"[双源生成] 本轮成功 1/2 个源，另一个源已失败/超时: {', '.join(failed_sources)}，继续下游流程")
+                else:
+                    print("[双源生成] 本轮双源均成功，继续下游流程")
+                return sorted(results, key=lambda item: item["source"])
 
             if attempt < self.max_retries:
-                print(f"[双源生成] 全部失败，等待 5 秒后重试...")
+                print(f"[双源生成] 双源均失败，等待 5 秒后重新发起 AI 生成...")
                 time.sleep(5)
 
         # 全部重试耗尽
         err_detail = "; ".join(f"{k}: {v}" for k, v in errors.items())
         raise DualBoardGenerationError(
-            f"双源看板生成全部失败（已重试 {self.max_retries} 次）。错误详情: {err_detail}"
+            f"双源看板生成全部失败（已重试 {self.max_retries} 次）。错误详情: {err_detail}；健康报告: {self.health_report_path}"
         )
 
 
@@ -345,8 +541,8 @@ class DualBoardGenerator:
 # 命令行入口（用于独立测试）
 # =============================================================================
 def main() -> int:
-    parser = argparse.ArgumentParser(description="双源并行看板生成器（Neo AI + libtv）")
-    parser.add_argument("--dual-prompts", required=True, help="dual_collection_prompts.json 路径")
+    parser = argparse.ArgumentParser(description="双源并行看板生成器（Neo AI + libtv-skill）")
+    parser.add_argument("--dual-prompts", default="", help="dual_collection_prompts.json 路径")
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument("--token", default="", help="Neodomain 访问令牌。优先使用 NEODOMAIN_ACCESS_TOKEN 环境变量。")
     parser.add_argument("--libtv-key", default="", help="libtv Access Key。优先使用 LIBTV_ACCESS_KEY 环境变量。")
@@ -354,17 +550,11 @@ def main() -> int:
     parser.add_argument("--neo-size", default="2K", choices=["1K", "2K", "4K"])
     parser.add_argument("--max-retries", type=int, default=2)
     parser.add_argument("--timeout", type=int, default=300, help="单源最大等待时间（秒）")
+    parser.add_argument("--preflight-only", action="store_true", help="只检查双源脚本路径/token，不调用远程生成。")
     args = parser.parse_args()
 
     neo_token = args.token or os.environ.get("NEODOMAIN_ACCESS_TOKEN", "")
     libtv_key = args.libtv_key or os.environ.get("LIBTV_ACCESS_KEY", "")
-
-    if not neo_token:
-        print("错误: 必须提供 --token 或设置 NEODOMAIN_ACCESS_TOKEN 环境变量", file=sys.stderr)
-        return 1
-    if not libtv_key:
-        print("错误: 必须提供 --libtv-key 或设置 LIBTV_ACCESS_KEY 环境变量", file=sys.stderr)
-        return 1
 
     generator = DualBoardGenerator(
         out_dir=Path(args.out),
@@ -377,6 +567,13 @@ def main() -> int:
     )
 
     try:
+        if args.preflight_only:
+            report = generator.preflight()
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 0 if report.get("overall_ok") else 1
+        if not args.dual_prompts:
+            print("错误: 生成看板必须提供 --dual-prompts；只做健康检查可使用 --preflight-only。", file=sys.stderr)
+            return 1
         results = generator.generate(Path(args.dual_prompts))
         print("\n===== 生成结果 =====")
         for r in results:
