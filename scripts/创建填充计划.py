@@ -564,12 +564,13 @@ def apply_symmetry_relations(entries: list[dict], garment_map: dict, pieces_payl
             for master_pid, slaves in auto_relations.items():
                 master_gm = gm_pieces.get(master_pid, {})
                 master_role = master_gm.get("garment_role", "")
+                master_group = master_gm.get("symmetry_group") or master_gm.get("same_shape_group") or ""
                 # 大身裁片（front/back/secondary）默认不自动应用，需人工在 base.json 配置
                 auto_symmetry_roles = {
                     "sleeve_or_side_panel", "hem_or_lower_trim",
                     "trim_strip", "matched_panel", "small_detail",
                 }
-                can_auto_apply = master_role in auto_symmetry_roles
+                can_auto_apply = master_role in auto_symmetry_roles and "long_trim" not in master_group
                 for rel in slaves:
                     target_pid = rel["target_piece_id"]
                     if target_pid not in entries_by_id:
@@ -642,8 +643,8 @@ def _is_pair_texture_piece(item: dict) -> bool:
     role = item.get("garment_role", "")
     group = item.get("symmetry_group") or item.get("same_shape_group") or ""
     return (
-        role in {"front_body", "front_hero", "sleeve_pair", "collar_or_upper_trim"}
-        or any(token in group for token in ("front", "sleeve", "collar"))
+        role in {"front_body", "front_hero", "sleeve_pair", "collar_or_upper_trim", "trim_strip"}
+        or any(token in group for token in ("front", "sleeve", "collar", "trim"))
     )
 
 
@@ -852,7 +853,11 @@ def enforce_validation(
             })
             continue
         changed = False
-        for key in ("fill_type", "texture_id", "scale", "rotation", "offset_x", "offset_y", "mirror_x", "mirror_y"):
+        for key in (
+            "fill_type", "texture_id", "solid_id", "scale", "rotation",
+            "offset_x", "offset_y", "mirror_x", "mirror_y",
+            "texture_direction", "respect_pattern_orientation",
+        ):
             if base.get(key) != template.get(key):
                 base[key] = template[key]
                 changed = True
@@ -1125,7 +1130,10 @@ def _resync_group_consistency(entries: list[dict], issues: list) -> None:
         else:
             template = group_templates[group]
             changed = False
-            keys = ["fill_type", "texture_id", "scale", "rotation", "mirror_x", "mirror_y"]
+            keys = [
+                "fill_type", "texture_id", "solid_id", "scale", "rotation",
+                "mirror_x", "mirror_y", "texture_direction", "respect_pattern_orientation",
+            ]
             if not entry.get("pair_texture_constraint"):
                 keys.extend(["offset_x", "offset_y"])
             for key in keys:
