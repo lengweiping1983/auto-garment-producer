@@ -12,6 +12,7 @@
 Neo AI 负责创作 artwork。本脚本准备可用资产并以确定性方式渲染到裁片中。
 """
 import argparse
+import copy
 import datetime
 import hashlib
 import json
@@ -28,6 +29,7 @@ NEO_AI_SCRIPT = SKILL_DIR.parent / "neo-ai" / "scripts" / "generate_texture_coll
 HERO_NEGATIVE_PROMPT = (
     "text, labels, captions, titles, typography, words, letters, signage, logo, watermark, "
     "plain light box, colored background box, filled rectangle, background art, scenery, landscape, environment, "
+    "checkerboard transparency preview, fake transparency grid, "
     "full illustration scene, poster composition, sticker sheet, garment mockup, fashion model, mannequin, "
     "person wearing garment, product photo, lookbook, semi-transparent full-image patch"
 )
@@ -806,6 +808,143 @@ def ensure_theme_front_split(args, out_dir: Path, texture_set_path: Path) -> Non
         print(f"[警告] 主题前片切半资产生成失败，将继续使用普通面料规划: {exc}", file=sys.stderr)
 
 
+def _variant_texture_ids(texture_set: dict) -> list[str]:
+    preferred = ["main", "secondary", "accent_light", "accent_mid"]
+    available = [
+        item.get("texture_id")
+        for item in texture_set.get("textures", [])
+        if item.get("approved", False) and item.get("texture_id")
+    ]
+    ordered = [tid for tid in preferred if tid in available]
+    ordered.extend(tid for tid in available if tid not in ordered)
+    return ordered
+
+
+def write_single_texture_variant_set(texture_set: dict, texture_id: str, variant_dir: Path) -> Path:
+    """Write a texture_set that approves only one texture candidate for a variant."""
+    variant_dir.mkdir(parents=True, exist_ok=True)
+    texture = next((item for item in texture_set.get("textures", []) if item.get("texture_id") == texture_id), None)
+    if not texture:
+        raise RuntimeError(f"无法创建单纹理变体，texture_id 不存在: {texture_id}")
+    variant_set = copy.deepcopy(texture_set)
+    variant_set["texture_set_id"] = f"{texture_set.get('texture_set_id', 'texture_set')}_{texture_id}_single_texture"
+    variant_set["variant_texture_id"] = texture_id
+    variant_set["textures"] = [copy.deepcopy(texture)]
+    for item in variant_set["textures"]:
+        item["approved"] = True
+        item["candidate"] = False
+        item["role"] = item.get("role") or texture_id
+    path = variant_dir / "texture_set.json"
+    path.write_text(json.dumps(variant_set, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def force_fill_plan_to_single_texture(fill_plan: dict, texture_id: str) -> dict:
+    """Return a copy of fill_plan where every texture layer uses texture_id."""
+    plan = copy.deepcopy(fill_plan)
+    plan["plan_id"] = f"{plan.get('plan_id', 'piece_fill_plan')}_{texture_id}_single_texture"
+    plan["variant_texture_id"] = texture_id
+
+    def _force_layer(layer):
+        if isinstance(layer, dict):
+            if layer.get("fill_type") == "texture" or "texture_id" in layer:
+                layer["fill_type"] = "texture"
+                layer["texture_id"] = texture_id
+            for value in layer.values():
+                _force_layer(value)
+        elif isinstance(layer, list):
+            for item in layer:
+                _force_layer(item)
+
+    for piece in plan.get("pieces", []):
+        _force_layer(piece)
+        piece["variant_texture_id"] = texture_id
+    return plan
+
+
+def render_texture_variants(
+    out_dir: Path,
+    texture_set_path: Path,
+    fill_plan_path: Path,
+    pieces_path: Path,
+    default_rendered_dir: Path,
+) -> list[dict]:
+    """Render one 9-piece garment template per texture candidate."""
+    texture_set = load_json(texture_set_path)
+    base_fill_plan = load_json(fill_plan_path)
+    variant_ids = _variant_texture_ids(texture_set)
+    if not variant_ids:
+        raise RuntimeError("没有可用于生成裁片模板变体的 approved 纹理。")
+
+    base_plan_backup = out_dir / "piece_fill_plan_base.json"
+    base_plan_backup.write_text(json.dumps(base_fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    variants_root = out_dir / "variants"
+    summaries = []
+
+    for texture_id in variant_ids:
+        variant_dir = variants_root / texture_id
+        variant_texture_set_path = write_single_texture_variant_set(texture_set, texture_id, variant_dir)
+        variant_fill_plan = force_fill_plan_to_single_texture(base_fill_plan, texture_id)
+        variant_fill_plan_path = variant_dir / "piece_fill_plan.json"
+        variant_fill_plan_path.write_text(json.dumps(variant_fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        variant_rendered_dir = variant_dir / "rendered"
+        render_cmd = [
+            sys.executable,
+            str(SKILL_DIR / "scripts" / "渲染裁片.py"),
+            "--pieces", str(pieces_path),
+            "--texture-set", str(variant_texture_set_path),
+            "--fill-plan", str(variant_fill_plan_path),
+            "--out", str(variant_rendered_dir),
+        ]
+        run_step(render_cmd)
+
+        texture_path = ""
+        for texture in texture_set.get("textures", []):
+            if texture.get("texture_id") == texture_id:
+                texture_path = texture.get("path", "")
+                break
+        summaries.append({
+            "纹理ID": texture_id,
+            "纹理源图": texture_path,
+            "面料组合": str(variant_texture_set_path.resolve()),
+            "裁片填充计划": str(variant_fill_plan_path.resolve()),
+            "渲染目录": str(variant_rendered_dir.resolve()),
+            "预览图": str((variant_rendered_dir / "preview.png").resolve()),
+            "白底预览图": str((variant_rendered_dir / "preview_white.jpg").resolve()),
+            "联络单": str((variant_rendered_dir / "piece_contact_sheet.jpg").resolve()),
+            "清单": str((variant_rendered_dir / "texture_fill_manifest.json").resolve()),
+        })
+
+        if texture_id == "main":
+            fill_plan_path.write_text(json.dumps(variant_fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+            default_cmd = [
+                sys.executable,
+                str(SKILL_DIR / "scripts" / "渲染裁片.py"),
+                "--pieces", str(pieces_path),
+                "--texture-set", str(variant_texture_set_path),
+                "--fill-plan", str(fill_plan_path),
+                "--out", str(default_rendered_dir),
+            ]
+            run_step(default_cmd)
+
+    if "main" not in variant_ids:
+        first = variant_ids[0]
+        variant_fill_plan = force_fill_plan_to_single_texture(base_fill_plan, first)
+        fill_plan_path.write_text(json.dumps(variant_fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        first_texture_set_path = variants_root / first / "texture_set.json"
+        default_cmd = [
+            sys.executable,
+            str(SKILL_DIR / "scripts" / "渲染裁片.py"),
+            "--pieces", str(pieces_path),
+            "--texture-set", str(first_texture_set_path),
+            "--fill-plan", str(fill_plan_path),
+            "--out", str(default_rendered_dir),
+        ]
+        run_step(default_cmd)
+
+    return summaries
+
+
 def _apply_or_request_production_plan(
     args,
     out_dir: Path,
@@ -1382,15 +1521,13 @@ def main() -> int:
     run_step(plan_cmd)
 
     rendered_dir = out_dir / "rendered"
-    render_cmd = [
-        sys.executable,
-        str(SKILL_DIR / "scripts" / "渲染裁片.py"),
-        "--pieces", str(pieces_path),
-        "--texture-set", str(texture_set_path),
-        "--fill-plan", str(out_dir / "piece_fill_plan.json"),
-        "--out", str(rendered_dir),
-    ]
-    run_step(render_cmd)
+    variant_summaries = render_texture_variants(
+        out_dir=out_dir,
+        texture_set_path=texture_set_path,
+        fill_plan_path=out_dir / "piece_fill_plan.json",
+        pieces_path=pieces_path,
+        default_rendered_dir=rendered_dir,
+    )
 
     summary = {
         "面料看板": str(board_path),
@@ -1405,6 +1542,7 @@ def main() -> int:
         "白底预览图": str((rendered_dir / "preview_white.jpg").resolve()),
         "联络单": str((rendered_dir / "piece_contact_sheet.jpg").resolve()),
         "清单": str((rendered_dir / "texture_fill_manifest.json").resolve()),
+        "裁片模板变体": variant_summaries,
     }
     write_json(out_dir / "automation_summary.json", summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))

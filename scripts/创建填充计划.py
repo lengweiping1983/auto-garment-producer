@@ -246,9 +246,9 @@ def force_theme_front_split_overlays(entries: list[dict], pieces_payload: dict, 
         return entries
 
     by_id = {e.get("piece_id"): e for e in entries}
-    for pid, motif_id, side in (
-        (left_id, "theme_front_left", "左前片"),
-        (right_id, "theme_front_right", "右前片"),
+    for pid, motif_id, side, anchor, seam_lock in (
+        (left_id, "theme_front_left", "左前片", "right", "right"),
+        (right_id, "theme_front_right", "右前片", "left", "left"),
     ):
         entry = by_id.get(pid)
         if not entry:
@@ -257,12 +257,13 @@ def force_theme_front_split_overlays(entries: list[dict], pieces_payload: dict, 
             "motif",
             f"用户主题主体切半强制落位到{side}",
             motif_id=motif_id,
-            anchor="center",
+            anchor=anchor,
             scale=0.98,
             rotation=0,
             opacity=1.0,
             offset_x=0,
             offset_y=0,
+            seam_lock=seam_lock,
         )
         entry["garment_role"] = "front_body"
         entry["zone"] = "body"

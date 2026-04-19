@@ -103,11 +103,11 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
             "do_not_use_as_full_body_texture": ["不适合大面积满版的具象元素"]
         },
         "generated_prompts": {
-            "main": "英文 seamless tileable low-density tonal leaf repeat pattern prompt，淡底、可见但安静的叶片重复结构，不得是 abstract wash / plain color wash / blurred background / empty texture",
-            "secondary": "英文 coordinating repeat prompt",
+            "main": "英文 seamless tileable visible repeat pattern prompt，必须有具体小元素/botanical/geometric/line repeat 结构，稳定密度，不得是 abstract wash / plain texture / paper grain only / gradient / empty background / tonal atmosphere only / blurred background",
+            "secondary": "英文 coordinating seamless tileable visible repeat pattern prompt，必须有具体小元素/lattice/linework/leaves/dots/geometric repeat 结构，稳定密度，不得是 abstract wash / plain texture / paper grain only / gradient / empty background / tonal atmosphere only",
             "accent_light": "英文 small-scale accent repeat prompt",
             "accent_mid": "英文 soft geometric or organic lattice repeat prompt",
-            "hero_motif_1": "英文 isolated foreground hero motif only as transparent PNG cutout with real alpha background, user main desired content only, no background, no garden, no foliage behind subject, no full illustration scene, no colored box"
+            "hero_motif_1": "英文 isolated foreground hero motif only as transparent PNG cutout with real alpha background, preserve and recreate the primary subject from the user's reference image as much as possible, people/faces/characters/animals/products/icons/objects are allowed if they are the main content, keep its recognizable silhouette/colors/pose/key details, no background, no checkerboard transparency preview, no fake transparency grid, no garden, no foliage behind subject, no full illustration scene, no colored box"
         }
     }
     lines = [
@@ -124,7 +124,7 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "4. style: medium、brush_quality、mood、pattern_density、line_style、overall_impression。",
         "5. fabric_hints: 判断 has_nap；若 true，nap_direction 必填 vertical/horizontal。关键词含 corduroy/velvet/fleece/suede/plush/毛呢/法兰绒等。",
         "6. theme_to_piece_strategy: 把主题工程化拆成 base_atmosphere、hero_motif、accent_details、quiet_zones；明确哪些具象元素不得作为大身满版纹理。",
-        "7. generated_prompts: 只生成英文 main/secondary/accent_light/accent_mid/hero_motif_1 共5条提示词；前4条 texture 要 seamless tileable、low noise 且有明确 repeat 结构；hero_motif_1 是用户想要的主要内容，必须是 isolated foreground、transparent PNG cutout、real alpha background、no background、no colored box。",
+        "7. generated_prompts: 只生成英文 main/secondary/accent_light/accent_mid/hero_motif_1 共5条提示词；前4条 texture 要 seamless tileable、low noise 且有明确 visible repeat 结构，必须包含具体小元素、植物、几何、线条、散点或格纹等可裁剪图案，不得是空泛底纹；hero_motif_1 必须尽可能包含并复现用户参考图中的主要内容/核心主体（人物、脸、角色、动物、商品、图标、物体都允许作为主图主体），保留可识别轮廓、色彩、姿态和关键细节，且必须是 isolated foreground、transparent PNG cutout、real alpha background、no background、no checkerboard transparency preview、no fake transparency grid、no colored box。",
         "",
         "===== 主题元素 S/A/B/C 分级规则 =====",
         "S级：完整动物、人脸/人像、文字、商标、完整建筑、完整场景、复杂叙事插画。绝不能进入 base texture，只能拒绝、简化为剪影，或作为很小的定位 motif。",
@@ -132,7 +132,7 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "B级：小花、小叶、抽象笔触点缀、小型几何元素。只能作小面积 accent。",
         "C级：主题色彩晕染、无具象形状的抽象纹理、水彩底、低对比噪点底、低对比小循环几何。可作大身 base。",
         "所有 S 级元素、以及不适合大身的 A 级元素，必须写入 theme_to_piece_strategy.do_not_use_as_full_body_texture。",
-        "generated_prompts.main/secondary/accent_light/accent_mid 必须是可平铺面料纹理，只能继承色彩、笔触、氛围，不得直接包含 S/A 级具象主体名称，不得包含场景、风景、环境、完整画面。",
+        "generated_prompts.main/secondary/accent_light/accent_mid 必须是可平铺面料纹理，只能继承色彩、笔触、氛围，不得直接包含 S/A 级具象主体名称，不得包含场景、风景、环境、完整画面；main/secondary 也必须像 accent_light/accent_mid 一样有清晰 repeat 图案结构，不得是纸纹、渐变、抽象波纹或空底。",
         "geometry 只描述主体在参考图中的尺寸和位置；真正穿到衣服上时，必须通过 garment_placement_hint 转换成裁片 bounding box 内的比例。",
         "S/A 级主体若允许作为 hero，garment_placement_hint 必须建议小型胸口定位：宽度默认 0.28–0.34，高度默认 0.22–0.32，anchor 默认 chest_center。",
         "garment_placement_hint.anti_examples 必须列出禁止用法，例如 full bleed、跨肩缝、跨袖窿、跨领口、完整场景满版。",
@@ -159,10 +159,12 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "- 多张参考图必须融合为同一个主题方向，不要输出多套方案",
         "- 每个主体/辅助元素要标注 source_image_refs，便于后续追溯来源",
         "- generated_prompts 用具体视觉词；避免 very/really/beautiful/nice/good/great/perfect 等空泛词",
-        "- generated_prompts.hero_motif_1 必须明确 isolated foreground motif only, transparent PNG cutout, real alpha background, user main desired content only, no background, no colored rectangle, no plain light box",
+        "- generated_prompts.main 和 generated_prompts.secondary 必须明确 concrete visible repeat pattern、small motif repeat、botanical/geometric/line/scattered repeat 等具体图案结构，不得写 abstract wash、plain texture、paper grain only、gradient、empty background、tonal atmosphere only",
+        "- generated_prompts.hero_motif_1 必须明确 preserve and recreate the primary subject from the user's reference image as much as possible，包含用户图片中的主要内容/核心主体，人物、脸、角色、动物、商品、图标、物体都允许作为透明主图主体，保留可识别轮廓、色彩、姿态和关键特征",
+        "- generated_prompts.hero_motif_1 必须明确 isolated foreground motif only, transparent PNG cutout, real alpha background, no background, no checkerboard transparency preview, no fake transparency grid, no colored rectangle, no plain light box",
         "- generated_prompts.hero_motif_1 必须是前景主体 cutout，不得写 scene、garden、meadow、landscape、environment、foliage behind subject、botanical backdrop、painted wash、vignette、rectangular composition 或 full illustration scene",
-        "- generated_prompts.main 必须是低密度 tonal leaf repeat pattern，淡底、可见但安静；不得写 abstract wash、plain color wash、blurred background 或 empty texture",
-        "- 负向逻辑必须覆盖 no text, no watermark, no logo, no faces；除非用户明确要求，不要动物",
+        "- generated_prompts.main 必须是低密度 visible repeat pattern，淡底、可见但安静；不得写 abstract wash、plain color wash、plain texture、paper grain only、gradient、blurred background、empty texture 或 tonal atmosphere only",
+        "- 纹理格负向逻辑必须覆盖 no text, no watermark, no logo, no faces；但 hero_motif_1 不得禁止 people/faces/characters/animals，因为用户图片主要内容可能包含这些主体",
         "- 不要返回任何解释文字，只返回 JSON",
     ]
     return "\n".join(lines)

@@ -349,8 +349,17 @@ def render_motif_layer(piece: dict, layer: dict, motif_info: dict, underlay: Ima
     if abs(rotation % 360) > 0.001:
         motif = motif.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
     content = Image.new("RGBA", (piece["width"], piece["height"]), (0, 0, 0, 0))
-    # 智能放置：防切割 + 视觉重心
-    pos = smart_motif_placement(motif, piece, layer)
+    if layer.get("seam_lock"):
+        pos = anchor_position(
+            layer.get("anchor", "center"),
+            (piece["width"], piece["height"]),
+            motif.size,
+            int(layer.get("offset_x", 0) or 0),
+            int(layer.get("offset_y", 0) or 0),
+        )
+    else:
+        # 智能放置：防切割 + 视觉重心
+        pos = smart_motif_placement(motif, piece, layer)
     content.alpha_composite(motif, pos)
     return content
 

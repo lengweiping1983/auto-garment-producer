@@ -3,7 +3,86 @@
 import json
 from pathlib import Path
 
-from PIL import Image, ImageStat
+from PIL import Image, ImageFilter, ImageStat
+
+
+def _has_meaningful_alpha(rgba: Image.Image) -> bool:
+    alpha = rgba.getchannel("A")
+    extrema = alpha.getextrema()
+    if extrema[0] < 245:
+        bbox = alpha.getbbox()
+        if not bbox:
+            return False
+        area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+        return area < rgba.width * rgba.height * 0.995
+    return False
+
+
+def _edge_pixels(rgb: Image.Image) -> list[tuple[int, int, int]]:
+    w, h = rgb.size
+    step = max(1, min(w, h) // 96)
+    pixels = rgb.load()
+    out = []
+    for x in range(0, w, step):
+        out.append(pixels[x, 0])
+        out.append(pixels[x, h - 1])
+    for y in range(0, h, step):
+        out.append(pixels[0, y])
+        out.append(pixels[w - 1, y])
+    return out
+
+
+def _is_background_like(color: tuple[int, int, int]) -> bool:
+    r, g, b = color
+    spread = max(color) - min(color)
+    avg = (r + g + b) / 3
+    return spread <= 42 or avg >= 232
+
+
+def _quantize(color: tuple[int, int, int], step: int = 16) -> tuple[int, int, int]:
+    return tuple(max(0, min(255, round(v / step) * step)) for v in color)
+
+
+def _edge_background_palette(rgb: Image.Image) -> list[tuple[int, int, int]]:
+    samples = [c for c in _edge_pixels(rgb) if _is_background_like(c)]
+    if not samples:
+        return []
+    counts: dict[tuple[int, int, int], int] = {}
+    for color in samples:
+        key = _quantize(color)
+        counts[key] = counts.get(key, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: item[1], reverse=True)
+    edge_count = max(1, len(_edge_pixels(rgb)))
+    palette = [color for color, count in ranked[:6] if count / edge_count >= 0.015]
+    return palette
+
+
+def _remove_false_transparency_background(img: Image.Image) -> Image.Image:
+    """Turn common AI fake-transparent checker/flat edge backgrounds into real alpha."""
+    rgba = img.convert("RGBA")
+    if _has_meaningful_alpha(rgba):
+        return rgba
+
+    rgb = rgba.convert("RGB")
+    palette = _edge_background_palette(rgb)
+    if not palette:
+        return rgba
+
+    src = rgba.load()
+    alpha = Image.new("L", rgba.size, 255)
+    alpha_px = alpha.load()
+    threshold = 54
+    for y in range(rgba.height):
+        for x in range(rgba.width):
+            r, g, b, _ = src[x, y]
+            for bg in palette:
+                dist = abs(r - bg[0]) + abs(g - bg[1]) + abs(b - bg[2])
+                if dist <= threshold and _is_background_like((r, g, b)):
+                    alpha_px[x, y] = 0
+                    break
+    alpha = alpha.filter(ImageFilter.GaussianBlur(0.45))
+    rgba.putalpha(alpha)
+    return rgba
 
 
 def _background_sample(img: Image.Image) -> tuple[int, int, int]:
@@ -52,7 +131,7 @@ def _subject_bbox(img: Image.Image) -> tuple[int, int, int, int] | None:
 
 
 def _crop_subject(img: Image.Image) -> Image.Image:
-    rgba = img.convert("RGBA")
+    rgba = _remove_false_transparency_background(img)
     w, h = rgba.size
     bbox = _subject_bbox(rgba)
     if not bbox:
@@ -79,8 +158,9 @@ def create_front_split_assets(theme_image: str | Path, out_dir: str | Path) -> d
     with Image.open(theme_image) as src:
         subject = _crop_subject(src)
     mid = max(1, subject.width // 2)
-    left = subject.crop((0, 0, mid, subject.height))
-    right = subject.crop((mid, 0, subject.width, subject.height))
+    overlap = min(8, max(2, round(subject.width * 0.01))) if subject.width > 4 else 0
+    left = subject.crop((0, 0, min(subject.width, mid + overlap), subject.height))
+    right = subject.crop((max(0, mid - overlap), 0, subject.width, subject.height))
     left_path = assets_dir / "theme_front_left.png"
     right_path = assets_dir / "theme_front_right.png"
     left.save(left_path)
@@ -89,6 +169,7 @@ def create_front_split_assets(theme_image: str | Path, out_dir: str | Path) -> d
         "left": str(left_path.resolve()),
         "right": str(right_path.resolve()),
         "source": str(Path(theme_image).resolve()),
+        "split_overlap_px": overlap,
     }
 
 

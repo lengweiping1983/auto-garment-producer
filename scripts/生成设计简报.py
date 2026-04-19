@@ -265,15 +265,26 @@ def _generate_outputs(
     }
 
     def _make_prompt(texture_id: str, purpose: str, prompt_text: str, panel: str = "", role: str = "") -> dict:
+        if role == "placement_motif":
+            negative_prompt = (
+                "text, labels, captions, titles, typography, words, letters, logo, watermark, "
+                "full landscape, poster, sticker, harsh black outline, dense confetti, neon colors, muddy colors, "
+                "plain light box, colored background box, filled rectangular background, background scene, scenery, "
+                "checkerboard transparency preview, fake transparency grid, "
+                "garment mockup, fashion model, mannequin, person wearing garment, product photo, lookbook, "
+                "semi-transparent full-image patch"
+            )
+        else:
+            negative_prompt = (
+                "animals, characters, faces, people, text, labels, captions, titles, typography, words, "
+                "letters, logo, watermark, house, full landscape, poster, sticker, harsh black outline, "
+                "dense confetti, neon colors, muddy colors, " + FRONT_EFFECT_NEGATIVE_EN
+            )
         item = {
             "texture_id": texture_id,
             "purpose": purpose,
             "prompt": prompt_text,
-            "negative_prompt": (
-                "animals, characters, faces, people, text, labels, captions, titles, typography, words, "
-                "letters, logo, watermark, house, full landscape, poster, sticker, harsh black outline, "
-                "dense confetti, neon colors, muddy colors, " + FRONT_EFFECT_NEGATIVE_EN
-            ),
+            "negative_prompt": negative_prompt,
         }
         if panel:
             item["panel"] = panel
@@ -291,10 +302,11 @@ def _generate_outputs(
     # Row 1 — Base textures
     base_guard = (
         "commercial apparel repeat, only atmosphere and color from the theme, no large figurative subject, "
-        "no mushroom or animal as full-body hero, no complete scene, no landscape, no scenery, no environment, no poster composition, cohesive with all other panels"
+        "no mushroom or animal as full-body hero, no complete scene, no landscape, no scenery, no environment, no poster composition, cohesive with all other panels, "
+        "must contain concrete visible repeat elements, no abstract wash, no plain texture, no paper grain only, no gradient, no empty background, no tonal atmosphere only"
     )
-    main_prompt = gp.get("main", f"seamless tileable low-density tonal leaf repeat pattern on pale ground, faint leaf silhouettes inspired by {motif_str}, visible but quiet structure, commercial apparel base fabric, abundant breathing room, same {medium} brush style, no abstract wash, no plain color wash, no blurred background, no empty texture, no figurative subject, no flower bouquet, no landscape scene, no environment, no scenery, {base_guard}, no text")
-    secondary_prompt = gp.get("secondary", f"seamless tileable coordinating textile texture, soft light ground with delicate abstract pattern inspired by {motif_str}, medium density but airy, same {medium} brush style, no standalone scene, no environment, {base_guard}, no text")
+    main_prompt = gp.get("main", f"seamless tileable visible repeat pattern on pale ground, concrete small botanical or geometric motifs inspired by {motif_str}, stable low-to-medium density, clear repeated elements, commercial apparel base fabric, abundant breathing room, same {medium} brush style, no abstract wash, no plain texture, no paper grain only, no gradient, no empty background, no tonal atmosphere only, no blurred background, no figurative subject, no flower bouquet, no landscape scene, no environment, no scenery, {base_guard}, no text")
+    secondary_prompt = gp.get("secondary", f"seamless tileable coordinating visible repeat pattern, soft light ground with concrete small motifs, lattice, linework, leaves, dots, or controlled geometric elements inspired by {motif_str}, medium density but airy, same {medium} brush style, stable repeat structure, no standalone scene, no environment, no abstract wash, no plain texture, no paper grain only, no gradient, no empty background, no tonal atmosphere only, {base_guard}, no text")
 
     # Row 2 — Mid-scale accent textures（全部走 gp.get，无硬编码）
     accent_prompt = gp.get("accent_light", gp.get("accent", f"seamless tileable small-scale accent pattern, tiny scattered elements inspired by {motif_str}, very small scale repeating, charming but controlled density, same palette and brush as main panel, no standalone scene, no text"))
@@ -305,13 +317,18 @@ def _generate_outputs(
             "isolated foreground motif only, transparent PNG cutout, real alpha background, "
             "empty transparent pixels around the subject, no background, no background art, "
             "no plain light background, no plain warm background, no colored background box, "
-            "no filled rectangular background, no scenery, no semi-transparent full-image patch"
+            "no filled rectangular background, no checkerboard transparency preview, no fake transparency grid, "
+            "no scenery, no semi-transparent full-image patch"
         )
         hero_required = (
+            "hero_motif_1 must preserve and recreate the primary subject from the user's reference image as much as possible, "
+            "people, faces, characters, animals, products, icons, objects, or logos are allowed if they are the user's main image content, "
+            "keep the recognizable silhouette, color identity, pose, proportions, and key visual details, "
             "hero_motif_1 must be foreground subject only, no scene, no garden, "
             "no meadow, no landscape, no environment, no foliage behind subject, "
             "no botanical backdrop, no painted wash behind subject, no vignette, "
-            "no rectangular composition, no full illustration scene, no ground shadow"
+            "no rectangular composition, no full illustration scene, no checkerboard transparency preview, "
+            "no fake transparency grid, no ground shadow"
         )
         text = prompt_text.strip()
         for old in (
@@ -329,6 +346,7 @@ def _generate_outputs(
             "background art",
         ):
             text = text.replace(old, "transparent alpha background")
+        text = text.replace("as as possible", "as much as possible")
         lower = text.lower()
         suffix = required
         if motif_id == "hero_motif_1":
@@ -340,9 +358,10 @@ def _generate_outputs(
         return f"{text}, {suffix}"
 
     # Independent hero motif must be generated as a transparent cutout.
-    motif_guard = "isolated foreground motif only, transparent PNG cutout, real alpha background, no background, no plain-color box, no filled rectangular background, no scenery, no semi-transparent full-image patch"
-    hero_guard = f"{motif_guard}, no garden, no meadow, no landscape, no environment, no foliage behind subject, no botanical backdrop, no painted wash behind subject, no rectangular composition, no full illustration scene, no vignette, no ground shadow"
-    hero_motif_1_prompt = _force_transparent_motif_prompt(gp.get("hero_motif_1", gp.get("hero_motif", f"isolated foreground hero motif only, centered subject, transparent PNG cutout with real alpha background, empty transparent pixels around the subject, soft clean edges, balanced negative space, {medium} hand-painted placement print element, {hero_guard}, no text")), "hero_motif_1")
+    motif_guard = "isolated foreground motif only, transparent PNG cutout, real alpha background, no background, no checkerboard transparency preview, no fake transparency grid, no plain-color box, no filled rectangular background, no scenery, no semi-transparent full-image patch"
+    hero_source_guard = "preserve and recreate the primary subject from the user's reference image as much as possible, people, faces, characters, animals, products, icons, objects, or logos are allowed if they are the user's main image content, keep the recognizable silhouette, color identity, pose, proportions, and key visual details"
+    hero_guard = f"{hero_source_guard}, {motif_guard}, no garden, no meadow, no landscape, no environment, no foliage behind subject, no botanical backdrop, no painted wash behind subject, no rectangular composition, no full illustration scene, no vignette, no ground shadow"
+    hero_motif_1_prompt = _force_transparent_motif_prompt(gp.get("hero_motif_1", gp.get("hero_motif", f"isolated foreground hero motif only, centered subject, transparent PNG cutout with real alpha background, {hero_source_guard}, empty transparent pixels around the subject, soft clean edges, balanced negative space, {medium} hand-painted placement print element, {hero_guard}, no text")), "hero_motif_1")
 
     def _inject_palette_constraints(prompt_text: str, texture_id: str, palette: dict) -> str:
         """为提示词追加具体的 hex 颜色硬约束，减少 AI 生成时的颜色偏差。"""
@@ -354,9 +373,9 @@ def _generate_outputs(
 
         constraints = []
         if texture_id == "main" and primary:
-            constraints.append(f"ground color must be exactly {primary[0]}, keep a visible low-density leaf repeat, no abstract wash, no plain color wash, no blurred background, no figurative elements, no scene, no landscape")
+            constraints.append(f"ground color must be exactly {primary[0]}, keep a visible repeat pattern with concrete small motifs, no abstract wash, no plain color wash, no plain texture, no paper grain only, no gradient, no empty background, no tonal atmosphere only, no blurred background, no figurative elements, no scene, no landscape")
         elif texture_id == "secondary" and secondary:
-            constraints.append(f"light ground and pattern tones must stay within {secondary[0]} family, no warm cast, no scene")
+            constraints.append(f"light ground and pattern tones must stay within {secondary[0]} family, keep a visible repeat pattern with concrete small motifs or lattice, no abstract wash, no plain texture, no paper grain only, no gradient, no empty background, no tonal atmosphere only, no warm cast, no scene")
         elif texture_id == "accent_light" and (accent or primary):
             c = accent[0] if accent else primary[0]
             constraints.append(f"scattered accent elements must use {c} tones only")
@@ -365,7 +384,7 @@ def _generate_outputs(
         elif texture_id == "hero_motif_1" and primary:
             bg = primary[0] if primary else "#ffffff"
             fg = accent[0] if accent else (secondary[0] if secondary else bg)
-            constraints.append(f"transparent alpha background only, isolated foreground subject painted in {fg} tones, empty transparent pixels around the subject, soft fading edges, no colored background box, no garden, no foliage behind subject, no botanical backdrop, no rectangular composition, no full illustration scene")
+            constraints.append(f"transparent alpha background only, preserve the user's main reference subject as much as possible, isolated foreground subject painted in {fg} tones while keeping recognizable source-image silhouette and key details, empty transparent pixels around the subject, soft fading edges, no checkerboard transparency preview, no fake transparency grid, no colored background box, no garden, no foliage behind subject, no botanical backdrop, no rectangular composition, no full illustration scene")
 
         if constraints:
             return f"{prompt_text}, color constraint: {', '.join(constraints)}"

@@ -29,11 +29,11 @@ COMMERCIAL_FILL_RULES_ZH = [
 ]
 
 PANEL_DEFAULTS_EN = {
-    "main": "seamless tileable low-density tonal leaf repeat pattern on pale ground, faint leaf silhouettes, visible but quiet structure, commercial apparel base fabric, abundant breathing room, no abstract wash, no plain color wash, no blurred background, no empty texture, no scene, no landscape, no text",
-    "secondary": "coordinated medium-density pattern on light ground, same palette, no scene, no text",
+    "main": "seamless tileable visible repeat pattern with concrete small botanical or geometric motifs on pale ground, stable low-to-medium density, clearly repeatable elements, commercial apparel base fabric, no abstract wash, no plain texture, no paper grain only, no gradient, no empty background, no tonal atmosphere only, no blurred background, no scene, no landscape, no text",
+    "secondary": "seamless tileable coordinating visible repeat pattern with concrete small motifs, lattice, linework, leaves, dots, or controlled geometric elements, stable repeat structure on light ground, same palette, no abstract wash, no plain texture, no paper grain only, no gradient, no empty background, no tonal atmosphere only, no scene, no text",
     "accent_light": "tiny scattered small-scale pattern on light ground, controlled density, no text",
     "accent_mid": "soft geometric or organic lattice on pale ground, same palette, seamless tileable texture, no text",
-    "hero_motif_1": "isolated foreground hero motif only, centered subject, transparent PNG cutout, real alpha background, empty transparent pixels around the subject, no background, no background art, no scenery, no garden, no foliage behind subject, no botanical backdrop, no painted wash, no rectangular composition, no full illustration scene, no vignette, no ground shadow, no text",
+    "hero_motif_1": "isolated foreground hero motif only, centered subject, transparent PNG cutout, real alpha background, preserve and recreate the primary subject from the user's reference image as much as possible, keep the recognizable silhouette, color identity, pose, proportions, and key visual details, empty transparent pixels around the subject, no background, no checkerboard transparency preview, no background art, no scenery, no garden, no foliage behind subject, no botanical backdrop, no painted wash, no rectangular composition, no full illustration scene, no vignette, no ground shadow, no text",
 }
 
 TEXTURE_2X2_POSITIONS_EN = [
@@ -64,6 +64,8 @@ def build_texture_2x2_board_prompt_en(panel_prompts: dict, style: dict | None = 
         "Do not mix separate visual worlds such as warm beige line-art mushrooms with green watercolor meadow panels unless the palette and brush style are fully unified.",
         "Every panel must look like a fabric swatch, not a painting, scene, mockup, sticker sheet, or placement motif.",
         "No large figurative subject, complete scene, landscape, scenery, environment, animal, character, mushroom, or flower bouquet as a full-body hero texture.",
+        "Top-left and Top-right must be concrete visible repeat patterns like the bottom row: clear repeated elements, stable density, and cuttable textile structure.",
+        "Top-left and Top-right must not be abstract waves, gradient wash, paper grain only, plain texture, tonal atmosphere, empty background, blurred background, or blank fabric.",
     ]
     for label, panel_id in TEXTURE_2X2_POSITIONS_EN:
         prompt = panel_prompts.get(panel_id) or PANEL_DEFAULTS_EN[panel_id]
@@ -82,9 +84,12 @@ def build_transparent_hero_prompt_en(hero_prompt: str, style: dict | None = None
     lines = [
         "Create one isolated foreground apparel placement graphic as a transparent PNG cutout with real alpha background.",
         f"Art direction: {compact_style_line(style)}",
-        "The subject must be the user's main desired content only, centered, cleanly separated from the background, with soft but readable edges.",
+        "The subject must contain the primary subject from the user's reference image as much as possible, not a generic substitute.",
+        "People, faces, characters, animals, products, icons, objects, or logos from the user's reference image are allowed as the hero subject when they are the main content.",
+        "Preserve the recognizable silhouette, color identity, pose, proportions, and key visual details of the user's main image content while simplifying only enough for a clean apparel placement graphic.",
+        "The subject must be centered, cleanly separated from the background, with soft but readable edges.",
         prompt,
-        "Required output: real transparent alpha pixels around the subject, no background, no plain light box, no colored background box, no filled rectangle, no scenery, no full illustration scene, no sticker sheet, no poster composition, no garment mockup, no model, no text, no logo, no watermark.",
+        "Required output: real transparent alpha pixels around the subject, no background, no checkerboard transparency preview, no fake transparency grid, no plain light box, no colored background box, no filled rectangle, no scenery, no full illustration scene, no sticker sheet, no poster composition, no garment mockup, no model, no text, no logo, no watermark.",
         "Leave balanced empty transparent pixels around the subject so it can be split vertically across left and right front garment pieces.",
     ]
     return "\n".join(lines)
