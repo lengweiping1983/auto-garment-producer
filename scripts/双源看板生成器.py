@@ -154,10 +154,11 @@ def validate_collection_board_shape(board_path: Path) -> dict:
         }
 
     ratio = width / max(1, height)
-    ok = 0.75 <= ratio <= 1.34 and min(width, height) >= 64
+    ok = 0.5 <= ratio <= 2.0 and min(width, height) >= 512
     message = "ok" if ok else (
-        f"看板尺寸不符合正方形/近正方形纹理看板要求: {width}x{height}。"
-        "禁止把正面成衣效果图、模特上身图或产品照作为面料看板输入。"
+        f"看板尺寸异常: {width}x{height} (ratio={ratio:.2f})。"
+        "期望为 3x3 面料九宫格看板，宽高比应在 0.5~2.0 之间且短边不低于 512px。"
+        "请确认输出不是正面成衣效果图、模特上身图或产品照。"
     )
     return {
         "path": str(board_path),
@@ -504,6 +505,19 @@ class DualBoardGenerator:
             stdout=_truncate(proc.stdout),
         )
         print(f"[libtv] 看板已生成: {board_path}")
+
+        # ---- 清理历史 run 目录：只保留本次成功的 run ----
+        libtv_parent = libtv_out_dir.parent
+        if libtv_parent.exists():
+            for old_dir in libtv_parent.glob("run_*"):
+                if old_dir.is_dir() and old_dir.name != run_id:
+                    try:
+                        import shutil
+                        shutil.rmtree(old_dir)
+                        print(f"[libtv] 清理历史 run 目录: {old_dir.name}")
+                    except Exception as exc:
+                        print(f"[libtv] 清理历史目录失败 {old_dir.name}: {exc}")
+
         return board_path.resolve()
 
     # ------------------------------------------------------------------

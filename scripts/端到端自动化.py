@@ -1211,6 +1211,50 @@ def _run_render_pipeline(
     use_legacy = args.mode == "legacy"
     production_plan_path = out_dir / "ai_production_plan.json"
 
+    # 输入指纹校验：若关键输入变化，删除旧生产规划产物避免新旧主题混杂
+    def _compute_production_input_fingerprint() -> str:
+        parts = []
+        for p in (args.visual_elements, args.collection_board, args.texture_set, args.pattern):
+            parts.append(file_sha256(p) if p else "")
+        parts.append(args.garment_type or "")
+        parts.append(args.mode)
+        return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+    prod_fp_path = out_dir / ".production_input_fingerprint.json"
+    current_prod_fp = _compute_production_input_fingerprint()
+    stale = False
+    if prod_fp_path.exists():
+        try:
+            stored = json.loads(prod_fp_path.read_text(encoding="utf-8")).get("fingerprint", "")
+            if stored != current_prod_fp:
+                stale = True
+        except Exception:
+            stale = True
+    else:
+        # 如果存在旧生产规划文件但没有指纹，也视为 stale
+        stale = production_plan_path.exists()
+
+    if stale:
+        for stale_file in (
+            "ai_production_plan.json",
+            "ai_piece_fill_plan.json",
+            "piece_fill_plan.json",
+            "art_direction_plan.json",
+        ):
+            p = out_dir / stale_file
+            if p.exists():
+                p.unlink()
+                print(f"[输入变更] 删除旧生产规划产物: {p.name}")
+        # 同时清除可能缓存的旧计划
+        for rev_file in out_dir.glob("ai_piece_fill_plan_rev*.json"):
+            rev_file.unlink()
+            print(f"[输入变更] 删除旧返工计划: {rev_file.name}")
+
+    prod_fp_path.write_text(json.dumps({
+        "fingerprint": current_prod_fp,
+        "updated_at": datetime.datetime.now().isoformat(),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
     if args.production_plan:
         provided = Path(args.production_plan)
         if provided.exists():
@@ -1690,6 +1734,57 @@ def main() -> int:
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- 输出目录自动隔离：防止新任务覆盖旧目录 ----
+    def _compute_task_fingerprint() -> str:
+        """基于当前 CLI 原始输入计算任务指纹（排除中间产物路径）。"""
+        parts = []
+        # 主题图（原始输入）
+        for t in (args.theme_images or []):
+            parts.append(file_sha256(t))
+        # 纸样（原始输入）
+        if args.pattern:
+            parts.append(file_sha256(args.pattern))
+        # 视觉元素（原始输入）
+        if args.visual_elements:
+            parts.append(file_sha256(args.visual_elements))
+        # 服装类型与模式
+        parts.append(args.garment_type or "")
+        parts.extend([args.mode, str(args.dual_source), str(args.multi_scheme)])
+        return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+    import re
+    fingerprint_path = out_dir / ".task_fingerprint.json"
+    need_new_subdir = False
+    # 如果目录名已经是时间戳格式（如 20260419_110639），视为已隔离，不再嵌套
+    is_timestamp_dir = bool(re.match(r"^\d{8}_\d{6}$", out_dir.name))
+
+    if not is_timestamp_dir and out_dir.exists() and any(out_dir.iterdir()):
+        existing_fp = ""
+        if fingerprint_path.exists():
+            try:
+                existing_fp = json.loads(fingerprint_path.read_text(encoding="utf-8")).get("fingerprint", "")
+            except Exception:
+                pass
+        current_fp = _compute_task_fingerprint()
+        if existing_fp and existing_fp != current_fp:
+            need_new_subdir = True
+        elif not existing_fp:
+            # 目录非空但没有指纹文件，说明是旧任务遗留，也应隔离
+            need_new_subdir = True
+
+    if need_new_subdir:
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = out_dir / ts
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[目录隔离] 检测到旧任务目录，自动创建新子目录: {out_dir}")
+
+    # 写入当前指纹
+    fingerprint_path = out_dir / ".task_fingerprint.json"
+    fingerprint_path.write_text(json.dumps({
+        "fingerprint": _compute_task_fingerprint(),
+        "created_at": datetime.datetime.now().isoformat(),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # 主题图输入归一化：端到端流程只能消费本地文件。会话附件如果由
     # 客户端/集成以环境变量、URL、base64 或 out/input 目录提供，在这里落成稳定路径。

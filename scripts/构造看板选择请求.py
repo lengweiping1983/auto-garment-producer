@@ -104,11 +104,22 @@ def build_selection_prompt(candidates: dict, brief: dict, style_profile: dict) -
 
 
 def build_collection_prompt_from_selection(candidates: dict, selected: dict, style: dict) -> str:
-    """根据子Agent的选择结果，拼接最终的 3×3 看板 prompt。"""
-    selected_map = {
-        s["panel_id"]: s
-        for s in selected.get("selected_variants", [])
-    }
+    """根据子Agent的选择结果，拼接最终的 3×3 看板 prompt。
+    兼容两种 selected_variants 格式：
+      - list: [{"panel_id": "main", "variant_index": 1}, ...]
+      - dict: {"main": 1, ...}
+    """
+    raw_variants = selected.get("selected_variants", [])
+    if isinstance(raw_variants, dict):
+        selected_map = {
+            k: {"panel_id": k, "variant_index": int(v)}
+            for k, v in raw_variants.items()
+        }
+    else:
+        selected_map = {
+            s["panel_id"]: s
+            for s in raw_variants
+        }
 
     panel_prompts = {}
     for panel in candidates.get("panels", []):
