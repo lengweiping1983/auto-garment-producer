@@ -10,7 +10,6 @@
 """
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -28,21 +27,10 @@ except Exception:
         return ""
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
-STYLE_REFERENCE_DIR = SKILL_DIR / "references" / "styles"
-STYLE_REFERENCE_BY_TEMPLATE = {
-    "BFSK26308XCJ01L": {
-        "path": STYLE_REFERENCE_DIR / "BFSK26308XCJ01L-style-reference.jpg",
-        "wearable_zoning_path": STYLE_REFERENCE_DIR / "BFSK26308XCJ01L-wearable-zoning.jpg",
-        "label": "BFSK26308XCJ01L 男士防晒服标准裁片参考图",
-        "notes": "前后身片、袖片、门襟/下摆窄条在该参考图中已有成衣印花方向，可用于判断纸样部位与上下方向。",
-    },
-    "DDS26126XCJ01L": {
-        "path": STYLE_REFERENCE_DIR / "DDS26126XCJ01L-style-reference.jpg",
-        "wearable_zoning_path": STYLE_REFERENCE_DIR / "DDS26126XCJ01L-wearable-zoning.jpg",
-        "label": "DDS26126XCJ01L 上装/T恤/衬衫标准裁片参考图",
-        "notes": "T 恤/衬衫前后片、袖片、领/门襟/窄条在该参考图中已有成衣印花方向，可用于判断部位、对称组和饰边。",
-    },
-}
+STYLE_REFERENCE_DISABLED_NOTE = (
+    "references/styles/*-style-reference.jpg 与 *-wearable-zoning.jpg 属于历史效果参考资产，"
+    "不得进入生产规划 prompt 或 kimi_images；模板部位信息以 garment_map 和 piece_overview 为准。"
+)
 
 
 def load_json(path: str | Path) -> dict:
@@ -60,49 +48,6 @@ def _load_visual_motif_geometries(visual_elements: dict) -> dict:
     return geos
 
 
-def infer_style_references(pieces_payload: dict, brief: dict) -> list[dict]:
-    """根据模板资产或服装类型匹配款式参考图。"""
-    haystack = " ".join(
-        str(value)
-        for value in (
-            pieces_payload.get("prepared_pattern", ""),
-            pieces_payload.get("overview_image", ""),
-            brief.get("garment_type", ""),
-        )
-    ).lower()
-    compact_haystack = re.sub(r"[\s\-_'/]+", "", haystack)
-    refs = []
-    for template_id, ref in STYLE_REFERENCE_BY_TEMPLATE.items():
-        template_lower = template_id.lower()
-        if template_lower in haystack or (
-            template_id == "BFSK26308XCJ01L" and any(term in haystack for term in ("防晒", "sun protection"))
-        ) or (
-            template_id == "DDS26126XCJ01L"
-            and (
-                any(term in haystack for term in ("衬衫", "男士衬衫", "shirt"))
-                or any(term in compact_haystack for term in ("t恤", "tshirt", "男士t恤", "tee"))
-            )
-        ):
-            path = ref["path"]
-            if path.exists():
-                refs.append({
-                    "template_id": template_id,
-                    "label": ref["label"],
-                    "path": str(path.resolve()),
-                    "notes": ref["notes"],
-                })
-            zoning_path = ref.get("wearable_zoning_path")
-            if zoning_path and Path(zoning_path).exists():
-                refs.append({
-                    "template_id": template_id,
-                    "label": f"{template_id} 成衣视角 zoning 图",
-                    "path": str(Path(zoning_path).resolve()),
-                    "notes": "这是成衣穿着视角参考锚。HERO ZONE 允许唯一 hero；QUIET ZONE 必须低噪；DANGER SEAM 禁止高对比图案；TRIM ZONE 必须安静；SLEEVE PAIR 必须同源协调。",
-                    "reference_type": "wearable_zoning",
-                })
-    return refs
-
-
 def build_production_plan_prompt(
     pieces_payload: dict,
     texture_set: dict,
@@ -112,7 +57,6 @@ def build_production_plan_prompt(
     garment_map: dict | None,
     piece_overview_path: str,
     texture_thumbnail_paths: list[str],
-    style_reference_paths: list[dict] | None = None,
     multi_scheme: bool = False,
     max_schemes: int = 4,
 ) -> str:
@@ -186,20 +130,8 @@ def build_production_plan_prompt(
                 "",
             ])
 
-    if style_reference_paths:
-        lines.append("【必看 2】款式参考图（用于部位识别和上下方向判断）：")
-        for ref in style_reference_paths:
-            lines.append(f"  - {ref.get('label', '款式参考图')}: {ref.get('path', '')}")
-            if ref.get("notes"):
-                lines.append(f"    参考重点: {ref['notes']}")
-        lines.extend([
-            "  请先把款式参考图中的标准裁片形状，与 Kimi 纸样总览缩略图中的白色 mask 一一对照。",
-            "  如果几何数字和参考图冲突，以款式参考图 + 纸样总览缩略图的视觉判断为准。",
-            "",
-        ])
-
     if texture_thumbnail_paths:
-        lines.append("【必看 3】面料资产 Contact Sheet / 缩略图（必须查看后再分配）：")
+        lines.append("【必看 2】面料资产 Contact Sheet / 缩略图（必须查看后再分配）：")
         for tp in texture_thumbnail_paths:
             lines.append(f"  - {tp}")
         lines.append("  如果这是 contact sheet，请按图中编号和下方 asset id 列表对应选择资产；不要要求上传单张原图。")
@@ -340,8 +272,8 @@ def build_production_plan_prompt(
         "  secondary source 最多贡献 2 个小面积 accent/trim/cuff/collar/small_detail；不得用于大身 base。",
         "  若 A/B 的 palette、底色、饱和度、笔触、媒介不一致，必须放弃混用并在 rejected_assets 说明。",
         "",
-        "--- Wearable Zoning 图规则 ---",
-        "  如果款式参考图里包含 wearable-zoning：HERO ZONE 是唯一 hero 区；QUIET ZONE 必须低噪；DANGER SEAM 禁止高对比图案；TRIM ZONE 必须安静；SLEEVE PAIR 必须同源协调。",
+        "--- 模板 zone 规则 ---",
+        "  若固定模板 garment_map 中提供 zone/garment_role/symmetry_group，必须直接按这些结构化生产事实执行；不得依赖任何款式效果参考图或 wearable-zoning 图片。",
         "",
     ])
 
@@ -656,13 +588,6 @@ def main() -> int:
     )
     texture_kimi_images = [contact_sheet["sheet_path"]] if contact_sheet.get("sheet_path") else texture_thumbnails_debug[:6]
 
-    style_references = []
-    for ref in infer_style_references(pieces_payload, brief):
-        ref_path = Path(ref["path"])
-        thumb = ensure_thumbnail(ref_path, max_size=384, provider="kimi")
-        ref["path"] = str(thumb.resolve())
-        style_references.append(ref)
-
     overview_for_kimi = overview_path
     overview_preprocessed = False
     if overview_path:
@@ -676,14 +601,13 @@ def main() -> int:
     prompt_text = build_production_plan_prompt(
         pieces_payload, texture_set, brief, geometry_hints,
         visual_elements, garment_map, overview_for_kimi, texture_kimi_images,
-        style_reference_paths=style_references,
         multi_scheme=args.multi_scheme,
         max_schemes=args.max_schemes,
     )
 
     prompt_path = out_dir / "ai_production_plan_prompt.txt"
     prompt_path.write_text(prompt_text, encoding="utf-8")
-    kimi_images = ([overview_for_kimi] if overview_for_kimi else []) + texture_kimi_images + [ref["path"] for ref in style_references if ref.get("path")]
+    kimi_images = ([overview_for_kimi] if overview_for_kimi else []) + texture_kimi_images
     payload_budget = estimate_payload_budget(prompt_path, kimi_images)
 
     request_path = out_dir / "ai_production_plan_request.json"
@@ -701,7 +625,8 @@ def main() -> int:
         "texture_contact_sheet": contact_sheet,
         "texture_thumbnails_debug": texture_thumbnails_debug,
         "texture_thumbnails": texture_kimi_images,
-        "style_references": style_references,
+        "style_references": [],
+        "style_reference_policy": STYLE_REFERENCE_DISABLED_NOTE,
         "prompt_path": str(prompt_path.resolve()),
         "expected_output": str((out_dir / ("ai_multi_production_plan.json" if args.multi_scheme else "ai_production_plan.json")).resolve()),
         "multi_scheme": args.multi_scheme,
@@ -723,7 +648,7 @@ def main() -> int:
         ] if args.multi_scheme else [],
         "payload_budget": payload_budget,
         "kimi_images": kimi_images,
-        "kimi_input_note": "默认只传 piece_overview、texture_contact_sheet 和 style_references 的 Kimi 压缩图；不要传 texture_thumbnails_debug 中的单张原图/调试图。",
+        "kimi_input_note": "默认只传 piece_overview 和 texture_contact_sheet 的 Kimi 压缩图；不要传 style_references、wearable-zoning、texture_thumbnails_debug 中的单张原图/调试图。",
     }
     request_path.write_text(json.dumps(request_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -733,7 +658,7 @@ def main() -> int:
         "纸样总览图": overview_path,
         "Kimi纸样总览图": overview_for_kimi,
         "Kimi面料ContactSheet": contact_sheet.get("sheet_path", ""),
-        "款式参考图": [ref["path"] for ref in style_references],
+        "款式参考图": "已禁用，不进入生产规划 prompt 或 kimi_images",
         "预期输出": request_summary["expected_output"],
         "多方案模式": args.multi_scheme,
         "最大方案数": args.max_schemes if args.multi_scheme else 1,
