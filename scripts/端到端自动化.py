@@ -1144,6 +1144,9 @@ def _run_render_pipeline(
         "--texture-set", str(texture_set_path),
         "--out", str(qc_out),
     ]
+    style_profile_for_qc = out_dir / "style_profile.json"
+    if style_profile_for_qc.exists():
+        qc_cmd.extend(["--style-profile", str(style_profile_for_qc)])
     qc_result = run_step(qc_cmd, check=False)
     if qc_out.exists():
         texture_qc = load_json(qc_out)
@@ -2231,6 +2234,8 @@ def main() -> int:
                 "--texture-set", str(merged_ts_path),
                 "--out", str(qc_out),
             ]
+            if style_profile_path.exists():
+                qc_cmd.extend(["--style-profile", str(style_profile_path)])
             qc_result = run_step(qc_cmd, check=False)
             if qc_out.exists():
                 texture_qc = load_json(qc_out)
@@ -2344,7 +2349,7 @@ def main() -> int:
                     "scheme_id": scheme.get("scheme_id", ""),
                     "suffix": scheme.get("suffix", ""),
                 }
-                for key in ("design_positioning", "strategy_note", "asset_mix_summary", "diversity_tags"):
+                for key in ("design_positioning", "strategy_note", "theme_landing_summary", "asset_mix_summary", "diversity_tags"):
                     if key in scheme:
                         item[key] = scheme[key]
                 scheme_summaries.append(item)
@@ -2457,6 +2462,8 @@ def main() -> int:
         "--out",
         str(out_dir / "texture_qc_report.json"),
     ]
+    if style_profile_path.exists():
+        qc_cmd.extend(["--style-profile", str(style_profile_path)])
     qc_result = run_step(qc_cmd, check=False)
     texture_qc_report_path = out_dir / "texture_qc_report.json"
     if texture_qc_report_path.exists():

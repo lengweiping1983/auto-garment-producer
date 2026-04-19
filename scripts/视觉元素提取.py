@@ -31,11 +31,15 @@ except Exception:
         return text
 
 try:
-    from image_utils import ensure_thumbnail
+    from image_utils import ensure_thumbnail, estimate_payload_budget, print_payload_budget_warning
 except Exception:
     # fallback：如果 image_utils 不可用，直接返回原图
     def ensure_thumbnail(image_path, max_size=1024):
         return Path(image_path).resolve()
+    def estimate_payload_budget(prompt_path=None, image_paths=None, **kwargs):
+        return {}
+    def print_payload_budget_warning(budget):
+        return
 
 
 def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, season: str) -> str:
@@ -83,6 +87,13 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "source_images": [{"index": 1, "path": str(theme_paths[0].resolve()) if theme_paths else "", "role": "primary"}],
         "image_analyses": [{"image_ref": 1, "dominant_subject_summary": "", "palette_summary": "", "style_summary": ""}],
         "fusion_strategy": {"primary_reference": 1, "hero_subject_source": [1], "palette_sources": [1], "style_sources": [1], "strategy_note": ""},
+        "theme_to_piece_strategy": {
+            "base_atmosphere": "大身低噪底纹如何继承主题色彩/氛围，不直接复制主体",
+            "hero_motif": "唯一主卖点元素，建议放置在前片/指定 hero 裁片",
+            "accent_details": "小花、叶片、蘑菇等只作小面积点缀",
+            "quiet_zones": "袖片、后片、领口、窄条等需要安静处理的区域",
+            "do_not_use_as_full_body_texture": ["不适合大面积满版的具象元素"]
+        },
         "generated_prompts": {
             "main": "English seamless tileable low-noise base texture prompt",
             "secondary": "English coordinating repeat prompt",
@@ -104,7 +115,8 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "3. palette: 从图像真实提取 primary/secondary/accent/dark HEX，不要编造。",
         "4. style: medium、brush_quality、mood、pattern_density、line_style、overall_impression。",
         "5. fabric_hints: 判断 has_nap；若 true，nap_direction 必填 vertical/horizontal。关键词含 corduroy/velvet/fleece/suede/plush/毛呢/法兰绒等。",
-        "6. generated_prompts: 生成英文 main/secondary/accent/dark/hero_motif；texture 要 seamless tileable、low noise；motif 要 centered、plain light background、适合去背景。",
+        "6. theme_to_piece_strategy: 把主题工程化拆成 base_atmosphere、hero_motif、accent_details、quiet_zones；明确哪些具象元素不得作为大身满版纹理。",
+        "7. generated_prompts: 生成英文 main/secondary/accent/dark/hero_motif；texture 要 seamless tileable、low noise；motif 要 centered、plain light background、适合去背景。",
         "",
         "===== 输出 JSON schema =====",
         "只返回严格 JSON，不要解释文字、不要 markdown 代码块：",
@@ -119,6 +131,8 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "- 颜色必须从图像中真实提取，不要编造",
         "- 提示词必须是英文，可直接用于 AI 图像生成器",
         "- 如果图像中有动物或人物，谨慎建议用途，优先建议用于 motif 而非 texture",
+        "- 主题必须落地到裁片：大身只继承色彩/氛围，唯一 hero motif 承载主体，小元素只做 accent",
+        "- 蘑菇、动物、角色、花丛、完整场景等具象元素不得建议为大面积 body texture，除非用户明确要求",
         "- 多张参考图必须融合为同一个主题方向，不要输出多套方案",
         "- 每个主体/辅助元素要标注 source_image_refs，便于后续追溯来源",
         "- generated_prompts 用具体视觉词；避免 very/really/beautiful/nice/good/great/perfect 等空泛词",
@@ -163,7 +177,7 @@ def main() -> int:
         print(f"错误: 主题图不存在: {missing[0]}", file=sys.stderr)
         return 1
 
-    theme_thumbs = [ensure_thumbnail(path, max_size=512) for path in theme_paths]
+    theme_thumbs = [ensure_thumbnail(path, max_size=512, provider="kimi") for path in theme_paths]
     prompt = build_vision_prompt_multi(theme_thumbs, args.user_prompt, args.garment_type, args.season)
     prompt_path = out_dir / "ai_vision_prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
@@ -171,13 +185,16 @@ def main() -> int:
     # 对示例中的 generated_prompts 也进行过滤（若视觉元素已存在）
     # 注意：实际过滤应在子 Agent 输出 visual_elements.json 后由调用方处理
 
+    payload_budget = estimate_payload_budget(prompt_path, theme_thumbs)
     request_summary = {
         "request_id": "ai_vision_extraction_v1" if len(theme_thumbs) == 1 else "ai_vision_multi_extraction_v1",
         "theme_image": str(theme_thumbs[0].resolve()),
+        "theme_image_original": str(theme_paths[0].resolve()),
         "theme_images": [
             {
-                "index": idx,
+                "index": idx + 1,
                 "path": str(path.resolve()),
+                "original_path": str(theme_paths[idx].resolve()) if idx < len(theme_paths) else "",
                 "role_hint": "primary" if idx == 0 else "reference",
             }
             for idx, path in enumerate(theme_thumbs)
@@ -187,6 +204,8 @@ def main() -> int:
         "garment_type": args.garment_type,
         "season": args.season,
         "user_prompt": args.user_prompt,
+        "payload_budget": payload_budget,
+        "kimi_input_note": "只把 theme_image/theme_images 中的 Kimi 缩略图传给子 Agent，不要传原图或 base64。",
     }
     request_path = out_dir / "ai_vision_request.json"
     request_path.write_text(json.dumps(request_summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -198,7 +217,9 @@ def main() -> int:
         "主题图数量": len(theme_thumbs),
         "主题图列表": [str(path.resolve()) for path in theme_thumbs],
         "预期输出": request_summary["expected_output"],
+        "Kimi请求体预算": payload_budget,
     }, ensure_ascii=False, indent=2))
+    print_payload_budget_warning(payload_budget)
     return 0
 
 

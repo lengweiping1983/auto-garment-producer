@@ -4,6 +4,7 @@
 """
 import argparse
 import json
+import math
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageFilter, ImageStat
@@ -58,7 +59,78 @@ def text_residual_score(img: Image.Image) -> float:
     return min(1.0, high_variation_ratio * 0.6 + edge_score * 0.4)
 
 
-def validate_texture(texture: dict, base_dir: Path) -> dict:
+def hex_to_rgb(value: str) -> tuple[int, int, int] | None:
+    value = str(value or "").strip().lstrip("#")
+    if len(value) != 6:
+        return None
+    try:
+        return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return None
+
+
+def flatten_palette(style_profile: dict | None) -> list[tuple[int, int, int]]:
+    if not style_profile:
+        return []
+    palette = style_profile.get("palette", style_profile)
+    values = []
+    if isinstance(palette, dict):
+        for key in ("primary", "secondary", "accent", "dark"):
+            values.extend(palette.get(key, []) or [])
+    elif isinstance(palette, list):
+        values = palette
+    rgbs = [hex_to_rgb(v) for v in values]
+    return [rgb for rgb in rgbs if rgb]
+
+
+def color_distance(a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
+    return math.sqrt(sum((a[i] - b[i]) ** 2 for i in range(3)))
+
+
+def nearest_palette_distance(rgb: tuple[int, int, int], palette: list[tuple[int, int, int]]) -> float | None:
+    if not palette:
+        return None
+    return min(color_distance(rgb, p) for p in palette)
+
+
+def dominant_rgb(img: Image.Image) -> tuple[int, int, int]:
+    sample = img.convert("RGBA").resize((96, 96), Image.Resampling.LANCZOS)
+    pixels = [p[:3] for p in sample.getdata() if len(p) < 4 or p[3] > 32]
+    if not pixels:
+        pixels = [p[:3] for p in sample.getdata()]
+    quant = Image.new("RGB", (len(pixels), 1))
+    quant.putdata(pixels)
+    q = quant.quantize(colors=6, method=Image.Quantize.MEDIANCUT)
+    palette = q.getpalette() or []
+    counts = q.getcolors() or []
+    counts.sort(reverse=True)
+    idx = counts[0][1] if counts else 0
+    offset = idx * 3
+    return tuple(palette[offset:offset + 3]) if offset + 2 < len(palette) else (0, 0, 0)
+
+
+def alpha_quality(img: Image.Image) -> dict:
+    alpha = img.convert("RGBA").getchannel("A").resize((128, 128), Image.Resampling.LANCZOS)
+    values = list(alpha.getdata())
+    total = max(1, len(values))
+    transparent_ratio = sum(1 for v in values if v <= 12) / total
+    opaque_ratio = sum(1 for v in values if v >= 245) / total
+    semi_ratio = sum(1 for v in values if 12 < v < 245) / total
+    edge = Image.new("L", alpha.size, 0)
+    edge.paste(alpha.crop((0, 0, alpha.width, 8)), (0, 0))
+    edge.paste(alpha.crop((0, alpha.height - 8, alpha.width, alpha.height)), (0, alpha.height - 8))
+    edge.paste(alpha.crop((0, 0, 8, alpha.height)), (0, 0))
+    edge.paste(alpha.crop((alpha.width - 8, 0, alpha.width, alpha.height)), (alpha.width - 8, 0))
+    edge_alpha_mean = ImageStat.Stat(edge).mean[0]
+    return {
+        "transparent_ratio": round(transparent_ratio, 3),
+        "opaque_ratio": round(opaque_ratio, 3),
+        "semi_transparent_ratio": round(semi_ratio, 3),
+        "edge_alpha_mean": round(edge_alpha_mean, 2),
+    }
+
+
+def validate_texture(texture: dict, base_dir: Path, palette: list[tuple[int, int, int]] | None = None) -> dict:
     """验证单个面料资产。issues=high severity，warnings=medium/low。"""
     issues = []      # high severity
     warnings = []    # medium / low severity
@@ -74,10 +146,13 @@ def validate_texture(texture: dict, base_dir: Path) -> dict:
             "warnings": [],
         }
     try:
-        with Image.open(path) as img:
+        with Image.open(path) as opened:
+            img = opened.convert("RGBA")
             width, height = img.size
             tileable = edge_similarity_score(img)
             variation = variation_score(img)
+            text_score = text_residual_score(img)
+            dom = dominant_rgb(img)
     except Exception as exc:
         return {
             "texture_id": texture.get("texture_id", ""),
@@ -86,9 +161,9 @@ def validate_texture(texture: dict, base_dir: Path) -> dict:
             "issues": [{"type": "open_failed", "severity": "high", "message": f"无法打开: {exc}"}],
             "warnings": [],
         }
-    text_score = text_residual_score(img)
     role = texture.get("role", "")
     is_solid = "solid" in role.lower()
+    is_body_role = any(token in role.lower() for token in ("base", "main", "body", "secondary"))
 
     if width < 512 or height < 512:
         issues.append({"type": "too_small", "severity": "high", "message": f"尺寸过小: {width}x{height}"})
@@ -111,6 +186,13 @@ def validate_texture(texture: dict, base_dir: Path) -> dict:
     elif text_score > 0.50:
         warnings.append({"type": "text_residual_detected", "severity": "medium", "message": f"可能检测到文字残留: {text_score:.3f}，请人工复核"})
 
+    palette_distance = nearest_palette_distance(dom, palette or [])
+    if palette_distance is not None:
+        if is_body_role and palette_distance > 145:
+            issues.append({"type": "palette_mismatch", "severity": "high", "dominant_rgb": dom, "distance": round(palette_distance, 1), "message": f"大身/基础面料主色偏离 style_profile 色板过大: {round(palette_distance, 1)}"})
+        elif palette_distance > 95:
+            warnings.append({"type": "palette_mismatch", "severity": "medium", "dominant_rgb": dom, "distance": round(palette_distance, 1), "message": f"面料主色与 style_profile 色板距离较大: {round(palette_distance, 1)}"})
+
     if not texture.get("approved", False):
         issues.append({"type": "not_user_approved", "severity": "high", "message": "texture.approved 不为 true"})
 
@@ -124,12 +206,14 @@ def validate_texture(texture: dict, base_dir: Path) -> dict:
         "tileable_score": round(tileable, 3),
         "variation_score": round(variation, 3),
         "text_residual_score": round(text_score, 3),
+        "dominant_rgb": dom,
+        "palette_distance": round(palette_distance, 1) if palette_distance is not None else None,
         "issues": issues,
         "warnings": warnings,
     }
 
 
-def validate_motif(motif: dict, base_dir: Path) -> dict:
+def validate_motif(motif: dict, base_dir: Path, palette: list[tuple[int, int, int]] | None = None) -> dict:
     """验证单个图案资产。"""
     issues = []
     warnings = []
@@ -149,6 +233,8 @@ def validate_motif(motif: dict, base_dir: Path) -> dict:
             width, height = img.size
             alpha = img.getchannel("A")
             alpha_min, alpha_max = alpha.getextrema()
+            dom = dominant_rgb(img)
+            alpha_stats = alpha_quality(img)
     except Exception as exc:
         return {
             "motif_id": motif.get("motif_id", ""),
@@ -161,6 +247,14 @@ def validate_motif(motif: dict, base_dir: Path) -> dict:
         issues.append({"type": "too_small", "severity": "high", "message": f"尺寸过小: {width}x{height}"})
     if alpha_min == 255 and alpha_max == 255:
         issues.append({"type": "missing_transparency", "severity": "high", "message": "定位图案资产通常应有透明背景"})
+    elif alpha_stats["transparent_ratio"] < 0.08:
+        issues.append({"type": "unclean_motif_background", "severity": "high", "alpha_quality": alpha_stats, "message": "定位图案透明区域过少，可能是整张背景贴片而非干净 motif"})
+    elif alpha_stats["semi_transparent_ratio"] > 0.55 and alpha_stats["edge_alpha_mean"] > 24:
+        issues.append({"type": "semi_transparent_full_patch", "severity": "high", "alpha_quality": alpha_stats, "message": "定位图案大面积半透明且边缘有残留，容易形成主题图残影贴片"})
+
+    palette_distance = nearest_palette_distance(dom, palette or [])
+    if palette_distance is not None and palette_distance > 110:
+        warnings.append({"type": "motif_palette_mismatch", "severity": "medium", "dominant_rgb": dom, "distance": round(palette_distance, 1), "message": f"motif 主色与 style_profile 色板距离较大: {round(palette_distance, 1)}"})
     if not motif.get("approved", False):
         issues.append({"type": "not_user_approved", "severity": "high", "message": "motif.approved 不为 true"})
     program_qc_status = "fail" if issues else ("warn" if warnings else "pass")
@@ -170,6 +264,9 @@ def validate_motif(motif: dict, base_dir: Path) -> dict:
         "path": str(path.resolve()),
         "program_qc_status": program_qc_status,
         "approved": program_qc_status == "pass",
+        "dominant_rgb": dom,
+        "palette_distance": round(palette_distance, 1) if palette_distance is not None else None,
+        "alpha_quality": alpha_stats,
         "issues": issues,
         "warnings": warnings,
     }
@@ -179,13 +276,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="在成衣渲染前验证已批准的面料资产。")
     parser.add_argument("--texture-set", required=True, help="面料组合 JSON 路径")
     parser.add_argument("--out", required=True, help="质检报告输出路径")
+    parser.add_argument("--style-profile", default="", help="style_profile.json 路径（可选，用于色板一致性质检）")
     args = parser.parse_args()
 
     texture_set_path = Path(args.texture_set)
     payload = load_json(texture_set_path)
+    style_profile = load_json(args.style_profile) if args.style_profile and Path(args.style_profile).exists() else {}
+    palette = flatten_palette(style_profile)
     base_dir = texture_set_path.parent
-    results = [validate_texture(texture, base_dir) for texture in payload.get("textures", [])]
-    motif_results = [validate_motif(motif, base_dir) for motif in payload.get("motifs", [])]
+    results = [validate_texture(texture, base_dir, palette=palette) for texture in payload.get("textures", [])]
+    motif_results = [validate_motif(motif, base_dir, palette=palette) for motif in payload.get("motifs", [])]
     solid_issues = []
     if not payload.get("solids"):
         solid_issues.append({"type": "missing_solids", "message": "建议至少提供一种已批准纯色。"})
@@ -196,6 +296,14 @@ def main() -> int:
         all_warnings.extend(item.get("warnings", []))
 
     high_issues = [i for i in all_issues if i.get("severity") == "high"]
+    base_results = [r for r in results if any(token in str(r.get("role", "")).lower() for token in ("base", "main", "body", "secondary"))]
+    cohesion_warnings = []
+    if len(base_results) >= 2:
+        doms = [tuple(r.get("dominant_rgb", (0, 0, 0))) for r in base_results if r.get("dominant_rgb")]
+        max_pair_distance = max((color_distance(a, b) for i, a in enumerate(doms) for b in doms[i + 1:]), default=0)
+        if max_pair_distance > 135:
+            cohesion_warnings.append({"type": "texture_family_color_split", "severity": "medium", "distance": round(max_pair_distance, 1), "message": "基础/大身面料之间主色差异过大，可能形成跨风格拼贴。"})
+    all_warnings.extend(cohesion_warnings)
     program_qc_status = "fail" if high_issues else ("warn" if (all_issues or all_warnings or solid_issues) else "pass")
     approved = program_qc_status == "pass"
 
@@ -209,9 +317,12 @@ def main() -> int:
             "warnings": len(all_warnings),
             "solid_issues": len(solid_issues),
         },
+        "style_profile": str(Path(args.style_profile).resolve()) if args.style_profile else "",
+        "palette_check_enabled": bool(palette),
         "textures": results,
         "motifs": motif_results,
         "solid_issues": solid_issues,
+        "cohesion_warnings": cohesion_warnings,
     }
     Path(args.out).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))

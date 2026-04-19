@@ -8,6 +8,14 @@ from pathlib import Path
 
 from PIL import Image, ImageStat
 
+try:
+    from image_utils import estimate_payload_budget, print_payload_budget_warning
+except Exception:
+    def estimate_payload_budget(prompt_path=None, image_paths=None, **kwargs):
+        return {}
+    def print_payload_budget_warning(budget):
+        return
+
 
 def load_json(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -393,6 +401,20 @@ def main() -> int:
     if large_solid_pieces:
         issues.append({"type": "large_piece_uses_flat_solid", "severity": "high", "piece_ids": large_solid_pieces, "message": "大面板需要协调纹理或工程化图案，而非不匹配的纯色块。"})
 
+    # 大身商业可穿性：大面积 body 裁片变化度过高，通常意味着主题元素被满版铺贴。
+    busy_body = []
+    for entry in fill_plan.get("pieces", []):
+        piece_id = entry.get("piece_id", "")
+        piece = piece_lookup.get(piece_id, {})
+        area_ratio = piece.get("area", 0) / max(1, largest_area)
+        role = entry.get("garment_role", "")
+        zone = entry.get("zone", "")
+        is_body = zone == "body" or "body" in role or area_ratio >= 0.45
+        if is_body and variation_by_piece.get(piece_id, 0) > 58:
+            busy_body.append({"piece_id": piece_id, "variation": variation_by_piece[piece_id]})
+    if busy_body:
+        warnings.append({"type": "body_texture_too_busy", "severity": "medium", "pieces": busy_body, "message": "大身裁片视觉变化度过高，可能把主题元素满版铺贴，需改为低噪主题氛围底纹。"})
+
     # Hero 裁片 overlay 透明度检查（检查原始 motif 资产，而非渲染后的合成裁片）
     for entry in fill_plan.get("pieces", []):
         piece_id = entry.get("piece_id", "")
@@ -537,10 +559,11 @@ def _build_rework_request(issues: list, warnings: list, fill_plan: dict, out_dir
         "",
         "===== 修订要求 =====",
         "1. 优先处理商业复审问题（卖点、和谐度、可穿性）",
-        "2. 针对每个 issue 给出具体修正：修改哪个裁片的哪个参数",
-        "3. 保持已有的正确决策不变",
-        "4. 输出完整的 ai_piece_fill_plan.json 格式（与之前相同）",
-        "5. 每个修改必须附带 reason",
+        "2. 如果问题涉及配色、风格拼贴、主题残影或过度满版，优先重选 texture/motif 和重做填充计划，不要只微调 scale/offset",
+        "3. 针对每个 issue 给出具体修正：修改哪个裁片的哪个参数",
+        "4. 保持已有的正确决策不变",
+        "5. 输出完整的 ai_piece_fill_plan.json 格式（与之前相同）",
+        "6. 每个修改必须附带 reason，并说明主题如何落到裁片",
         "",
         "===== 输出格式 =====",
         "请返回严格的 JSON，格式与之前的 piece_fill_plan.json 完全一致。",
@@ -548,6 +571,7 @@ def _build_rework_request(issues: list, warnings: list, fill_plan: dict, out_dir
 
     prompt_path = out_dir / "rework_prompt.txt"
     prompt_path.write_text("\n".join(lines), encoding="utf-8")
+    payload_budget = estimate_payload_budget(prompt_path, [])
 
     request = {
         "request_id": "rework_request_v1",
@@ -556,6 +580,8 @@ def _build_rework_request(issues: list, warnings: list, fill_plan: dict, out_dir
         "commercial_issue_count": len(commercial_issues),
         "prompt_path": str(prompt_path.resolve()),
         "expected_output": str((out_dir / "ai_piece_fill_plan_revised.json").resolve()),
+        "payload_budget": payload_budget,
+        "kimi_input_note": "返工请求默认只传文本 prompt，不要附加原始预览图；如需看图，请使用商业复审请求中的 preview_path 缩略图。",
         "issues": issues,
         "warnings": warnings,
         "commercial_issues": commercial_issues,
@@ -565,6 +591,7 @@ def _build_rework_request(issues: list, warnings: list, fill_plan: dict, out_dir
     print(f"\n[质检闭环] 发现 {len(issues)} 个问题，已构造返工请求:")
     print(f"  返工提示词: {prompt_path}")
     print(f"  预期输出: {request['expected_output']}")
+    print_payload_budget_warning(payload_budget)
 
 
 if __name__ == "__main__":

@@ -219,7 +219,7 @@ def apply_multi_production_plan(
             "garment_map": str(gm_path.resolve()),
             "fill_plan": str(fp_path.resolve()),
         }
-        for key in ("design_positioning", "strategy_note", "asset_mix_summary", "diversity_tags"):
+        for key in ("design_positioning", "strategy_note", "theme_landing_summary", "asset_mix_summary", "diversity_tags"):
             if key in scheme:
                 scheme_meta[key] = scheme[key]
         results.append(scheme_meta)

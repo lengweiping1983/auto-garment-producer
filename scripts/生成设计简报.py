@@ -214,6 +214,7 @@ def _generate_from_visual_elements(visual: dict, ve_path: Path, out_dir: Path, u
         generated_prompts=prompts,
         fabric_hints=visual.get("fabric_hints", {}),
         fusion_strategy=visual.get("fusion_strategy", {}),
+        theme_to_piece_strategy=visual.get("theme_to_piece_strategy", {}),
     )
 
 
@@ -231,6 +232,7 @@ def _generate_outputs(
     generated_prompts: dict = None,
     fabric_hints: dict = None,
     fusion_strategy: dict = None,
+    theme_to_piece_strategy: dict = None,
 ) -> dict:
     """生成所有设计输出文件的核心逻辑。"""
     # 统一 palette 格式
@@ -253,6 +255,15 @@ def _generate_outputs(
     fabric_hints = fabric_hints or {}
     theme_images = theme_images or []
     fusion_strategy = fusion_strategy or {}
+    theme_to_piece_strategy = theme_to_piece_strategy or {}
+    if not theme_to_piece_strategy:
+        theme_to_piece_strategy = {
+            "base_atmosphere": "大身只继承主题色彩、笔触和氛围，保持低噪可穿，不直接复制主体或完整场景。",
+            "hero_motif": f"只选择一个主卖点元素作为定位图案：{hero_selling_point}",
+            "accent_details": "辅助元素只用于小面积点缀、局部细节或 secondary/accent 面板。",
+            "quiet_zones": "袖片、后片、领口、下摆、窄条保持安静，优先低噪底纹或纯色。",
+            "do_not_use_as_full_body_texture": [m for m in motifs[:4] if m],
+        }
     has_nap = fabric_hints.get("has_nap", False) if isinstance(fabric_hints, dict) else False
     nap_direction = fabric_hints.get("nap_direction", "") if isinstance(fabric_hints, dict) else ""
     nap_confidence = fabric_hints.get("nap_confidence", 0.0) if isinstance(fabric_hints, dict) else 0.0
@@ -279,6 +290,7 @@ def _generate_outputs(
         "theme_image": theme_image,
         "theme_images": theme_images,
         "fusion_strategy": fusion_strategy,
+        "theme_to_piece_strategy": theme_to_piece_strategy,
         "user_prompt": user_prompt,
         "wearability_notes": [
             "只保留一个明确的卖点概念",
@@ -315,6 +327,7 @@ def _generate_outputs(
         "contrast": "受控",
         "style_details": style_details or {},
         "fusion_strategy": fusion_strategy,
+        "theme_to_piece_strategy": theme_to_piece_strategy,
     }
 
     def _make_prompt(texture_id: str, purpose: str, prompt_text: str, panel: str = "", role: str = "") -> dict:
@@ -342,19 +355,24 @@ def _generate_outputs(
     mood = style_details.get("mood", "quiet and elegant") if style_details else "quiet and elegant"
 
     # Row 1 — Base textures
-    main_prompt = gp.get("main", f"seamless tileable commercial textile texture, pale ground with very faint pattern inspired by {motif_str}, extremely low noise, abundant negative space, {medium} paper grain, no text")
-    secondary_prompt = gp.get("secondary", f"seamless tileable coordinating textile texture, soft light ground with delicate pattern inspired by {motif_str}, medium density but airy, same {medium} brush style, no text")
-    dark_prompt = gp.get("dark", f"seamless tileable quiet dark trim texture, deep ground with tiny subtle texture, very low noise, dark-quiet and minimal, {medium} grain, no text")
+    base_guard = (
+        "commercial apparel repeat, only atmosphere and color from the theme, no large figurative subject, "
+        "no mushroom or animal as full-body hero, no complete scene, no poster composition, cohesive with all other panels"
+    )
+    main_prompt = gp.get("main", f"seamless tileable commercial textile texture, pale ground with very faint pattern inspired by {motif_str}, extremely low noise, abundant negative space, {medium} paper grain, {base_guard}, no text")
+    secondary_prompt = gp.get("secondary", f"seamless tileable coordinating textile texture, soft light ground with delicate pattern inspired by {motif_str}, medium density but airy, same {medium} brush style, {base_guard}, no text")
+    dark_prompt = gp.get("dark", f"seamless tileable quiet dark trim texture, deep ground with tiny subtle texture, very low noise, dark-quiet and minimal, same {medium} grain and palette family, no brown cast unless present in palette, no text")
 
     # Row 2 — Mid-scale accent textures（全部走 gp.get，无硬编码）
-    accent_prompt = gp.get("accent", gp.get("accent_light", f"seamless tileable small-scale accent pattern, tiny scattered elements inspired by {motif_str}, very small scale repeating, charming but controlled density, no text"))
-    accent_mid_prompt = gp.get("accent_mid", f"seamless tileable soft geometric or organic lattice on pale ground, same {mood} palette, {medium} hand-painted, low noise, seamless tileable texture for secondary panels, no text")
-    solid_quiet_prompt = gp.get("solid_quiet", f"quiet warm solid with only subtle {medium} paper grain, no pattern, calm and minimal, seamless tileable solid texture for quiet trim or lining, {mood}, no text")
+    accent_prompt = gp.get("accent", gp.get("accent_light", f"seamless tileable small-scale accent pattern, tiny scattered elements inspired by {motif_str}, very small scale repeating, charming but controlled density, same palette and brush as main panel, no standalone scene, no text"))
+    accent_mid_prompt = gp.get("accent_mid", f"seamless tileable soft geometric or organic lattice on pale ground, same {mood} palette, same {medium} hand-painted brush language, low noise, seamless tileable texture for secondary panels, no style shift, no text")
+    solid_quiet_prompt = gp.get("solid_quiet", f"quiet warm solid with only subtle {medium} paper grain, no pattern, calm and minimal, seamless tileable solid texture for quiet trim or lining, {mood}, same palette family, no text")
 
     # Row 3 — Placement motifs (plain backgrounds for background removal)（全部走 gp.get，无硬编码）
-    hero_motif_1_prompt = gp.get("hero_motif", gp.get("hero_motif_1", f"a single elegant main subject centered, plain light background, soft fading edges, balanced negative space, {medium} hand-painted, designed as placement print element, no text"))
-    hero_motif_2_prompt = gp.get("hero_motif_2", f"a secondary accent subject, centered, plain light background, refined {medium} brushwork, designed as placement accent motif, {mood}, no text")
-    trim_motif_prompt = gp.get("trim_motif", f"a small delicate decorative accent, minimal composition, plain warm background, designed as trim detail placement element, {medium} style, no text")
+    motif_guard = "clean transparent-ready placement motif, no filled rectangular background, no semi-transparent full-image patch"
+    hero_motif_1_prompt = gp.get("hero_motif", gp.get("hero_motif_1", f"a single elegant main subject centered, plain light background, soft fading edges, balanced negative space, {medium} hand-painted, designed as placement print element, {motif_guard}, no text"))
+    hero_motif_2_prompt = gp.get("hero_motif_2", f"a secondary accent subject, centered, plain light background, refined {medium} brushwork, designed as placement accent motif, {mood}, {motif_guard}, no text")
+    trim_motif_prompt = gp.get("trim_motif", f"a small delicate decorative accent, minimal composition, plain warm background, designed as trim detail placement element, same {medium} style and palette family, {motif_guard}, no text")
 
     def _inject_palette_constraints(prompt_text: str, texture_id: str, palette: dict) -> str:
         """为提示词追加具体的 hex 颜色硬约束，减少 AI 生成时的颜色偏差。"""
@@ -396,7 +414,7 @@ def _generate_outputs(
         return prompt_text
 
     # 构建 9 面板提示词并注入 palette 约束
-    palette = style_profile.get("palette", {}) if style_details else {}
+    palette = style_profile.get("palette", {})
     _prompts = [
         ("main", "可穿大身裁片", main_prompt, "row1_left", "base_texture"),
         ("secondary", "协调大副裁片", secondary_prompt, "row1_center", "base_texture"),

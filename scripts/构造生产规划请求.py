@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from image_utils import ensure_thumbnail
+from image_utils import ensure_thumbnail, make_contact_sheet, estimate_payload_budget, print_payload_budget_warning
 from prompt_blocks import COMMERCIAL_FILL_RULES_ZH, STRICT_JSON_ONLY_ZH
 try:
     from template_loader import normalize_piece_asset_paths, relative_json_metadata_path
@@ -180,15 +180,16 @@ def build_production_plan_prompt(
             if ref.get("notes"):
                 lines.append(f"    参考重点: {ref['notes']}")
         lines.extend([
-            "  请先把款式参考图中的标准裁片形状，与 piece_overview.png 中的白色 mask 一一对照。",
-            "  如果几何数字和参考图冲突，以款式参考图 + piece_overview.png 的视觉判断为准。",
+            "  请先把款式参考图中的标准裁片形状，与 Kimi 纸样总览缩略图中的白色 mask 一一对照。",
+            "  如果几何数字和参考图冲突，以款式参考图 + 纸样总览缩略图的视觉判断为准。",
             "",
         ])
 
     if texture_thumbnail_paths:
-        lines.append("【必看 3】面料资产缩略图（必须查看后再分配）：")
+        lines.append("【必看 3】面料资产 Contact Sheet / 缩略图（必须查看后再分配）：")
         for tp in texture_thumbnail_paths:
             lines.append(f"  - {tp}")
+        lines.append("  如果这是 contact sheet，请按图中编号和下方 asset id 列表对应选择资产；不要要求上传单张原图。")
         lines.append("")
 
     lines.extend([
@@ -207,6 +208,19 @@ def build_production_plan_prompt(
     if palette:
         lines.append(f"色板: {palette}")
 
+    theme_strategy = brief.get("theme_to_piece_strategy", {})
+    if theme_strategy:
+        lines.extend([
+            "",
+            "===== 主题落地策略（必须执行）=====",
+            f"base_atmosphere: {theme_strategy.get('base_atmosphere', '')}",
+            f"hero_motif: {theme_strategy.get('hero_motif', '')}",
+            f"accent_details: {theme_strategy.get('accent_details', '')}",
+            f"quiet_zones: {theme_strategy.get('quiet_zones', '')}",
+            f"不得作为大身满版纹理的具象元素: {theme_strategy.get('do_not_use_as_full_body_texture', [])}",
+            "你必须在每个方案的 strategy_note 或 art_direction.notes 中说明：哪个裁片承载 hero，哪些裁片只承载主题氛围，哪些裁片保持安静。",
+        ])
+
     # fabric has_nap info
     fabric = brief.get("fabric", {})
     if fabric.get("has_nap"):
@@ -223,7 +237,7 @@ def build_production_plan_prompt(
         "可选 garment_role: front_body / back_body / sleeve_left / sleeve_right / collar_or_upper_trim / hem_or_lower_trim / trim_strip / side_or_long_panel / front_hero / yoke / pocket / lining / small_detail / unknown",
         "zone: body / secondary / trim / detail",
         "",
-        "===== 裁片几何信息（JSON 摘要，程序推断仅供参考，请以 piece_overview.png 为准）=====",
+        "===== 裁片几何信息（JSON 摘要，程序推断仅供参考，请以纸样总览缩略图为准）=====",
     ])
 
     # 压缩裁片信息：用 JSON 摘要代替逐条展开，只保留关键字段
@@ -285,6 +299,10 @@ def build_production_plan_prompt(
         "",
         "--- 填充规则 ---",
         "  " + "；".join(COMMERCIAL_FILL_RULES_ZH) + "。",
+        "  大身裁片只能使用 1 套主底纹家族；左右/前后/袖片必须同源协调，不得像不同看板硬拼。",
+        "  蘑菇、动物、角色、花丛、完整场景等具象元素不得作为大面积满版 body texture，除非用户明确要求；它们只能作为 1 个 hero motif 或小面积 accent。",
+        "  A/B 双源混合必须证明 palette、笔触、底色和饱和度一致；否则每个 scheme 优先使用单一来源，另一来源最多作小面积 accent/trim。",
+        "  禁止半透明整张主题图贴片；motif overlay 必须是干净定位图案，只允许用于 1 个 hero 裁片。",
         "  纹理方向自主决定；可声明 intentional_asymmetry: true 保留有意不对称。",
         "",
     ])
@@ -322,6 +340,7 @@ def build_production_plan_prompt(
                 "允许全A、全B、A/B混合；不用低质资产可以，但在 asset_coverage.unused_assets 说明原因。",
                 "所有 asset id 必须真实存在，例如 main_a、main_b、hero_motif_1_a、quiet_solid_b。",
                 "不要只输出 A/B 两个来源结果；每个 scheme 都必须是独立设计方案，并说明资产选择理由。",
+                "如果 A/B 色板或笔触明显不一致，不要混用到大身；优先单源成套，另一源只可小面积点缀。",
             ]
         else:
             # 单源情况（1 套或 0 套有后缀都 fallback 为单源）：从 9 个资产中组合多套方案
@@ -350,7 +369,8 @@ def build_production_plan_prompt(
                     "scheme_id": "scheme_01",
                     "design_positioning": "量产安全款 / 精品陈列款 / 年轻潮流款等",
                     "strategy_note": "从完整资产池独立判断后的组合策略",
-                    "asset_mix_summary": {"body_base_assets": ["main_a"], "hero_assets": ["hero_motif_1_a"], "trim_assets": ["quiet_solid_b"], "reason": "..."},
+                    "theme_landing_summary": {"hero_piece": "piece_001", "base_atmosphere_pieces": ["piece_002"], "quiet_pieces": ["piece_003"], "accent_pieces": ["piece_004"], "reason": "主题主体只落在一个 hero 裁片，大身只保留氛围和色板"},
+                    "asset_mix_summary": {"body_base_assets": ["main_a"], "hero_assets": ["hero_motif_1_a"], "trim_assets": ["quiet_solid_b"], "source_mix_policy": "single_source_body_with_small_accent", "reason": "..."},
                     "diversity_tags": ["quiet_body", "bold_hero", "accent_trim"],
                     "garment_map": {"pieces": [{"piece_id": "piece_001", "garment_role": "front_body", "zone": "body", "symmetry_group": "sg_front", "same_shape_group": "", "texture_direction": "transverse", "confidence": 0.88, "needs_ai_review": False}]},
                     "piece_fill_plan": {
@@ -374,7 +394,7 @@ def build_production_plan_prompt(
             "risk_notes": []
         }, ensure_ascii=False, indent=2))
         lines.append("")
-        lines.append("注：顶层必须包含 schemes 数组、portfolio_notes 和 asset_coverage。每个 scheme 必须包含 scheme_id、design_positioning、strategy_note、asset_mix_summary、diversity_tags、piece_fill_plan。")
+        lines.append("注：顶层必须包含 schemes 数组、portfolio_notes 和 asset_coverage。每个 scheme 必须包含 scheme_id、design_positioning、strategy_note、theme_landing_summary、asset_mix_summary、diversity_tags、piece_fill_plan。")
         lines.append("注：模板模式下 garment_map 可省略；若提供 garment_map，也会被固定模板映射覆盖。")
         lines.append("注：art_direction 可额外包含 notes[] 和可选的 self_assessment（overall_score/wearability/cohesion/hero_clarity/trim_quality/season_fit/customer_match/production_safety/color_balance/negative_space/narrative_control）。")
     else:
@@ -407,7 +427,7 @@ def build_production_plan_prompt(
         "",
         "===== 重要声明 =====",
         "以上所有程序推断（裁片几何、部位候选、面料描述）均为参考建议，不是事实。",
-        "你必须结合 piece_overview.png 和面料缩略图重新确认每个裁片的部位和填充方案。",
+        "你必须结合纸样总览缩略图和面料 contact sheet 重新确认每个裁片的部位和填充方案。",
     ])
 
     return "\n".join(lines)
@@ -497,27 +517,42 @@ def main() -> int:
                 overview_path = str(cp.resolve())
                 break
 
-    # 收集面料资产缩略图路径（生成真正的缩略图，避免发送 1.5MB+ 全尺寸图）
-    texture_thumbnails = []
+    # 收集面料资产缩略图路径（debug 用），Kimi 默认只看 contact sheet，避免 18 张图触发 413。
+    texture_thumbnails_debug = []
+    contact_items = []
     base_dir = Path(args.texture_set).parent
     for tex in texture_set.get("textures", []) + texture_set.get("motifs", []):
         p = tex.get("path", "")
         if p:
             tp = Path(p) if Path(p).is_absolute() else base_dir / p
             if tp.exists():
-                thumb = ensure_thumbnail(tp, max_size=256)
-                texture_thumbnails.append(str(thumb.resolve()))
+                thumb = ensure_thumbnail(tp, max_size=192, provider="kimi")
+                texture_thumbnails_debug.append(str(thumb.resolve()))
+                asset_id = tex.get("texture_id") or tex.get("motif_id") or tex.get("role") or tp.stem
+                contact_items.append({"id": asset_id, "role": tex.get("role", ""), "path": str(tp.resolve())})
+    contact_sheet = make_contact_sheet(
+        contact_items,
+        out_dir / "texture_contact_sheet_kimi.jpg",
+        cell_size=176 if len(contact_items) > 12 else 192,
+        provider="kimi",
+        title="Kimi texture/motif asset contact sheet",
+    )
+    texture_kimi_images = [contact_sheet["sheet_path"]] if contact_sheet.get("sheet_path") else texture_thumbnails_debug[:6]
 
     style_references = []
     for ref in infer_style_references(pieces_payload, brief):
         ref_path = Path(ref["path"])
-        thumb = ensure_thumbnail(ref_path, max_size=900)
+        thumb = ensure_thumbnail(ref_path, max_size=384, provider="kimi")
         ref["path"] = str(thumb.resolve())
         style_references.append(ref)
 
+    overview_for_kimi = overview_path
+    if overview_path:
+        overview_for_kimi = str(ensure_thumbnail(overview_path, max_size=512, provider="kimi").resolve())
+
     prompt_text = build_production_plan_prompt(
         pieces_payload, texture_set, brief, geometry_hints,
-        visual_elements, garment_map, overview_path, texture_thumbnails,
+        visual_elements, garment_map, overview_for_kimi, texture_kimi_images,
         style_reference_paths=style_references,
         multi_scheme=args.multi_scheme,
         max_schemes=args.max_schemes,
@@ -525,6 +560,8 @@ def main() -> int:
 
     prompt_path = out_dir / "ai_production_plan_prompt.txt"
     prompt_path.write_text(prompt_text, encoding="utf-8")
+    kimi_images = ([overview_for_kimi] if overview_for_kimi else []) + texture_kimi_images + [ref["path"] for ref in style_references if ref.get("path")]
+    payload_budget = estimate_payload_budget(prompt_path, kimi_images)
 
     request_path = out_dir / "ai_production_plan_request.json"
     request_summary = {
@@ -535,15 +572,21 @@ def main() -> int:
         "geometry_hints": str(Path(args.geometry_hints).resolve()) if args.geometry_hints else "",
         "visual_elements": str(Path(args.visual_elements).resolve()) if args.visual_elements else "",
         "garment_map": str(Path(args.garment_map).resolve()) if args.garment_map else "",
-        "piece_overview": overview_path,
-        "texture_thumbnails": texture_thumbnails,
+        "piece_overview": overview_for_kimi,
+        "piece_overview_original": overview_path,
+        "texture_contact_sheet": contact_sheet,
+        "texture_thumbnails_debug": texture_thumbnails_debug,
+        "texture_thumbnails": texture_kimi_images,
         "style_references": style_references,
         "prompt_path": str(prompt_path.resolve()),
         "expected_output": str((out_dir / ("ai_multi_production_plan.json" if args.multi_scheme else "ai_production_plan.json")).resolve()),
         "multi_scheme": args.multi_scheme,
         "max_schemes": args.max_schemes if args.multi_scheme else 1,
         "expected_top_level": "schemes" if args.multi_scheme else "garment_map + piece_fill_plan",
-        "scheme_required_fields": ["scheme_id", "design_positioning", "strategy_note", "asset_mix_summary", "diversity_tags", "piece_fill_plan"] if args.multi_scheme else [],
+        "scheme_required_fields": ["scheme_id", "design_positioning", "strategy_note", "theme_landing_summary", "asset_mix_summary", "diversity_tags", "piece_fill_plan"] if args.multi_scheme else [],
+        "payload_budget": payload_budget,
+        "kimi_images": kimi_images,
+        "kimi_input_note": "默认只传 piece_overview、texture_contact_sheet 和 style_references 的 Kimi 压缩图；不要传 texture_thumbnails_debug 中的单张原图/调试图。",
     }
     request_path.write_text(json.dumps(request_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -551,11 +594,15 @@ def main() -> int:
         "生产规划请求摘要": str(request_path.resolve()),
         "子Agent提示词": str(prompt_path.resolve()),
         "纸样总览图": overview_path,
+        "Kimi纸样总览图": overview_for_kimi,
+        "Kimi面料ContactSheet": contact_sheet.get("sheet_path", ""),
         "款式参考图": [ref["path"] for ref in style_references],
         "预期输出": request_summary["expected_output"],
         "多方案模式": args.multi_scheme,
         "最大方案数": args.max_schemes if args.multi_scheme else 1,
+        "Kimi请求体预算": payload_budget,
     }, ensure_ascii=False, indent=2))
+    print_payload_budget_warning(payload_budget)
     return 0
 
 

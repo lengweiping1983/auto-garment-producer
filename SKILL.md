@@ -92,8 +92,10 @@ python3 scripts/端到端自动化.py \
 ## 子 Agent 输出要求
 
 - 视觉分析输出 `visual_elements.json`：包含 `dominant_objects`、`supporting_elements`、`palette`、`style`、`fabric_hints`、`source_images`、`fusion_strategy`、`generated_prompts`。
+- `visual_elements.json` 必须包含 `theme_to_piece_strategy`：把主题拆成 `base_atmosphere`、`hero_motif`、`accent_details`、`quiet_zones`，并列出不得作为大身满版纹理的具象元素。
 - 生产规划输出 `ai_production_plan.json`：包含 `garment_map.pieces[]` 和 `piece_fill_plan.pieces[]`。
-- 多方案生产规划输出 `ai_multi_production_plan.json`：顶层包含 `schemes[]`、`portfolio_notes`、`asset_coverage`。每个 scheme 必须包含 `scheme_id`、`design_positioning`、`strategy_note`、`asset_mix_summary`、`diversity_tags`、`piece_fill_plan`；模板模式下 `garment_map` 可省略或被固定模板覆盖。
+- 多方案生产规划输出 `ai_multi_production_plan.json`：顶层包含 `schemes[]`、`portfolio_notes`、`asset_coverage`。每个 scheme 必须包含 `scheme_id`、`design_positioning`、`strategy_note`、`theme_landing_summary`、`asset_mix_summary`、`diversity_tags`、`piece_fill_plan`；模板模式下 `garment_map` 可省略或被固定模板覆盖。
+- 面料资产必须通过色板/风格一致性质检。明显跨风格拼贴、配色跳脱、非透明 motif、半透明整张贴片不得进入最终裁片。
 - 所有 JSON 必须是纯 JSON，不要 markdown 代码块或解释文字。
 
 ## 参考文档

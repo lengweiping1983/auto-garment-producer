@@ -12,6 +12,8 @@ python3 scripts/端到端自动化.py --theme-image /path/to/theme.png --out /pa
 
 普通 `--dual-source` 会分别渲染 Neo AI 与 libtv-skill 的来源结果；`--dual-source --multi-scheme` 会先合并双源 9+9 资产池，再要求 AI 输出 `ai_multi_production_plan.json` 的多套 `schemes` 方案。
 
+主题图不会被直接贴满裁片。流程会先把主题拆成“大身低噪氛围底纹 / 1 个 hero motif / 小面积点缀 / 安静区域”，再用色板、风格一致性和 motif 透明度质检过滤明显跳脱的资产。
+
 ## 关键目录
 
 - `scripts/`：端到端流程、prompt 构造、纹理裁剪、裁片渲染和质检。

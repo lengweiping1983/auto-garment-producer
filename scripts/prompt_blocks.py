@@ -103,6 +103,10 @@ def build_collection_board_prompt_en(panel_prompts: dict, style: dict | None = N
         "Create one square 3x3 commercial textile collection board with thin white gutters. No text anywhere.",
         f"Art direction: {compact_style_line(style)}",
         "Rows: 1 base seamless textures; 2 accent/solid seamless textures; 3 placement motifs on plain light backgrounds.",
+        "All 9 panels must look like one coherent textile family: same palette, same paper grain, same brush language, same saturation range.",
+        "Do not mix separate visual worlds such as warm beige line-art mushrooms with green watercolor meadow panels unless the palette and brush style are fully unified.",
+        "Rows 1-2 are fabric repeats only: no large figurative subject, no complete scene, no animal/character/mushroom/flower bouquet as a full-body hero texture.",
+        "Row 3 motifs must be clean placement artwork on removable plain backgrounds, never semi-transparent rectangular patches.",
     ]
     for label, panel_id in BOARD_POSITIONS_EN:
         prompt = panel_prompts.get(panel_id) or PANEL_DEFAULTS_EN[panel_id]
@@ -126,6 +130,10 @@ def build_collection_board_prompt_zh(panel_prompts: dict, style: dict | None = N
             f"{style.get('mood', '优雅安静')}，{style.get('medium', '水彩')}风格。{direction}"
         ),
         "第一行是大身可平铺底纹；第二行是中调点缀/纯色可平铺纹理；第三行是浅色干净背景定位图案。",
+        "9个面板必须像同一设计师的同一系列：同色板、同纸纹、同手绘语言、同饱和度范围。",
+        "禁止在同一看板中混入明显跨风格资产，例如米底线稿蘑菇与绿色水彩草地并列，除非色板和笔触已完全统一。",
+        "第一、二行只能是面料 repeat，不要把动物、角色、蘑菇、花丛、完整场景做成大身主纹理。",
+        "第三行定位图案必须便于干净去背景，禁止半透明整张贴片。",
     ]
     for label, panel_id in BOARD_POSITIONS_ZH:
         prompt = panel_prompts.get(panel_id) or PANEL_DEFAULTS_ZH[panel_id]

@@ -4,11 +4,11 @@
 
 使用方式：
 1. 渲染完成后运行本脚本
-2. 子Agent查看 preview.png + 填充计划 → 输出 ai_commercial_review.json
+2. 子Agent查看 preview_path 指向的 Kimi 缩略图 + 填充计划 → 输出 ai_commercial_review.json
 3. 程序读取 review 结果：若 not approved 且 --auto-retry 启用，触发返工流程
 
 输入：
-- preview.png（最终预览图）
+- preview.png（最终预览图；请求中会转换为 Kimi 缩略图）
 - piece_fill_plan.json
 - commercial_design_brief.json
 - fashion_qc_report.json（可选，提供逐裁片质检数据）
@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from image_utils import ensure_thumbnail
+from image_utils import ensure_thumbnail, estimate_payload_budget, print_payload_budget_warning
 
 
 def load_json(path: str | Path) -> dict:
@@ -77,6 +77,10 @@ def build_review_prompt(preview_path: str, fill_plan: dict, brief: dict, qc_repo
         "5. 季节适配：颜色、密度、风格是否符合季节定位？",
         "6. 客群匹配：是否符合目标客群的审美和消费水平？",
         "7. 过度堆砌：是否有多余的装饰？整体是否干净、有呼吸感？",
+        "8. 主题落地：主题是否被工程化为 1 个清晰 hero motif + 低噪主题氛围底纹 + 小面积点缀，而不是完整主题图满版铺贴？",
+        "9. 配色一致性：是否出现米底/棕色/高饱和色块与主色板割裂，导致像多套资产硬拼？",
+        "10. 风格一致性：是否出现线稿、水彩、贴纸、照片质感等笔触混杂？",
+        "11. motif 质量：是否有半透明整张贴片、背景未去干净、主题残影或矩形边界？",
         "",
     ])
 
@@ -108,11 +112,18 @@ def build_review_prompt(preview_path: str, fill_plan: dict, brief: dict, qc_repo
             "issues": [
                 {
                     "severity": "high|medium|low",
-                    "category": "harmony|wearability|hero_placement|trim|season|customer|clutter|self_assessment",
+                    "category": "harmony|wearability|hero_placement|trim|season|customer|clutter|theme_fidelity|palette_harmony|style_cohesion|motif_cleanliness|self_assessment",
                     "description": "具体问题描述",
                     "suggested_fix": "修改建议"
                 }
             ],
+            "scores": {
+                "theme_fidelity": 9,
+                "palette_harmony": 9,
+                "style_cohesion": 9,
+                "hero_clarity": 9,
+                "wearability": 9
+            },
             "self_assessment_review": {
                 "verified": True,
                 "disagreements": [
@@ -131,6 +142,8 @@ def build_review_prompt(preview_path: str, fill_plan: dict, brief: dict, qc_repo
         "- approved=true 表示可以直接量产；approved=false 表示需要修改",
         "- confidence 用 0–1 表示你的确信度",
         "- issues 为空数组表示没有明显问题",
+        "- 如果出现风格拼贴、配色跳脱、主题残影、过度满版，approved 必须为 false",
+        "- priority_fix 优先要求重选资产和重做填充计划，不要只建议微调 scale/offset",
         "- 每条 issue 必须给出具体的 suggested_fix",
     ])
     return "\n".join(lines)
@@ -155,18 +168,22 @@ def main() -> int:
 
     # 模式A：生成复审请求（使用缩略图避免 413）
     if not args.selected:
-        preview_thumb = ensure_thumbnail(args.preview, max_size=256)
+        preview_thumb = ensure_thumbnail(args.preview, max_size=384, provider="kimi")
         prompt = build_review_prompt(str(preview_thumb), fill_plan, brief, qc_report)
         prompt_path = out_dir / "ai_commercial_review_prompt.txt"
         prompt_path.write_text(prompt, encoding="utf-8")
+        payload_budget = estimate_payload_budget(prompt_path, [preview_thumb])
 
         request_summary = {
             "request_id": "commercial_review_v1",
             "preview_path": str(preview_thumb.resolve()),
+            "preview_original_path": str(Path(args.preview).resolve()),
             "fill_plan_path": str(Path(args.fill_plan).resolve()),
             "brief_path": str(Path(args.brief).resolve()),
             "prompt_path": str(prompt_path.resolve()),
             "expected_output": str((out_dir / "ai_commercial_review.json").resolve()),
+            "payload_budget": payload_budget,
+            "kimi_input_note": "只传 preview_path 指向的 Kimi 缩略图，不要传 preview_original_path 原图。",
         }
         req_path = out_dir / "ai_commercial_review_request.json"
         req_path.write_text(json.dumps(request_summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -175,8 +192,11 @@ def main() -> int:
             "商业复审请求": str(req_path.resolve()),
             "子Agent提示词": str(prompt_path.resolve()),
             "预期输出": request_summary["expected_output"],
-            "说明": "请启动 coder 子Agent，传入 ai_commercial_review_prompt.txt + preview.png，要求输出严格的 ai_commercial_review.json",
+            "Kimi预览图": str(preview_thumb.resolve()),
+            "Kimi请求体预算": payload_budget,
+            "说明": "请启动 coder 子Agent，传入 ai_commercial_review_prompt.txt + preview_path 缩略图，要求输出严格的 ai_commercial_review.json；不要传原始 preview.png。",
         }, ensure_ascii=False, indent=2))
+        print_payload_budget_warning(payload_budget)
         return 0
 
     # 模式B：验证子Agent复审结果
@@ -188,6 +208,17 @@ def main() -> int:
     review = load_json(selected_path)
     approved = review.get("approved", False)
     issues = review.get("issues", [])
+    scores = review.get("scores", {}) if isinstance(review.get("scores", {}), dict) else {}
+    critical_score_keys = ["theme_fidelity", "palette_harmony", "style_cohesion", "hero_clarity"]
+    low_scores = {k: scores.get(k) for k in critical_score_keys if isinstance(scores.get(k), (int, float)) and scores.get(k) < 8}
+    if low_scores and approved:
+        approved = False
+        issues.append({
+            "severity": "high",
+            "category": "commercial_review_scores",
+            "description": f"关键商业维度低于 8 分: {low_scores}",
+            "suggested_fix": "重选资产并重做填充计划，优先修复主题落地、配色一致性和风格统一。",
+        })
 
     # 程序兜底：approved=false 且有 high severity issue 时告警
     high_issues = [i for i in issues if i.get("severity") == "high"]
@@ -209,6 +240,7 @@ def main() -> int:
         "assessment": review.get("overall_assessment", ""),
         "high_issues_count": len(high_issues),
         "total_issues_count": len(issues),
+        "scores": scores,
         "review_path": str(selected_path.resolve()),
     }
     final_path = out_dir / "commercial_review_result.json"

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
-from image_utils import ensure_thumbnail
+from image_utils import ensure_thumbnail, estimate_payload_budget, print_payload_budget_warning
 
 
 def load_json(path: str | Path) -> dict:
@@ -47,11 +47,11 @@ def build_agent_prompt(garment_map: dict, texture_set: dict, brief: dict, pieces
     for tex in texture_set.get("textures", []):
         p = tex.get("path", "")
         if p:
-            image_paths.append(str(ensure_thumbnail(p, max_size=256)))
+            image_paths.append(str(ensure_thumbnail(p, max_size=192, provider="kimi")))
     for motif in texture_set.get("motifs", []):
         p = motif.get("path", "")
         if p:
-            image_paths.append(str(ensure_thumbnail(p, max_size=256)))
+            image_paths.append(str(ensure_thumbnail(p, max_size=192, provider="kimi")))
     # 尝试推断 overview 图路径
     if pieces_payload:
         pieces_path = pieces_payload.get("_source_path", "")
@@ -60,7 +60,7 @@ def build_agent_prompt(garment_map: dict, texture_set: dict, brief: dict, pieces
             for cand in ["piece_overview.png", "garment_map_overview.jpg"]:
                 cp = base / cand
                 if cp.exists():
-                    image_paths.append(str(cp))
+                    image_paths.append(str(ensure_thumbnail(cp, max_size=512, provider="kimi")))
     if image_paths:
         lines.extend([
             "",
@@ -232,6 +232,13 @@ def main() -> int:
     prompt = build_agent_prompt(garment_map, texture_set, brief, pieces_payload, visual_elements)
     prompt_path = out_dir / "ai_fill_plan_prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
+    # prompt 内已列出 Kimi 缩略图路径，这里解析出来用于预算诊断。
+    kimi_images = []
+    for line in prompt.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- ") and (".jpg" in stripped.lower() or ".jpeg" in stripped.lower() or ".png" in stripped.lower()):
+            kimi_images.append(stripped[2:].strip())
+    payload_budget = estimate_payload_budget(prompt_path, kimi_images)
 
     request_summary = {
         "request_id": "ai_fill_plan_request_v1",
@@ -241,8 +248,11 @@ def main() -> int:
         "texture_ids": [t.get("texture_id") for t in texture_set.get("textures", []) if t.get("approved", False)],
         "motif_ids": [m.get("motif_id") for m in texture_set.get("motifs", []) if m.get("approved", False)],
         "solid_ids": [s.get("solid_id") for s in texture_set.get("solids", []) if s.get("approved", True)],
+        "kimi_images": kimi_images,
         "prompt_path": str(prompt_path.resolve()),
         "expected_output": str((out_dir / "ai_piece_fill_plan.json").resolve()),
+        "payload_budget": payload_budget,
+        "kimi_input_note": "只传 kimi_images 中的缩略图；不要传原始 texture/motif/piece_overview 图片。",
     }
     request_path = out_dir / "ai_fill_plan_request.json"
     request_path.write_text(json.dumps(request_summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -251,7 +261,9 @@ def main() -> int:
         "审美请求摘要": str(request_path.resolve()),
         "子Agent提示词": str(prompt_path.resolve()),
         "预期输出": request_summary["expected_output"],
+        "Kimi请求体预算": payload_budget,
     }, ensure_ascii=False))
+    print_payload_budget_warning(payload_budget)
     return 0
 
 

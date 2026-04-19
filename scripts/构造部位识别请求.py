@@ -4,13 +4,13 @@
 
 使用方式：
 1. 运行本脚本生成选择任务文件（ai_garment_map_prompt.txt）
-2. 外层 Agent 启动 coder 子Agent，传入该 prompt + piece_overview.png
+2. 外层 Agent 启动 coder 子Agent，传入该 prompt + overview_path 指向的 Kimi 缩略图
 3. 子Agent输出 ai_garment_map.json
 4. 部位映射.py 优先使用 ai_garment_map.json，无则 fallback 到几何启发
 
 输入：
 - pieces.json（裁片几何信息）
-- piece_overview.png（裁片总览图路径）
+- piece_overview.png（裁片总览图路径；请求中会转换为 Kimi 缩略图）
 - commercial_design_brief.json（含 garment_type）
 
 输出：
@@ -22,6 +22,17 @@ import argparse
 import json
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+try:
+    from image_utils import ensure_thumbnail, estimate_payload_budget, print_payload_budget_warning
+except Exception:
+    def ensure_thumbnail(image_path, max_size=512, **kwargs):
+        return Path(image_path).resolve()
+    def estimate_payload_budget(prompt_path=None, image_paths=None, **kwargs):
+        return {}
+    def print_payload_budget_warning(budget):
+        return
 
 
 def load_json(path: str | Path) -> dict:
@@ -271,18 +282,23 @@ def main() -> int:
 
     # 模式A：生成识别请求
     if not args.selected:
-        prompt = build_identification_prompt(pieces, garment_type, overview_path)
+        overview_thumb = ensure_thumbnail(overview_path, max_size=512, provider="kimi")
+        prompt = build_identification_prompt(pieces, garment_type, str(overview_thumb.resolve()))
         prompt_path = out_dir / "ai_garment_map_prompt.txt"
         prompt_path.write_text(prompt, encoding="utf-8")
+        payload_budget = estimate_payload_budget(prompt_path, [overview_thumb])
 
         request_summary = {
             "request_id": "garment_map_identification_v1",
             "pieces_path": str(Path(args.pieces).resolve()),
-            "overview_path": str(Path(overview_path).resolve()),
+            "overview_path": str(overview_thumb.resolve()),
+            "overview_original_path": str(Path(overview_path).resolve()),
             "garment_type": garment_type,
             "prompt_path": str(prompt_path.resolve()),
             "expected_output": str((out_dir / "ai_garment_map.json").resolve()),
             "piece_count": len(pieces),
+            "payload_budget": payload_budget,
+            "kimi_input_note": "只传 overview_path 指向的 Kimi 缩略图，不要传 overview_original_path 原图。",
         }
         request_path = out_dir / "ai_garment_map_request.json"
         request_path.write_text(json.dumps(request_summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -291,8 +307,11 @@ def main() -> int:
             "部位识别请求": str(request_path.resolve()),
             "子Agent提示词": str(prompt_path.resolve()),
             "预期输出": request_summary["expected_output"],
-            "说明": "请启动 coder 子Agent，传入 ai_garment_map_prompt.txt + piece_overview.png，要求输出严格的 ai_garment_map.json",
+            "Kimi预览图": str(overview_thumb.resolve()),
+            "Kimi请求体预算": payload_budget,
+            "说明": "请启动 coder 子Agent，传入 ai_garment_map_prompt.txt + overview_path 缩略图，要求输出严格的 ai_garment_map.json；不要传原始 piece_overview.png。",
         }, ensure_ascii=False, indent=2))
+        print_payload_budget_warning(payload_budget)
         return 0
 
     # 模式B：验证AI识别结果并输出 garment_map.json
