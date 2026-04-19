@@ -279,7 +279,8 @@ def build_rule_plan(pieces_payload: dict, texture_set: dict, garment_map: dict, 
     if not texture_ids:
         raise RuntimeError("没有可用面料可用于艺术指导填充计划。")
 
-    # 注意：texture_id 实际值为 main/secondary/dark_base/accent_light/accent_mid/solid_quiet
+    # 注意：默认 2x2 texture_id 为 main/secondary/accent_light/accent_mid；
+    # dark_base 仅作为兼容旧 texture_set 的可选回退。
     main_id = choose(texture_ids, ["main", "base", "secondary", "accent_light", "dark_base"])
     secondary_id = choose(texture_ids, ["secondary", "main", "accent_light", "accent_mid", "dark_base"])
     accent_id = choose(texture_ids, ["accent_light", "accent_mid", "accent", "secondary", "main", "dark_base"])

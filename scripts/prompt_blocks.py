@@ -31,25 +31,16 @@ COMMERCIAL_FILL_RULES_ZH = [
 PANEL_DEFAULTS_EN = {
     "main": "seamless tileable low-density tonal leaf repeat pattern on pale ground, faint leaf silhouettes, visible but quiet structure, commercial apparel base fabric, abundant breathing room, no abstract wash, no plain color wash, no blurred background, no empty texture, no scene, no landscape, no text",
     "secondary": "coordinated medium-density pattern on light ground, same palette, no scene, no text",
-    "dark_base": "perfectly flat dark solid, only microscopic grain, no ribs, no corduroy, no stripes, no folds, no shadows, no 3D fabric photography, uniform surface, textile swatch, flat lay, no forest, no foliage photo, no camouflage, no atmospheric scene, no moody landscape, no text",
     "accent_light": "tiny scattered small-scale pattern on light ground, controlled density, no text",
     "accent_mid": "soft geometric or organic lattice on pale ground, same palette, seamless tileable texture, no text",
-    "solid_quiet": "perfectly flat uniform solid, only subtle microscopic weave texture on very close inspection, no visible pattern, no folds, no wrinkles, no draping, no shadows, no 3D fabric photography, no creases, no light variation, flat lay textile swatch, no paper grain, no blank canvas, no text",
     "hero_motif_1": "isolated foreground hero motif only, centered subject, transparent PNG cutout, real alpha background, empty transparent pixels around the subject, no background, no background art, no scenery, no garden, no foliage behind subject, no botanical backdrop, no painted wash, no rectangular composition, no full illustration scene, no vignette, no ground shadow, no text",
-    "hero_motif_2": "isolated secondary accent motif only, centered subject, transparent PNG cutout, real alpha background, empty transparent pixels around the subject, no background, no colored background box, no scenery, refined brushwork, no text",
-    "trim_motif": "isolated small decorative accent motif only, minimal composition, transparent PNG cutout, real alpha background, empty transparent pixels around the subject, no background, no colored background box, no scenery, no text",
 }
 
-BOARD_POSITIONS_EN = [
+TEXTURE_2X2_POSITIONS_EN = [
     ("Top-left", "main"),
-    ("Top-center", "secondary"),
-    ("Top-right", "dark_base"),
-    ("Middle-left", "accent_light"),
-    ("Middle-center", "accent_mid"),
-    ("Middle-right", "solid_quiet"),
-    ("Bottom-left", "hero_motif_1"),
-    ("Bottom-center", "hero_motif_2"),
-    ("Bottom-right", "trim_motif"),
+    ("Top-right", "secondary"),
+    ("Bottom-left", "accent_light"),
+    ("Bottom-right", "accent_mid"),
 ]
 
 
@@ -63,23 +54,42 @@ def compact_style_line(style: dict | None) -> str:
     )
 
 
-def build_collection_board_prompt_en(panel_prompts: dict, style: dict | None = None) -> str:
-    """Build the final English 3x3 collection-board prompt."""
+def build_texture_2x2_board_prompt_en(panel_prompts: dict, style: dict | None = None) -> str:
+    """Build the final English 2x2 texture-board prompt."""
     lines = [
-        "Create one square 3x3 commercial textile collection board with thin white gutters. No text anywhere.",
+        "Create one square 2x2 commercial textile texture board with thin white gutters. No text anywhere.",
         f"Art direction: {compact_style_line(style)}",
-        "Rows: 1 base seamless textures; 2 accent/solid seamless textures; 3 isolated transparent PNG placement motifs with real alpha backgrounds.",
-        "All 9 panels must look like one coherent textile family: same palette, same paper grain, same brush language, same saturation range.",
+        "All 4 panels are seamless tileable fabric repeats only, arranged as equal square swatches.",
+        "All 4 panels must look like one coherent textile family: same palette, same paper grain, same brush language, same saturation range.",
         "Do not mix separate visual worlds such as warm beige line-art mushrooms with green watercolor meadow panels unless the palette and brush style are fully unified.",
-        "Rows 1-2 are fabric repeats only: no large figurative subject, no complete scene, no landscape, no scenery, no environment, no animal/character/mushroom/flower bouquet as a full-body hero texture. Each panel must look like a fabric swatch, not a painting or scene.",
-        "Row 3 motifs must be AI-generated as clean isolated transparent cutout artwork with real alpha backgrounds, never plain-color boxes, background art, scenery, rectangular patches, or semi-transparent full-image backgrounds.",
+        "Every panel must look like a fabric swatch, not a painting, scene, mockup, sticker sheet, or placement motif.",
+        "No large figurative subject, complete scene, landscape, scenery, environment, animal, character, mushroom, or flower bouquet as a full-body hero texture.",
     ]
-    for label, panel_id in BOARD_POSITIONS_EN:
+    for label, panel_id in TEXTURE_2X2_POSITIONS_EN:
         prompt = panel_prompts.get(panel_id) or PANEL_DEFAULTS_EN[panel_id]
         lines.append(f"{label}: {prompt}")
     lines.extend([
         "All panels share one palette, fabric texture, brush language, and commercial apparel mood.",
         BOARD_NEGATIVE_EN + ".",
-        "Rows 1-2 must be usable fabric repeats; row 3 must be isolated transparent placement motifs with real alpha backgrounds.",
+        "All 4 panels must be usable seamless fabric repeats.",
     ])
     return "\n".join(lines)
+
+
+def build_transparent_hero_prompt_en(hero_prompt: str, style: dict | None = None) -> str:
+    """Build the final English single transparent hero motif prompt."""
+    prompt = hero_prompt or PANEL_DEFAULTS_EN["hero_motif_1"]
+    lines = [
+        "Create one isolated foreground apparel placement graphic as a transparent PNG cutout with real alpha background.",
+        f"Art direction: {compact_style_line(style)}",
+        "The subject must be the user's main desired content only, centered, cleanly separated from the background, with soft but readable edges.",
+        prompt,
+        "Required output: real transparent alpha pixels around the subject, no background, no plain light box, no colored background box, no filled rectangle, no scenery, no full illustration scene, no sticker sheet, no poster composition, no garment mockup, no model, no text, no logo, no watermark.",
+        "Leave balanced empty transparent pixels around the subject so it can be split vertically across left and right front garment pieces.",
+    ]
+    return "\n".join(lines)
+
+
+def build_collection_board_prompt_en(panel_prompts: dict, style: dict | None = None) -> str:
+    """Compatibility wrapper for callers that still import the old name."""
+    return build_texture_2x2_board_prompt_en(panel_prompts, style)

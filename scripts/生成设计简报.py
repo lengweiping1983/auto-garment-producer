@@ -21,7 +21,7 @@ except Exception:
     def sanitize_prompts_in_dict(data, keys=("prompt",), domain="generic"):
         return data
 
-from prompt_blocks import build_collection_board_prompt_en, FRONT_EFFECT_NEGATIVE_EN
+from prompt_blocks import build_texture_2x2_board_prompt_en, FRONT_EFFECT_NEGATIVE_EN
 
 
 def rgb_to_hex(rgb: tuple[int, int, int]) -> str:
@@ -281,7 +281,7 @@ def _generate_outputs(
             item["role"] = role
         return item
 
-    # 构建 9 面板提示词（3×3 看板全动态）
+    # 构建 5 条提示词：4 条 2x2 纹理看板提示词 + 1 条独立透明主图提示词。
     # 优先使用 generated_prompts；否则基于 motifs 生成模板提示词。
     gp = generated_prompts or {}
     motif_str = ", ".join(motifs[:3]) if motifs else "theme elements"
@@ -295,12 +295,10 @@ def _generate_outputs(
     )
     main_prompt = gp.get("main", f"seamless tileable low-density tonal leaf repeat pattern on pale ground, faint leaf silhouettes inspired by {motif_str}, visible but quiet structure, commercial apparel base fabric, abundant breathing room, same {medium} brush style, no abstract wash, no plain color wash, no blurred background, no empty texture, no figurative subject, no flower bouquet, no landscape scene, no environment, no scenery, {base_guard}, no text")
     secondary_prompt = gp.get("secondary", f"seamless tileable coordinating textile texture, soft light ground with delicate abstract pattern inspired by {motif_str}, medium density but airy, same {medium} brush style, no standalone scene, no environment, {base_guard}, no text")
-    dark_prompt = gp.get("dark_base", gp.get("dark", f"seamless tileable perfectly flat dark solid, only microscopic grain, no ribs, no corduroy, no stripes, no folds, no wrinkles, no draping, no shadows, no 3D fabric photography, no visible repeat structure, uniform surface, textile swatch, flat lay, same {medium} palette family, no forest, no foliage photo, no camouflage, no atmospheric scene, no moody landscape, no landscape, no scenery, no environment, no figurative elements, no brown cast unless present in palette, no text"))
 
     # Row 2 — Mid-scale accent textures（全部走 gp.get，无硬编码）
     accent_prompt = gp.get("accent_light", gp.get("accent", f"seamless tileable small-scale accent pattern, tiny scattered elements inspired by {motif_str}, very small scale repeating, charming but controlled density, same palette and brush as main panel, no standalone scene, no text"))
     accent_mid_prompt = gp.get("accent_mid", f"seamless tileable soft geometric or organic lattice on pale ground, same {mood} palette, same {medium} hand-painted brush language, low noise, seamless tileable texture for secondary panels, no style shift, no text")
-    solid_quiet_prompt = gp.get("solid_quiet", f"seamless tileable perfectly flat uniform solid, only subtle microscopic weave texture on very close inspection, no visible pattern, no folds, no wrinkles, no draping, no shadows, no 3D fabric photography, no creases, no light variation, flat lay textile swatch, calm and minimal, same {mood} palette family, no paper grain, no blank canvas, no scene, no text")
 
     def _force_transparent_motif_prompt(prompt_text: str, motif_id: str = "") -> str:
         required = (
@@ -341,12 +339,10 @@ def _generate_outputs(
             return f"{text}, isolated foreground motif only, empty transparent pixels around the subject, no colored background box, no scenery, no semi-transparent full-image patch"
         return f"{text}, {suffix}"
 
-    # Row 3 — Placement motifs must be generated as transparent cutouts.
+    # Independent hero motif must be generated as a transparent cutout.
     motif_guard = "isolated foreground motif only, transparent PNG cutout, real alpha background, no background, no plain-color box, no filled rectangular background, no scenery, no semi-transparent full-image patch"
     hero_guard = f"{motif_guard}, no garden, no meadow, no landscape, no environment, no foliage behind subject, no botanical backdrop, no painted wash behind subject, no rectangular composition, no full illustration scene, no vignette, no ground shadow"
     hero_motif_1_prompt = _force_transparent_motif_prompt(gp.get("hero_motif_1", gp.get("hero_motif", f"isolated foreground hero motif only, centered subject, transparent PNG cutout with real alpha background, empty transparent pixels around the subject, soft clean edges, balanced negative space, {medium} hand-painted placement print element, {hero_guard}, no text")), "hero_motif_1")
-    hero_motif_2_prompt = _force_transparent_motif_prompt(gp.get("hero_motif_2", f"isolated secondary accent motif only, centered subject, transparent PNG cutout with real alpha background, empty transparent pixels around the subject, refined {medium} brushwork, designed as placement accent motif, {mood}, {motif_guard}, no text"), "hero_motif_2")
-    trim_motif_prompt = _force_transparent_motif_prompt(gp.get("trim_motif", f"isolated small decorative accent motif only, minimal composition, transparent PNG cutout with real alpha background, empty transparent pixels around the subject, same {medium} style and palette family, {motif_guard}, no text"), "trim_motif")
 
     def _inject_palette_constraints(prompt_text: str, texture_id: str, palette: dict) -> str:
         """为提示词追加具体的 hex 颜色硬约束，减少 AI 生成时的颜色偏差。"""
@@ -355,50 +351,34 @@ def _generate_outputs(
         primary = palette.get("primary", [])
         secondary = palette.get("secondary", [])
         accent = palette.get("accent", [])
-        dark = palette.get("dark", [])
 
         constraints = []
         if texture_id == "main" and primary:
             constraints.append(f"ground color must be exactly {primary[0]}, keep a visible low-density leaf repeat, no abstract wash, no plain color wash, no blurred background, no figurative elements, no scene, no landscape")
         elif texture_id == "secondary" and secondary:
             constraints.append(f"light ground and pattern tones must stay within {secondary[0]} family, no warm cast, no scene")
-        elif texture_id == "dark_base" and dark:
-            constraints.append(f"deep ground color must be exactly {dark[0]} or darker, no brown, no green cast, no forest, no foliage photo, no camouflage, no atmospheric scene, no moody landscape, no stripes, no visible repeat structure, no plain dark texture")
         elif texture_id == "accent_light" and (accent or primary):
             c = accent[0] if accent else primary[0]
             constraints.append(f"scattered accent elements must use {c} tones only")
         elif texture_id == "accent_mid" and secondary:
             constraints.append(f"lattice lines must use {secondary[0]} tones, pale ground stays within {primary[0] if primary else 'light'} family")
-        elif texture_id == "solid_quiet" and primary:
-            constraints.append(f"solid surface color must be exactly {primary[0]}, no visible pattern, no micro dot, no mini woven repeat, no paper grain, no canvas, no blank background, perfectly flat uniform solid")
         elif texture_id == "hero_motif_1" and primary:
             bg = primary[0] if primary else "#ffffff"
             fg = accent[0] if accent else (secondary[0] if secondary else bg)
             constraints.append(f"transparent alpha background only, isolated foreground subject painted in {fg} tones, empty transparent pixels around the subject, soft fading edges, no colored background box, no garden, no foliage behind subject, no botanical backdrop, no rectangular composition, no full illustration scene")
-        elif texture_id == "hero_motif_2" and primary:
-            bg = primary[0] if primary else "#ffffff"
-            fg = secondary[0] if secondary else (accent[0] if accent else bg)
-            constraints.append(f"transparent alpha background only, isolated accent subject in {fg} tones, empty transparent pixels around the subject, no colored background box, no scenery")
-        elif texture_id == "trim_motif" and (accent or secondary):
-            c = accent[0] if accent else secondary[0]
-            constraints.append(f"minimal isolated decorative accent in {c} tones on transparent alpha background, empty transparent pixels around the subject, no colored background box, no scenery")
 
         if constraints:
             return f"{prompt_text}, color constraint: {', '.join(constraints)}"
         return prompt_text
 
-    # 构建 9 面板提示词并注入 palette 约束
+    # 构建 2x2 纹理看板 + 独立主图提示词并注入 palette 约束
     palette = style_profile.get("palette", {})
     _prompts = [
-        ("main", "可穿大身裁片", main_prompt, "row1_left", "base_texture"),
-        ("secondary", "协调大副裁片", secondary_prompt, "row1_center", "base_texture"),
-        ("dark_base", "深色饰边/打底片", dark_prompt, "row1_right", "base_texture"),
-        ("accent_light", "小面板与受控点缀", accent_prompt, "row2_left", "accent_texture"),
-        ("accent_mid", "中格几何/有机格子", accent_mid_prompt, "row2_center", "accent_texture"),
-        ("solid_quiet", "安静纯色/衬里", solid_quiet_prompt, "row2_right", "solid_texture"),
-        ("hero_motif_1", "主卖点定位图案", hero_motif_1_prompt, "row3_left", "placement_motif"),
-        ("hero_motif_2", "次卖点定位图案", hero_motif_2_prompt, "row3_center", "placement_motif"),
-        ("trim_motif", "小型装饰点缀", trim_motif_prompt, "row3_right", "placement_motif"),
+        ("main", "可穿大身裁片", main_prompt, "top_left", "base_texture"),
+        ("secondary", "协调大副裁片", secondary_prompt, "top_right", "base_texture"),
+        ("accent_light", "小面板与受控点缀", accent_prompt, "bottom_left", "accent_texture"),
+        ("accent_mid", "中格几何/有机格子", accent_mid_prompt, "bottom_right", "accent_texture"),
+        ("hero_motif_1", "AI生成主图透明定位图案", hero_motif_1_prompt, "single_hero", "placement_motif"),
     ]
     prompts = [_make_prompt(tid, purpose, sanitize_prompt(_inject_palette_constraints(ptext, tid, palette), domain="fashion"), panel=panel, role=role)
                for tid, purpose, ptext, panel, role in _prompts]
@@ -420,10 +400,10 @@ def _generate_outputs(
 
 
 def _build_collection_prompt_from_prompts(prompts: list[dict], style: dict) -> str:
-    """基于 9 面板提示词列表构造完整的英文 3x3 看板 prompt。
+    """基于提示词列表构造完整的英文 2x2 纹理看板 prompt。
     逻辑与端到端自动化.py 的 _build_collection_prompt_from_visual_elements 类似。"""
     panel_map = {p.get("texture_id", ""): p.get("prompt", "") for p in prompts}
-    return build_collection_board_prompt_en(panel_map, style)
+    return build_texture_2x2_board_prompt_en(panel_map, style)
 
 
 if __name__ == "__main__":

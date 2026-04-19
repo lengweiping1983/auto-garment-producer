@@ -10,7 +10,7 @@ python3 scripts/端到端自动化.py --theme-image /path/to/theme.png --out /pa
 
 `--out /path/to/output` 会作为任务根目录使用，脚本会自动创建/复用 `output/YYYYMMDD_HHMMSS/`，所有业务产物都写入该任务子目录；显式传入时间戳目录时会直接续跑该目录。
 
-没有现成 `texture_set.json` 或 3x3 看板时，流程只调用 Neo AI 生成单张面料看板。有主题图时，程序会裁剪第一张主题图的主体区域，竖向切为左右两半，分别生成 `theme_front_left.png` 和 `theme_front_right.png`，并强制落到正面两片裁片上。
+没有现成 `texture_set.json` 或 2x2 看板时，流程调用 Neo AI 并行生成 2x2 面料纹理看板和 1 张透明主图。有 AI 主图时，程序会裁剪该主图主体区域，竖向切为左右两半，分别生成 `theme_front_left.png` 和 `theme_front_right.png`，并强制落到正面两片裁片上。
 
 ## 关键目录
 

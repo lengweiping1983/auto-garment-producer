@@ -2,7 +2,7 @@
 """
 端到端自动化：
 
-1. 生成或接收 Neo AI 3×3 面料看板。
+1. 生成或接收 Neo AI 2×2 面料纹理看板，并独立生成透明主图。
 2. 裁剪为面料资产。
 3. 构建面料组合.json。
 4. 复用固定模板裁片和部位映射。
@@ -25,10 +25,16 @@ from PIL import Image
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 NEO_AI_SCRIPT = SKILL_DIR.parent / "neo-ai" / "scripts" / "generate_texture_collection_board.py"
+HERO_NEGATIVE_PROMPT = (
+    "text, labels, captions, titles, typography, words, letters, signage, logo, watermark, "
+    "plain light box, colored background box, filled rectangle, background art, scenery, landscape, environment, "
+    "full illustration scene, poster composition, sticker sheet, garment mockup, fashion model, mannequin, "
+    "person wearing garment, product photo, lookbook, semi-transparent full-image patch"
+)
 
 # 导入模板加载器
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
-from prompt_blocks import build_collection_board_prompt_en
+from prompt_blocks import build_texture_2x2_board_prompt_en, build_transparent_hero_prompt_en
 try:
     from template_loader import (
         normalize_piece_asset_paths,
@@ -208,6 +214,9 @@ def build_production_context(
     if getattr(args, "visual_elements", ""):
         ctx["input_hash"]["visual_elements"] = file_sha256(args.visual_elements)
         ctx["paths"]["input_visual_elements"] = str(Path(args.visual_elements).resolve())
+    if getattr(args, "hero_motif_image", ""):
+        ctx["input_hash"]["hero_motif_image"] = file_sha256(args.hero_motif_image)
+        ctx["paths"]["hero_motif_image"] = str(Path(args.hero_motif_image).resolve())
     if getattr(args, "texture_set", ""):
         texture_set_path = Path(args.texture_set)
         if not texture_set_path.is_absolute():
@@ -290,7 +299,7 @@ def run_step(cmd: list[str], env: dict | None = None, check: bool = True) -> sub
 
 
 def latest_collection_board(output_dir: Path) -> Path:
-    """在输出目录中找到最新的面料看板图像。"""
+    """在输出目录中找到最新的 Neo AI 生成图像。"""
     candidates = (
         sorted(output_dir.glob("collection_board_*.png"))
         + sorted(output_dir.glob("collection_board_*.jpg"))
@@ -302,33 +311,38 @@ def latest_collection_board(output_dir: Path) -> Path:
     return candidates[-1]
 
 
-def _build_collection_prompt_from_visual_elements(out_dir: Path, visual_elements_path: Path = None) -> str:
-    """基于视觉分析结果构造 3×3 面料看板综合 prompt。
-    读取 texture_prompts.json 和 visual_elements.json，生成适合 Neo AI 的 prompt 文本。
-    9 个面板全部从 texture_prompts.json 动态读取，无硬编码。"""
+def _build_generation_prompts_from_visual_elements(out_dir: Path, visual_elements_path: Path = None) -> tuple[str, str]:
+    """基于视觉分析结果构造 2×2 纹理看板 prompt 与独立透明主图 prompt。"""
     texture_prompts_path = out_dir / "texture_prompts.json"
     visual_path = visual_elements_path or (out_dir / "visual_elements.json")
     if not texture_prompts_path.exists() or not visual_path.exists():
-        return ""
+        return "", ""
 
     try:
         tp = json.loads(texture_prompts_path.read_text(encoding="utf-8"))
         ve = json.loads(visual_path.read_text(encoding="utf-8"))
     except Exception:
-        return ""
+        return "", ""
 
-    # 按 texture_id 索引所有面板提示词
+    # 按 texture_id 索引所有提示词
     prompts = {}
     for p in tp.get("prompts", []):
         prompts[p.get("texture_id", "")] = p.get("prompt", "")
 
     style = ve.get("style", {})
+    texture_prompt = build_texture_2x2_board_prompt_en(prompts, style)
+    hero_prompt = build_transparent_hero_prompt_en(prompts.get("hero_motif_1", ""), style)
+    return texture_prompt, hero_prompt
 
-    return build_collection_board_prompt_en(prompts, style)
+
+def _build_collection_prompt_from_visual_elements(out_dir: Path, visual_elements_path: Path = None) -> str:
+    """Compatibility wrapper: return the 2×2 texture-board prompt."""
+    texture_prompt, _ = _build_generation_prompts_from_visual_elements(out_dir, visual_elements_path)
+    return texture_prompt
 
 
 def validate_board_colors(board_path: Path, palette: dict, threshold: int = 80) -> list[dict]:
-    """验证 3×3 看板各面板颜色是否与 palette 协调。
+    """验证 2×2 看板各面板颜色是否与 palette 协调。
     返回颜色偏差报告列表。"""
     from PIL import Image
     warnings = []
@@ -337,19 +351,14 @@ def validate_board_colors(board_path: Path, palette: dict, threshold: int = 80) 
 
     board = Image.open(board_path).convert("RGB")
     w, h = board.size
-    div_x1, div_x2 = w // 3, 2 * w // 3
-    div_y1, div_y2 = h // 3, 2 * h // 3
+    div_x1 = w // 2
+    div_y1 = h // 2
 
     panels = {
         "main": (0, 0, div_x1, div_y1),
-        "secondary": (div_x1, 0, div_x2, div_y1),
-        "dark_base": (div_x2, 0, w, div_y1),
-        "accent_light": (0, div_y1, div_x1, div_y2),
-        "accent_mid": (div_x1, div_y1, div_x2, div_y2),
-        "solid_quiet": (div_x2, div_y1, w, div_y2),
-        "hero_motif_1": (0, div_y2, div_x1, h),
-        "hero_motif_2": (div_x1, div_y2, div_x2, h),
-        "trim_motif": (div_x2, div_y2, w, h),
+        "secondary": (div_x1, 0, w, div_y1),
+        "accent_light": (0, div_y1, div_x1, h),
+        "accent_mid": (div_x1, div_y1, w, h),
     }
 
     def _hex_to_rgb(hex_str):
@@ -362,10 +371,8 @@ def validate_board_colors(board_path: Path, palette: dict, threshold: int = 80) 
     mapping = {
         "main": palette.get("primary", []),
         "secondary": palette.get("secondary", []),
-        "dark_base": palette.get("dark", []),
         "accent_light": palette.get("accent", []) or palette.get("primary", []),
         "accent_mid": palette.get("secondary", []),
-        "solid_quiet": palette.get("primary", []),
     }
 
     for tid, box in panels.items():
@@ -394,10 +401,7 @@ def validate_board_colors(board_path: Path, palette: dict, threshold: int = 80) 
     return warnings
 
 
-def generate_board(args: argparse.Namespace, out_dir: Path) -> Path:
-    """调用 Neo AI 生成面料看板。"""
-    board_dir = out_dir / "neo_collection_board"
-    board_dir.mkdir(parents=True, exist_ok=True)
+def _neo_generation_cmd(args: argparse.Namespace, output_dir: Path, prompt_file: str = "", negative_prompt: str = "") -> list[str]:
     cmd = [
         sys.executable,
         str(NEO_AI_SCRIPT),
@@ -408,17 +412,56 @@ def generate_board(args: argparse.Namespace, out_dir: Path) -> Path:
         "--output-format",
         "png",
         "--output-dir",
-        str(board_dir),
+        str(output_dir),
     ]
-    if getattr(args, "prompt_file", ""):
-        cmd.extend(["--prompt-file", args.prompt_file])
+    if prompt_file:
+        cmd.extend(["--prompt-file", prompt_file])
+    if negative_prompt:
+        cmd.extend(["--negative-prompt", negative_prompt])
     if args.num_images:
         cmd.extend(["--num-images", args.num_images])
     if args.token:
         cmd.extend(["--token", args.token])
+    return cmd
+
+
+def generate_board(args: argparse.Namespace, out_dir: Path, prompt_file: str = "", subdir: str = "neo_texture_board", negative_prompt: str = "") -> Path:
+    """调用 Neo AI 生成图片。默认生成 2x2 纹理看板。"""
+    board_dir = out_dir / subdir
+    board_dir.mkdir(parents=True, exist_ok=True)
+    cmd = _neo_generation_cmd(args, board_dir, prompt_file or getattr(args, "texture_prompt_file", "") or getattr(args, "prompt_file", ""), negative_prompt=negative_prompt)
     env = os.environ.copy()
     run_step(cmd, env=env)
     return latest_collection_board(board_dir)
+
+
+def generate_texture_and_hero_assets(args: argparse.Namespace, out_dir: Path) -> tuple[Path, Path | None]:
+    """并行调用 Neo AI：2x2 纹理看板 + 独立透明主图。"""
+    texture_dir = out_dir / "neo_texture_board"
+    hero_dir = out_dir / "neo_hero_motif"
+    texture_dir.mkdir(parents=True, exist_ok=True)
+    hero_prompt_file = getattr(args, "hero_prompt_file", "")
+    if not hero_prompt_file:
+        return generate_board(args, out_dir), None
+    hero_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    jobs = [
+        ("2x2纹理看板", texture_dir, _neo_generation_cmd(args, texture_dir, getattr(args, "texture_prompt_file", "") or getattr(args, "prompt_file", ""))),
+        ("透明主图", hero_dir, _neo_generation_cmd(args, hero_dir, hero_prompt_file, negative_prompt=HERO_NEGATIVE_PROMPT)),
+    ]
+    processes = []
+    for label, _, cmd in jobs:
+        print("运行:", " ".join(cmd))
+        processes.append((label, subprocess.Popen(cmd, env=env)))
+    failures = []
+    for label, proc in processes:
+        rc = proc.wait()
+        if rc:
+            failures.append((label, rc))
+    if failures:
+        details = ", ".join(f"{label} rc={rc}" for label, rc in failures)
+        raise RuntimeError(f"Neo AI 并行生成失败: {details}")
+    return latest_collection_board(texture_dir), latest_collection_board(hero_dir)
 
 
 def mirror_tile(image: Image.Image) -> Image.Image:
@@ -432,41 +475,37 @@ def mirror_tile(image: Image.Image) -> Image.Image:
     return out
 
 
-def detect_grid_gaps(board: Image.Image, div_x1: int, div_x2: int, div_y1: int, div_y2: int, strip_width: int = 40) -> int:
-    """检测 3×3 网格的两条水平分隔带和两条垂直分隔带，返回统一的安全边距。"""
+def detect_grid_gaps(board: Image.Image, div_x1: int, div_y1: int, strip_width: int = 40) -> int:
+    """检测 2×2 网格的水平/垂直分隔带，返回统一的安全边距。"""
     gray = board.convert("L")
     width, height = gray.size
     gap_insets = []
 
-    # 两条水平分隔带检测
-    for mid_y in (div_y1, div_y2):
-        y0 = max(0, mid_y - strip_width)
-        y1 = min(height, mid_y + strip_width)
-        h_strip = gray.crop((0, y0, width, y1))
-        h_pixels = list(h_strip.get_flattened_data())
-        strip_w = h_strip.width
-        row_diffs = []
-        for y in range(h_strip.height):
-            row = [h_pixels[y * strip_w + x] for x in range(strip_w)]
-            diffs = [abs(row[i] - row[i - 1]) for i in range(1, len(row))]
-            row_diffs.append(sum(diffs) / max(1, len(diffs)))
-        if sum(1 for d in row_diffs if d > 18) > h_strip.height * 0.25:
-            gap_insets.append(20)
+    y0 = max(0, div_y1 - strip_width)
+    y1 = min(height, div_y1 + strip_width)
+    h_strip = gray.crop((0, y0, width, y1))
+    h_pixels = list(h_strip.get_flattened_data())
+    strip_w = h_strip.width
+    row_diffs = []
+    for y in range(h_strip.height):
+        row = [h_pixels[y * strip_w + x] for x in range(strip_w)]
+        diffs = [abs(row[i] - row[i - 1]) for i in range(1, len(row))]
+        row_diffs.append(sum(diffs) / max(1, len(diffs)))
+    if sum(1 for d in row_diffs if d > 18) > h_strip.height * 0.25:
+        gap_insets.append(20)
 
-    # 两条垂直分隔带检测
-    for mid_x in (div_x1, div_x2):
-        x0 = max(0, mid_x - strip_width)
-        x1 = min(width, mid_x + strip_width)
-        v_strip = gray.crop((x0, 0, x1, height))
-        v_pixels = list(v_strip.get_flattened_data())
-        strip_h = v_strip.height
-        col_diffs = []
-        for x in range(v_strip.width):
-            col = [v_pixels[y * v_strip.width + x] for y in range(strip_h)]
-            diffs = [abs(col[i] - col[i - 1]) for i in range(1, len(col))]
-            col_diffs.append(sum(diffs) / max(1, len(diffs)))
-        if sum(1 for d in col_diffs if d > 18) > v_strip.width * 0.25:
-            gap_insets.append(20)
+    x0 = max(0, div_x1 - strip_width)
+    x1 = min(width, div_x1 + strip_width)
+    v_strip = gray.crop((x0, 0, x1, height))
+    v_pixels = list(v_strip.get_flattened_data())
+    strip_h = v_strip.height
+    col_diffs = []
+    for x in range(v_strip.width):
+        col = [v_pixels[y * v_strip.width + x] for y in range(strip_h)]
+        diffs = [abs(col[i] - col[i - 1]) for i in range(1, len(col))]
+        col_diffs.append(sum(diffs) / max(1, len(diffs)))
+    if sum(1 for d in col_diffs if d > 18) > v_strip.width * 0.25:
+        gap_insets.append(20)
 
     return max(gap_insets) if gap_insets else 0
 
@@ -549,7 +588,7 @@ def quiet_solid_from_image(image: Image.Image, palette: dict = None, target_role
 
 def clean_internal_text_strip(image: Image.Image, min_strip_height: int = 5, diff_threshold: float = 12.0) -> Image.Image:
     """检测并去除图像内部任意位置的水平文字条带（高对比度水平区域）。
-    适用于 3×3 看板裁剪后每个面板内部可能含有的文字标签。
+    适用于看板裁剪后每个面板内部可能含有的文字标签。
     """
     gray = image.convert("L")
     width, height = gray.size
@@ -616,59 +655,42 @@ def clean_internal_text_strip(image: Image.Image, min_strip_height: int = 5, dif
 
 
 def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_tiles: bool, palette: dict = None) -> Path:
-    """将 3×3 面料看板裁剪为九种资产，并生成面料组合.json。
+    """将 2×2 面料看板裁剪为四种纹理资产，并生成面料组合.json。
     支持智能分隔带检测，自动扩大安全边距，并清理面板内部文字。"""
     assets_dir = out_dir / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
     board = Image.open(board_path).convert("RGBA")
     width, height = board.size
-    div_x1, div_x2 = width // 3, 2 * width // 3
-    div_y1, div_y2 = height // 3, 2 * height // 3
+    div_x1 = width // 2
+    div_y1 = height // 2
 
     # 智能检测网格分隔带文字，动态调整边距
-    extra_gap = detect_grid_gaps(board, div_x1, div_x2, div_y1, div_y2)
+    extra_gap = detect_grid_gaps(board, div_x1, div_y1)
     effective_inset = inset + extra_gap
     # 确保不越界
-    max_inset = min(div_x1, width - div_x2, div_y1, height - div_y2) - 64
+    max_inset = max(0, min(div_x1, width - div_x1, div_y1, height - div_y1) - 64)
     effective_inset = min(effective_inset, max_inset)
     if effective_inset > inset:
         print(f"[智能裁剪] 检测到分隔带文字，边距从 {inset} 扩大到 {effective_inset}")
 
     boxes = {
-        # Row 1: Base textures
         "main": (effective_inset, effective_inset, div_x1 - effective_inset, div_y1 - effective_inset),
-        "secondary": (div_x1 + effective_inset, effective_inset, div_x2 - effective_inset, div_y1 - effective_inset),
-        "dark_base": (div_x2 + effective_inset, effective_inset, width - effective_inset, div_y1 - effective_inset),
-        # Row 2: Mid-scale accents
-        "accent_light": (effective_inset, div_y1 + effective_inset, div_x1 - effective_inset, div_y2 - effective_inset),
-        "accent_mid": (div_x1 + effective_inset, div_y1 + effective_inset, div_x2 - effective_inset, div_y2 - effective_inset),
-        "solid_quiet": (div_x2 + effective_inset, div_y1 + effective_inset, width - effective_inset, div_y2 - effective_inset),
-        # Row 3: Placement motifs
-        "hero_motif_1": (effective_inset, div_y2 + effective_inset, div_x1 - effective_inset, height - effective_inset),
-        "hero_motif_2": (div_x1 + effective_inset, div_y2 + effective_inset, div_x2 - effective_inset, height - effective_inset),
-        "trim_motif": (div_x2 + effective_inset, div_y2 + effective_inset, width - effective_inset, height - effective_inset),
+        "secondary": (div_x1 + effective_inset, effective_inset, width - effective_inset, div_y1 - effective_inset),
+        "accent_light": (effective_inset, div_y1 + effective_inset, div_x1 - effective_inset, height - effective_inset),
+        "accent_mid": (div_x1 + effective_inset, div_y1 + effective_inset, width - effective_inset, height - effective_inset),
     }
 
     paths = {}
     for asset_id, box in boxes.items():
         crop = board.crop(box)
-        # Row 3: motifs are expected to be generated as clean transparent cutouts.
-        # Keep the cropped image unchanged here; do not run post background removal,
-        # because it can fade/erase pale illustration details and make garment output
-        # differ from the original 3x3 board cell.
-        if asset_id in ("hero_motif_1", "hero_motif_2", "trim_motif"):
-            path = assets_dir / f"{asset_id}.png"
-            crop.save(path)
-        else:
-            # Row 1 & 2: textures → clean + tile repair + RGB
-            crop = clean_internal_text_strip(crop)
-            if repair_tiles:
-                crop = mirror_tile(crop)
-            path = assets_dir / f"{asset_id}.png"
-            crop.convert("RGB").save(path)
+        crop = clean_internal_text_strip(crop)
+        if repair_tiles:
+            crop = mirror_tile(crop)
+        path = assets_dir / f"{asset_id}.png"
+        crop.convert("RGB").save(path)
         paths[asset_id] = path
 
-    quiet_solid = quiet_solid_from_image(Image.open(paths["solid_quiet"]), palette=palette, target_role="trim")
+    quiet_solid = quiet_solid_from_image(Image.open(paths["accent_mid"]), palette=palette, target_role="trim")
     moss_color = quiet_solid_from_image(Image.open(paths["secondary"]), palette=palette, target_role="secondary")
 
     # warm_ivory 从 palette primary 中最亮颜色派生，不再硬编码
@@ -699,7 +721,7 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "role": "main",
                 "approved": True,
                 "candidate": False,
-                "prompt": f"从 {source_name} 3×3 面料看板裁剪：主底纹",
+                "prompt": f"从 {source_name} 2×2 面料看板裁剪：主底纹",
                 "model": source_name,
                 "seed": "",
             },
@@ -709,17 +731,7 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "role": "secondary",
                 "approved": True,
                 "candidate": False,
-                "prompt": f"从 {source_name} 3×3 面料看板裁剪：辅纹理",
-                "model": source_name,
-                "seed": "",
-            },
-            {
-                "texture_id": "dark_base",
-                "path": str(paths["dark_base"].resolve()),
-                "role": "dark_base",
-                "approved": True,
-                "candidate": False,
-                "prompt": f"从 {source_name} 3×3 面料看板裁剪：深色底纹",
+                "prompt": f"从 {source_name} 2×2 面料看板裁剪：辅纹理",
                 "model": source_name,
                 "seed": "",
             },
@@ -729,7 +741,7 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "role": "accent_light",
                 "approved": True,
                 "candidate": False,
-                "prompt": f"从 {source_name} 3×3 面料看板裁剪：浅色点缀纹理",
+                "prompt": f"从 {source_name} 2×2 面料看板裁剪：浅色点缀纹理",
                 "model": source_name,
                 "seed": "",
             },
@@ -739,56 +751,12 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "role": "accent_mid",
                 "approved": True,
                 "candidate": False,
-                "prompt": f"从 {source_name} 3×3 面料看板裁剪：中调点缀纹理",
-                "model": source_name,
-                "seed": "",
-            },
-            {
-                "texture_id": "solid_quiet",
-                "path": str(paths["solid_quiet"].resolve()),
-                "role": "solid_quiet",
-                "approved": True,
-                "candidate": False,
-                "prompt": f"从 {source_name} 3×3 面料看板裁剪：安静纯色面板",
+                "prompt": f"从 {source_name} 2×2 面料看板裁剪：中调点缀纹理",
                 "model": source_name,
                 "seed": "",
             },
         ],
-        "motifs": [
-            {
-                "motif_id": "hero_motif_1",
-                "texture_id": "hero_motif_1",
-                "path": str(paths["hero_motif_1"].resolve()),
-                "role": "hero",
-                "approved": True,
-                "candidate": False,
-                "prompt": f"从 {source_name} 3×3 面料看板裁剪：卖点定位图案 1",
-                "model": source_name,
-                "seed": "",
-            },
-            {
-                "motif_id": "hero_motif_2",
-                "texture_id": "hero_motif_2",
-                "path": str(paths["hero_motif_2"].resolve()),
-                "role": "hero",
-                "approved": True,
-                "candidate": False,
-                "prompt": f"从 {source_name} 3×3 面料看板裁剪：卖点定位图案 2",
-                "model": source_name,
-                "seed": "",
-            },
-            {
-                "motif_id": "trim_motif",
-                "texture_id": "trim_motif",
-                "path": str(paths["trim_motif"].resolve()),
-                "role": "trim",
-                "approved": True,
-                "candidate": False,
-                "prompt": f"从 {source_name} 3×3 面料看板裁剪：饰边定位图案",
-                "model": source_name,
-                "seed": "",
-            },
-        ],
+        "motifs": [],
         "solids": [
             {"solid_id": "quiet_solid", "color": quiet_solid, "approved": True, "candidate": False},
             {"solid_id": "quiet_moss", "color": moss_color, "approved": True, "candidate": False},
@@ -825,13 +793,15 @@ def pieces_asset_hash_for_run(args, pieces_path: Path | None = None) -> str:
 
 
 def ensure_theme_front_split(args, out_dir: Path, texture_set_path: Path) -> None:
-    """Generate and register deterministic front-half theme motifs when a theme image exists."""
-    if not args.theme_image or not create_front_split_assets or not inject_front_split_motifs:
+    """Generate and register front-half motifs, preferring the AI-generated transparent hero."""
+    source_image = getattr(args, "hero_motif_image", "") or getattr(args, "theme_image", "")
+    if not source_image or not create_front_split_assets or not inject_front_split_motifs:
         return
     try:
-        split_assets = create_front_split_assets(args.theme_image, out_dir)
+        split_assets = create_front_split_assets(source_image, out_dir)
         inject_front_split_motifs(texture_set_path, split_assets)
-        print(f"[主题前片] 已生成并注册主题切半资产: {split_assets['left']}, {split_assets['right']}")
+        source_label = "AI生成主图" if getattr(args, "hero_motif_image", "") else "用户主题图"
+        print(f"[主题前片] 已从{source_label}生成并注册切半资产: {split_assets['left']}, {split_assets['right']}")
     except Exception as exc:
         print(f"[警告] 主题前片切半资产生成失败，将继续使用普通面料规划: {exc}", file=sys.stderr)
 
@@ -849,7 +819,7 @@ def _apply_or_request_production_plan(
 
     def _compute_production_input_fingerprint() -> str:
         parts = []
-        for p in (args.visual_elements, args.collection_board, args.texture_set):
+        for p in (args.visual_elements, args.collection_board, args.texture_set, getattr(args, "hero_motif_image", "")):
             parts.append(file_sha256(p) if p else "")
         parts.extend([args.garment_type or "", args.mode, args.template or ""])
         return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
@@ -960,7 +930,7 @@ def _apply_or_request_production_plan(
 def main() -> int:
     parser = argparse.ArgumentParser(description="生成 Neo AI 面料看板并自动渲染服装裁片。")
     parser.add_argument("--out", required=True, help="输出目录")
-    parser.add_argument("--collection-board", default="", help="已有的 Neo AI 3×3 面料看板。若省略，则调用 Neo AI 生成。")
+    parser.add_argument("--collection-board", default="", help="已有的 Neo AI 2×2 面料纹理看板。若省略，则调用 Neo AI 生成。")
     parser.add_argument("--texture-set", default="", help="已有 texture_set.json。提供后跳过看板生成/裁剪，直接使用该面料组合继续裁片映射、填充和渲染。")
     parser.add_argument(
         "--theme-image",
@@ -988,6 +958,9 @@ def main() -> int:
     args.crop_inset = 60
     args.no_tile_repair = False
     args.prompt_file = ""
+    args.texture_prompt_file = ""
+    args.hero_prompt_file = ""
+    args.hero_motif_image = ""
     if args.mode == "fast":
         print("[模式] fast")
 
@@ -1295,12 +1268,18 @@ def main() -> int:
         run_step(brief_cmd)
         if not args.prompt_file:
             ve_path_obj = Path(args.visual_elements) if args.visual_elements else None
-            generated_prompt = _build_collection_prompt_from_visual_elements(out_dir, ve_path_obj)
-            if generated_prompt:
-                prompt_path = out_dir / "generated_collection_prompt.txt"
-                prompt_path.write_text(generated_prompt, encoding="utf-8")
+            texture_prompt, hero_prompt = _build_generation_prompts_from_visual_elements(out_dir, ve_path_obj)
+            if texture_prompt:
+                prompt_path = out_dir / "generated_texture_2x2_prompt.txt"
+                prompt_path.write_text(texture_prompt, encoding="utf-8")
                 args.prompt_file = str(prompt_path)
-                print(f"[视觉提取] 已基于视觉分析自动生成看板提示词: {prompt_path}")
+                args.texture_prompt_file = str(prompt_path)
+                print(f"[视觉提取] 已基于视觉分析自动生成2x2纹理看板提示词: {prompt_path}")
+            if hero_prompt:
+                hero_prompt_path = out_dir / "generated_hero_prompt.txt"
+                hero_prompt_path.write_text(hero_prompt, encoding="utf-8")
+                args.hero_prompt_file = str(hero_prompt_path)
+                print(f"[视觉提取] 已基于视觉分析自动生成透明主图提示词: {hero_prompt_path}")
 
     # ============================================================
     # 尝试读取 palette（供颜色提示和纯色提取使用）
@@ -1317,6 +1296,7 @@ def main() -> int:
     # ============================================================
     # Neo AI 单源模式
     # ============================================================
+    hero_motif_path = None
     if args.texture_set:
         texture_set_path = Path(args.texture_set)
         if not texture_set_path.is_absolute():
@@ -1328,10 +1308,27 @@ def main() -> int:
         board_path = Path(source_board).resolve() if source_board else Path(args.collection_board or texture_set_path).resolve()
         print(f"使用已提供面料组合: {texture_set_path}")
     else:
-        board_path = Path(args.collection_board).resolve() if args.collection_board else generate_board(args, out_dir).resolve()
+        if args.collection_board:
+            board_path = Path(args.collection_board).resolve()
+            if getattr(args, "hero_prompt_file", ""):
+                hero_motif_path = generate_board(
+                    args,
+                    out_dir,
+                    prompt_file=args.hero_prompt_file,
+                    subdir="neo_hero_motif",
+                    negative_prompt=HERO_NEGATIVE_PROMPT,
+                ).resolve()
+        else:
+            board_path, hero_motif_path = generate_texture_and_hero_assets(args, out_dir)
+            board_path = board_path.resolve()
+            if hero_motif_path:
+                hero_motif_path = hero_motif_path.resolve()
         if not board_path.exists():
             raise RuntimeError(f"面料看板未找到: {board_path}")
         print(f"使用面料看板: {board_path}")
+        if hero_motif_path:
+            args.hero_motif_image = str(hero_motif_path)
+            print(f"使用AI生成透明主图: {hero_motif_path}")
 
     # 看板颜色协调性校验
     if palette and not args.texture_set:
@@ -1397,6 +1394,8 @@ def main() -> int:
 
     summary = {
         "面料看板": str(board_path),
+        "2x2纹理看板": str(board_path),
+        "AI生成透明主图": str(hero_motif_path) if hero_motif_path else "",
         "面料组合": str(texture_set_path.resolve()),
         "裁片清单": str(pieces_path.resolve()),
         "部位映射": str(garment_map_path.resolve()),
