@@ -317,10 +317,11 @@ def build_production_plan_prompt(
         solid_count = len(solid_assets)
         if source_count >= 2:
             strategy_lines = [
-                f"生成 {max_schemes} 套 schemes。资产池含 A/B 两源 {image_asset_count} 个图片资产 + {solid_count} 个纯色，必须从完整资产池重新判断组合。",
+                f"生成 {max_schemes} 套 schemes。资产池含 A/B 两源 {image_asset_count} 个图片资产 + {solid_count} 个纯色；双源各 3x3 时应视为 9+9 完整资产池，必须从完整资产池重新判断组合。",
                 "方案之间要有实质差异，覆盖安全量产、强卖点、深色高级、轻量呼吸、局部点缀、年轻化/秀场感等方向。",
                 "允许全A、全B、A/B混合；不用低质资产可以，但在 asset_coverage.unused_assets 说明原因。",
                 "所有 asset id 必须真实存在，例如 main_a、main_b、hero_motif_1_a、quiet_solid_b。",
+                "不要只输出 A/B 两个来源结果；每个 scheme 都必须是独立设计方案，并说明资产选择理由。",
             ]
         else:
             # 单源情况（1 套或 0 套有后缀都 fallback 为单源）：从 9 个资产中组合多套方案
@@ -331,6 +332,7 @@ def build_production_plan_prompt(
                 "每套都从完整资产池重新判断 base/secondary/accent/hero/trim；差异不能只靠交换小面积 trim。",
                 "覆盖安全量产、强卖点、深色高级、轻量呼吸、局部点缀、年轻化/秀场感等方向。",
                 "不用低质资产可以，但在 asset_coverage.unused_assets 说明原因。",
+                "不要只输出单一结果；每个 scheme 都必须是独立设计方案，并说明资产选择理由。",
             ]
 
         lines.extend(["", "===== 多方案策略指导 ====="] + strategy_lines + [""])
@@ -372,7 +374,8 @@ def build_production_plan_prompt(
             "risk_notes": []
         }, ensure_ascii=False, indent=2))
         lines.append("")
-        lines.append("注：每个 scheme 必须包含 design_positioning、asset_mix_summary、diversity_tags。顶层必须包含 portfolio_notes 和 asset_coverage。")
+        lines.append("注：顶层必须包含 schemes 数组、portfolio_notes 和 asset_coverage。每个 scheme 必须包含 scheme_id、design_positioning、strategy_note、asset_mix_summary、diversity_tags、piece_fill_plan。")
+        lines.append("注：模板模式下 garment_map 可省略；若提供 garment_map，也会被固定模板映射覆盖。")
         lines.append("注：art_direction 可额外包含 notes[] 和可选的 self_assessment（overall_score/wearability/cohesion/hero_clarity/trim_quality/season_fit/customer_match/production_safety/color_balance/negative_space/narrative_control）。")
     else:
         lines.append(json.dumps({
@@ -420,8 +423,8 @@ def main() -> int:
     parser.add_argument("--garment-map", default="", help="已有 garment_map.json（可选，作为 fallback 参考）")
     parser.add_argument("--piece-overview", default="", help="piece_overview.png 路径。若省略，尝试从 pieces.json 所在目录推断。")
     parser.add_argument("--out", required=True, help="输出目录")
-    parser.add_argument("--multi-scheme", action="store_true", help="启用多方案模式。要求 AI 输出多套不同的 piece_fill_plan。")
-    parser.add_argument("--max-schemes", type=int, default=12, help="最大方案数（默认 12）。")
+    parser.add_argument("--multi-scheme", action="store_true", help="启用多方案模式。要求 AI 输出 schemes 数组，每套包含独立的 piece_fill_plan。")
+    parser.add_argument("--max-schemes", type=int, default=8, help="最大方案数（默认 8；需要更丰富组合可设为 12）。")
     args = parser.parse_args()
 
     out_dir = Path(args.out)
@@ -539,6 +542,8 @@ def main() -> int:
         "expected_output": str((out_dir / ("ai_multi_production_plan.json" if args.multi_scheme else "ai_production_plan.json")).resolve()),
         "multi_scheme": args.multi_scheme,
         "max_schemes": args.max_schemes if args.multi_scheme else 1,
+        "expected_top_level": "schemes" if args.multi_scheme else "garment_map + piece_fill_plan",
+        "scheme_required_fields": ["scheme_id", "design_positioning", "strategy_note", "asset_mix_summary", "diversity_tags", "piece_fill_plan"] if args.multi_scheme else [],
     }
     request_path.write_text(json.dumps(request_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 

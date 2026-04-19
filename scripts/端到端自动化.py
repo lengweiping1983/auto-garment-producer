@@ -1689,8 +1689,8 @@ def main() -> int:
     parser.add_argument("--libtv-key", default="", help="libtv Access Key。优先使用 LIBTV_ACCESS_KEY 环境变量。")
     parser.add_argument("--dual-prompts", default="", help="dual_collection_prompts.json 路径。若提供，跳过设计简报中的双提示词生成，直接使用该文件。")
     parser.add_argument("--max-retries", type=int, default=2, help="双源均失败时的最大重试次数")
-    parser.add_argument("--multi-scheme", action="store_true", help="启用多方案渲染模式。双源模式下，合并 A/B 资产后由 AI 生成多套设计方案并分别渲染。")
-    parser.add_argument("--max-schemes", type=int, default=12, help="多方案模式下的最大方案数（默认12）")
+    parser.add_argument("--multi-scheme", action="store_true", help="启用多方案渲染模式。双源模式下，合并 A/B 资产后由 AI 基于 9+9 完整资产池生成多套设计方案并分别渲染。")
+    parser.add_argument("--max-schemes", type=int, default=8, help="多方案模式下的最大方案数（默认8；需要更丰富组合可设为12）")
     args = parser.parse_args()
     # fast 模式自动关闭商业复审和看板选择
     # fast 模式自动关闭商业复审和看板选择

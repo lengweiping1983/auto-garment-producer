@@ -35,8 +35,12 @@ python3 scripts/端到端自动化.py \
   --garment-type "T恤" \
   --mode standard \
   --dual-source \
+  --multi-scheme \
+  --max-schemes 8 \
   --reuse-cache
 ```
+
+普通 `--dual-source` 会把 Neo AI 和 libtv-skill 两个来源分别作为风格结果继续渲染；需要让 AI 基于双源 9+9 完整资产池输出多套设计方案时，必须同时传 `--multi-scheme`。
 
 已有看板：
 
@@ -83,12 +87,13 @@ python3 scripts/端到端自动化.py \
 - 使用 `--reuse-cache` 后，视觉分析、裁片、纹理集、生产规划、商业复审会按输入 hash 复用。
 - 图片缩略图写入源图同目录 `.thumbnails/`，文件名带源文件指纹；源图变化后不会误用旧缩略图。
 - 已存在并匹配输入的 `visual_elements.json`、`ai_production_plan.json`、`texture_set.json`、模板 pieces/masks 不重复生成。
-- 多方案模式使用 `--multi-scheme --max-schemes N`，从完整资产池生成多套独立方案；单套失败不阻塞其它方案。
+- 多方案模式使用 `--dual-source --multi-scheme --max-schemes N`，默认 `N=8`。双源都成功时先合并为 18 图资产池（A/B 各 9 张，资产 ID 带 `_a` / `_b` 后缀），再要求 AI 输出 `ai_multi_production_plan.json` 的 `schemes` 数组；单套失败不阻塞其它方案。
 
 ## 子 Agent 输出要求
 
 - 视觉分析输出 `visual_elements.json`：包含 `dominant_objects`、`supporting_elements`、`palette`、`style`、`fabric_hints`、`source_images`、`fusion_strategy`、`generated_prompts`。
 - 生产规划输出 `ai_production_plan.json`：包含 `garment_map.pieces[]` 和 `piece_fill_plan.pieces[]`。
+- 多方案生产规划输出 `ai_multi_production_plan.json`：顶层包含 `schemes[]`、`portfolio_notes`、`asset_coverage`。每个 scheme 必须包含 `scheme_id`、`design_positioning`、`strategy_note`、`asset_mix_summary`、`diversity_tags`、`piece_fill_plan`；模板模式下 `garment_map` 可省略或被固定模板覆盖。
 - 所有 JSON 必须是纯 JSON，不要 markdown 代码块或解释文字。
 
 ## 参考文档
