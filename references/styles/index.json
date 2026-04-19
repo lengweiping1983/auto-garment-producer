@@ -8,11 +8,25 @@
       "usage": "生产规划 AI 在部位识别时对照此图判断前后片、袖片、门襟/下摆窄条、上下方向与对称关系。"
     },
     {
+      "template_id": "BFSK26308XCJ01L",
+      "garment_type": "sun protection clothing",
+      "label": "BFSK26308XCJ01L 成衣视角 wearable zoning 图",
+      "path": "references/styles/BFSK26308XCJ01L-wearable-zoning.jpg",
+      "usage": "生产规划 AI 用此图判断 HERO ZONE、QUIET ZONE、DANGER SEAM、TRIM ZONE 和 SLEEVE PAIR，确保以缝合后的一件衣服做设计。"
+    },
+    {
       "template_id": "DDS26126XCJ01L",
       "garment_type": "t-shirt/shirt",
       "label": "DDS26126XCJ01L 上装/T恤/衬衫标准裁片参考图",
       "path": "references/styles/DDS26126XCJ01L-style-reference.jpg",
       "usage": "生产规划 AI 在部位识别时对照此图判断 T 恤/衬衫前后片、袖片、领/门襟/窄条、上下方向与对称关系。"
+    },
+    {
+      "template_id": "DDS26126XCJ01L",
+      "garment_type": "t-shirt/shirt",
+      "label": "DDS26126XCJ01L 成衣视角 wearable zoning 图",
+      "path": "references/styles/DDS26126XCJ01L-wearable-zoning.jpg",
+      "usage": "生产规划 AI 用此图判断 HERO ZONE、QUIET ZONE、DANGER SEAM、TRIM ZONE 和 SLEEVE PAIR，确保 hero 只落在可穿着安全区域。"
     }
   ]
 }

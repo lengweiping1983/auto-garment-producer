@@ -30,11 +30,13 @@ STYLE_REFERENCE_DIR = SKILL_DIR / "references" / "styles"
 STYLE_REFERENCE_BY_TEMPLATE = {
     "BFSK26308XCJ01L": {
         "path": STYLE_REFERENCE_DIR / "BFSK26308XCJ01L-style-reference.jpg",
+        "wearable_zoning_path": STYLE_REFERENCE_DIR / "BFSK26308XCJ01L-wearable-zoning.jpg",
         "label": "BFSK26308XCJ01L 男士防晒服标准裁片参考图",
         "notes": "前后身片、袖片、门襟/下摆窄条在该参考图中已有成衣印花方向，可用于判断纸样部位与上下方向。",
     },
     "DDS26126XCJ01L": {
         "path": STYLE_REFERENCE_DIR / "DDS26126XCJ01L-style-reference.jpg",
+        "wearable_zoning_path": STYLE_REFERENCE_DIR / "DDS26126XCJ01L-wearable-zoning.jpg",
         "label": "DDS26126XCJ01L 上装/T恤/衬衫标准裁片参考图",
         "notes": "T 恤/衬衫前后片、袖片、领/门襟/窄条在该参考图中已有成衣印花方向，可用于判断部位、对称组和饰边。",
     },
@@ -86,6 +88,15 @@ def infer_style_references(pieces_payload: dict, brief: dict) -> list[dict]:
                     "label": ref["label"],
                     "path": str(path.resolve()),
                     "notes": ref["notes"],
+                })
+            zoning_path = ref.get("wearable_zoning_path")
+            if zoning_path and Path(zoning_path).exists():
+                refs.append({
+                    "template_id": template_id,
+                    "label": f"{template_id} 成衣视角 zoning 图",
+                    "path": str(Path(zoning_path).resolve()),
+                    "notes": "这是成衣穿着视角参考锚。HERO ZONE 允许唯一 hero；QUIET ZONE 必须低噪；DANGER SEAM 禁止高对比图案；TRIM ZONE 必须安静；SLEEVE PAIR 必须同源协调。",
+                    "reference_type": "wearable_zoning",
                 })
     return refs
 
@@ -305,6 +316,28 @@ def build_production_plan_prompt(
         "  禁止半透明整张主题图贴片；motif overlay 必须是干净定位图案，只允许用于 1 个 hero 裁片。",
         "  纹理方向自主决定；可声明 intentional_asymmetry: true 保留有意不对称。",
         "",
+        "--- 成衣视角四问（写 piece_fill_plan 之前必须回答）---",
+        "  Q1 整体印象：这件衣服第一眼让人记住的具体视觉锚是什么？不超过 12 个字，不能写抽象词。",
+        "  Q2 三米测试：距离 3 米看，哪些纹理会糊、乱、花？大身 base 必须塌缩为受控色相。",
+        "  Q3 挂架理由：和同价位 20 件上衣挂在一起，消费者为什么拿起它？",
+        "  Q4 日常舒适：开会、吃饭、接孩子是否用力过猛？大身满版插画必须降级为低噪 base。",
+        "",
+        "--- Hero Motif 几何契约（硬约束）---",
+        "  hero 只允许在 front_body/front_hero；宽度占前片 18%–42%，高度 18%–38%。",
+        "  hero 顶端距上沿 >=12%，底端距下沿 >=22%，距任意裁片边 >=8%，旋转限制 -8° 到 +8°。",
+        "  motif 与底色明度差 ΔL* >=25；不满足时远看会糊，必须换 motif 或放弃 hero。",
+        "  禁止半透明整张主题图 overlay、禁止跨缝线/领口/袖窿/肩缝、禁止同一件衣服出现 2 个以上 hero。",
+        "  禁止完整场景叙事做 hero；只能提取 1 个角色、剪影或简化图标。",
+        "",
+        "--- 双源资产硬规则 ---",
+        "  若资产 ID 带 _a/_b，必须先在 asset_shortlist.primary_source 中二选一作为主源。",
+        "  primary_source 承担至少 80% 可见面积；所有大身 base、前后身主体、袖片主底纹必须来自 primary。",
+        "  secondary source 最多贡献 2 个小面积 accent/trim/cuff/collar/small_detail；不得用于大身 base。",
+        "  若 A/B 的 palette、底色、饱和度、笔触、媒介不一致，必须放弃混用并在 rejected_assets 说明。",
+        "",
+        "--- Wearable Zoning 图规则 ---",
+        "  如果款式参考图里包含 wearable-zoning：HERO ZONE 是唯一 hero 区；QUIET ZONE 必须低噪；DANGER SEAM 禁止高对比图案；TRIM ZONE 必须安静；SLEEVE PAIR 必须同源协调。",
+        "",
     ])
 
     # motif 几何信息
@@ -357,6 +390,12 @@ def build_production_plan_prompt(
         lines.extend(["", "===== 多方案策略指导 ====="] + strategy_lines + [""])
 
     lines.extend([
+        "===== 输出顺序硬约束 =====",
+        "你必须先完成 Part 1，再写 Part 2。不要在确认 garment_map 和成衣自检之前生成 piece_fill_plan。",
+        "Part 1: 输出 garment_map、garment_map_confidence_per_piece、garment_map_uncertainties。",
+        "Part 2: 输出 pre_design_self_check、asset_shortlist、theme_landing_summary、asset_mix_summary、piece_fill_plan。",
+        "写 piece_fill_plan 时，body/base 资产必须来自 asset_shortlist.primary_base_ids；跨源 accent 不得超过 asset_shortlist.accent_ids_from_other_source 中的 2 个资产。",
+        "",
         "===== 输出格式 =====",
         STRICT_JSON_ONLY_ZH + " 格式如下：",
         "",
@@ -369,6 +408,22 @@ def build_production_plan_prompt(
                     "scheme_id": "scheme_01",
                     "design_positioning": "量产安全款 / 精品陈列款 / 年轻潮流款等",
                     "strategy_note": "从完整资产池独立判断后的组合策略",
+                    "garment_map_confidence_per_piece": {"piece_001": 0.88},
+                    "garment_map_uncertainties": [
+                        {"piece_id": "piece_004", "reason": "窄长弧形裁片可能是 collar 或 hem，采用安静 trim 处理"}
+                    ],
+                    "pre_design_self_check": {
+                        "overall_first_impression": "胸口白色山猫剪影",
+                        "three_meter_test": "大身低噪，远看塌缩为柔和绿色；hero 清晰可读",
+                        "rack_reason": "自然系胸口图标比普通满版花草更容易上架",
+                        "daily_wearability": "大身安静，袖片同源，日常场景不会用力过猛"
+                    },
+                    "asset_shortlist": {
+                        "primary_source": "A",
+                        "primary_base_ids": ["main_a", "secondary_a"],
+                        "accent_ids_from_other_source": ["quiet_solid_b"],
+                        "rejected_assets": [{"asset_id": "hero_scene_b", "reason": "完整场景叙事，不能用于大身或 hero"}]
+                    },
                     "theme_landing_summary": {"hero_piece": "piece_001", "base_atmosphere_pieces": ["piece_002"], "quiet_pieces": ["piece_003"], "accent_pieces": ["piece_004"], "reason": "主题主体只落在一个 hero 裁片，大身只保留氛围和色板"},
                     "asset_mix_summary": {"body_base_assets": ["main_a"], "hero_assets": ["hero_motif_1_a"], "trim_assets": ["quiet_solid_b"], "source_mix_policy": "single_source_body_with_small_accent", "reason": "..."},
                     "diversity_tags": ["quiet_body", "bold_hero", "accent_trim"],
@@ -395,6 +450,7 @@ def build_production_plan_prompt(
         }, ensure_ascii=False, indent=2))
         lines.append("")
         lines.append("注：顶层必须包含 schemes 数组、portfolio_notes 和 asset_coverage。每个 scheme 必须包含 scheme_id、design_positioning、strategy_note、theme_landing_summary、asset_mix_summary、diversity_tags、piece_fill_plan。")
+        lines.append("注：每个 scheme 还必须包含 garment_map_confidence_per_piece、garment_map_uncertainties、pre_design_self_check、asset_shortlist；缺少任一字段视为无效。")
         lines.append("注：模板模式下 garment_map 可省略；若提供 garment_map，也会被固定模板映射覆盖。")
         lines.append("注：art_direction 可额外包含 notes[] 和可选的 self_assessment（overall_score/wearability/cohesion/hero_clarity/trim_quality/season_fit/customer_match/production_safety/color_balance/negative_space/narrative_control）。")
     else:
@@ -403,6 +459,22 @@ def build_production_plan_prompt(
                 "pieces": [
                     {"piece_id": "piece_001", "garment_role": "front_body", "zone": "body", "symmetry_group": "sg_front", "same_shape_group": "", "texture_direction": "transverse", "confidence": 0.88, "needs_ai_review": False}
                 ]
+            },
+            "garment_map_confidence_per_piece": {"piece_001": 0.88},
+            "garment_map_uncertainties": [
+                {"piece_id": "piece_004", "reason": "窄长裁片角色不确定，按 trim 安静处理"}
+            ],
+            "pre_design_self_check": {
+                "overall_first_impression": "胸口白色山猫剪影",
+                "three_meter_test": "大身低噪，远看塌缩为受控色相",
+                "rack_reason": "有一个清晰但克制的自然系卖点",
+                "daily_wearability": "大身安静，袖片与身片同源，适合日常穿着"
+            },
+            "asset_shortlist": {
+                "primary_source": "A|B|single",
+                "primary_base_ids": ["main"],
+                "accent_ids_from_other_source": [],
+                "rejected_assets": [{"asset_id": "busy_scene", "reason": "完整叙事插画，不适合大身"}]
             },
             "piece_fill_plan": {
                 "pieces": [
@@ -583,7 +655,19 @@ def main() -> int:
         "multi_scheme": args.multi_scheme,
         "max_schemes": args.max_schemes if args.multi_scheme else 1,
         "expected_top_level": "schemes" if args.multi_scheme else "garment_map + piece_fill_plan",
-        "scheme_required_fields": ["scheme_id", "design_positioning", "strategy_note", "theme_landing_summary", "asset_mix_summary", "diversity_tags", "piece_fill_plan"] if args.multi_scheme else [],
+        "scheme_required_fields": [
+            "scheme_id",
+            "design_positioning",
+            "strategy_note",
+            "garment_map_confidence_per_piece",
+            "garment_map_uncertainties",
+            "pre_design_self_check",
+            "asset_shortlist",
+            "theme_landing_summary",
+            "asset_mix_summary",
+            "diversity_tags",
+            "piece_fill_plan",
+        ] if args.multi_scheme else [],
         "payload_budget": payload_budget,
         "kimi_images": kimi_images,
         "kimi_input_note": "默认只传 piece_overview、texture_contact_sheet 和 style_references 的 Kimi 压缩图；不要传 texture_thumbnails_debug 中的单张原图/调试图。",

@@ -82,6 +82,19 @@ def build_review_prompt(preview_path: str, fill_plan: dict, brief: dict, qc_repo
         "10. 风格一致性：是否出现线稿、水彩、贴纸、照片质感等笔触混杂？",
         "11. motif 质量：是否有半透明整张贴片、背景未去干净、主题残影或矩形边界？",
         "",
+        "===== 硬否决条件（任一触发 approved 必须为 false）=====",
+        "A. 三米测试不通过：远看主体不清、纹理糊、整体花乱、像贴图拼接。",
+        "B. Hero geometry 越界：hero 过大、靠边、跨缝线/领口/袖窿/肩缝、超过 1 个 hero、或半透明整图 overlay。",
+        "C. 双源混用失控：跨源资产超过 2 个小面积 accent/trim，或大身 base 混用 A/B 两源。",
+        "D. 关键分数低：hero_clarity 或 style_cohesion 低于 8。",
+        "E. 大身 base 出现完整动物、人脸、文字、完整场景、建筑、复杂叙事插画。",
+        "F. 出现半透明矩形残影、未去干净背景、明显水印或贴片边界。",
+        "",
+        "===== Fallback Safe Plan 规则 =====",
+        "如果 approved=false，必须判断是否需要 fallback_safe_plan。",
+        "fallback_safe_plan 的目标不是视觉冲击，而是统一、可穿、可量产：放弃 hero motif；大身只用低噪 base 或纯色；袖片与身片同源；trim/collar/cuff 使用最低饱和度 secondary 或 solid。",
+        "返工建议必须优先重选资产和重做填充计划，不要只建议微调 scale/offset。",
+        "",
     ])
 
     if qc_report:
@@ -117,12 +130,27 @@ def build_review_prompt(preview_path: str, fill_plan: dict, brief: dict, qc_repo
                     "suggested_fix": "修改建议"
                 }
             ],
+            "hard_rejection_reasons": [
+                {
+                    "rule": "A|B|C|D|E|F",
+                    "evidence": "预览图中的具体证据",
+                    "required_action": "重选资产 / 重做填充计划 / fallback_safe_plan"
+                }
+            ],
             "scores": {
                 "theme_fidelity": 9,
                 "palette_harmony": 9,
                 "style_cohesion": 9,
                 "hero_clarity": 9,
                 "wearability": 9
+            },
+            "fallback_safe_plan_required": False,
+            "fallback_safe_plan": {
+                "strategy": "仅当 fallback_safe_plan_required=true 时填写：放弃 hero motif，大身低噪同源，trim 使用最低饱和度 secondary 或 solid",
+                "body_base_policy": "single low-noise primary base for all body and sleeve pieces",
+                "hero_policy": "remove all hero motif overlays",
+                "trim_policy": "quiet solid or lowest-saturation accent only",
+                "reason": "为什么必须降级为保守可穿方案"
             },
             "self_assessment_review": {
                 "verified": True,
@@ -142,6 +170,8 @@ def build_review_prompt(preview_path: str, fill_plan: dict, brief: dict, qc_repo
         "- approved=true 表示可以直接量产；approved=false 表示需要修改",
         "- confidence 用 0–1 表示你的确信度",
         "- issues 为空数组表示没有明显问题",
+        "- hard_rejection_reasons 为空数组表示没有触发硬否决；只要不为空，approved 必须为 false",
+        "- fallback_safe_plan_required=true 时，必须填写 fallback_safe_plan",
         "- 如果出现风格拼贴、配色跳脱、主题残影、过度满版，approved 必须为 false",
         "- priority_fix 优先要求重选资产和重做填充计划，不要只建议微调 scale/offset",
         "- 每条 issue 必须给出具体的 suggested_fix",
@@ -208,6 +238,8 @@ def main() -> int:
     review = load_json(selected_path)
     approved = review.get("approved", False)
     issues = review.get("issues", [])
+    hard_rejection_reasons = review.get("hard_rejection_reasons", [])
+    fallback_required = bool(review.get("fallback_safe_plan_required", False))
     scores = review.get("scores", {}) if isinstance(review.get("scores", {}), dict) else {}
     critical_score_keys = ["theme_fidelity", "palette_harmony", "style_cohesion", "hero_clarity"]
     low_scores = {k: scores.get(k) for k in critical_score_keys if isinstance(scores.get(k), (int, float)) and scores.get(k) < 8}
@@ -218,6 +250,22 @@ def main() -> int:
             "category": "commercial_review_scores",
             "description": f"关键商业维度低于 8 分: {low_scores}",
             "suggested_fix": "重选资产并重做填充计划，优先修复主题落地、配色一致性和风格统一。",
+        })
+    if hard_rejection_reasons and approved:
+        approved = False
+        issues.append({
+            "severity": "high",
+            "category": "hard_rejection",
+            "description": f"触发商业复审硬否决条件: {hard_rejection_reasons}",
+            "suggested_fix": "不要局部微调；必须重选资产、重做填充计划，或启用 fallback_safe_plan。",
+        })
+    if fallback_required and approved:
+        approved = False
+        issues.append({
+            "severity": "high",
+            "category": "fallback_required",
+            "description": "AI 复审要求启用 fallback_safe_plan，因此当前方案不得直接交付。",
+            "suggested_fix": "执行 fallback_safe_plan：放弃 hero motif，大身低噪同源，饰边使用安静纯色或低饱和 accent。",
         })
 
     # 程序兜底：approved=false 且有 high severity issue 时告警
@@ -241,6 +289,9 @@ def main() -> int:
         "high_issues_count": len(high_issues),
         "total_issues_count": len(issues),
         "scores": scores,
+        "hard_rejection_reasons": hard_rejection_reasons,
+        "fallback_safe_plan_required": fallback_required,
+        "fallback_safe_plan": review.get("fallback_safe_plan", {}),
         "review_path": str(selected_path.resolve()),
     }
     final_path = out_dir / "commercial_review_result.json"
