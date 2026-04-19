@@ -196,6 +196,7 @@ class DualBoardGenerator:
         self.libtv_generate_script = self.libtv_script_dir / "generate_texture_collection_board.py"
         self.health_report_path = self.out_dir / "dual_source_health_report.json"
         self.invocations: list[dict] = []
+        self._libtv_metadata_event_keys: set[str] = set()
 
     def preflight(self) -> dict:
         """检查 Neo AI 与 libtv-skill 是否可调用，并写出健康报告。"""
@@ -276,13 +277,32 @@ class DualBoardGenerator:
                 or last_status in failure_statuses
                 or any(item.get("error_type") for item in events if item.get("status") == last_status)
             )
-            summary[source] = {
+            item_summary = {
                 "called": bool(events),
                 "succeeded": last_status == "succeeded",
                 "failed": failed,
                 "last_status": last_status,
                 "event_count": len(events),
             }
+            if source == "libtv":
+                for event in reversed(events):
+                    if event.get("output_path") and not item_summary.get("selected_board_path"):
+                        item_summary["selected_board_path"] = event.get("output_path")
+                    if event.get("selected_board_url") and not item_summary.get("selected_board_url"):
+                        item_summary["selected_board_url"] = event.get("selected_board_url")
+                    if event.get("selected_board_index") and not item_summary.get("selected_board_index"):
+                        item_summary["selected_board_index"] = event.get("selected_board_index")
+                    if event.get("downloaded_count") is not None and item_summary.get("downloaded_count") is None:
+                        item_summary["downloaded_count"] = event.get("downloaded_count")
+                    if event.get("valid_board") is not None and item_summary.get("valid_board") is None:
+                        item_summary["valid_board"] = event.get("valid_board")
+                    if event.get("metadata_path") and not item_summary.get("metadata_path"):
+                        item_summary["metadata_path"] = event.get("metadata_path")
+                    if event.get("project_url") and not item_summary.get("project_url"):
+                        item_summary["project_url"] = event.get("project_url")
+                    if event.get("session_id") and not item_summary.get("session_id"):
+                        item_summary["session_id"] = event.get("session_id")
+            summary[source] = item_summary
         neo_ok = summary["neo"]["succeeded"]
         libtv_ok = summary["libtv"]["succeeded"]
         if neo_ok and libtv_ok:
@@ -360,6 +380,34 @@ class DualBoardGenerator:
                 if key not in {"status", "message", "time"}
             }
             extra["metadata_path"] = str(metadata_path.resolve())
+            if metadata.get("valid_board") is not None:
+                extra["valid_board"] = metadata.get("valid_board")
+            if metadata.get("downloaded_count") is not None:
+                extra["downloaded_count"] = metadata.get("downloaded_count")
+            for metadata_key, event_key in (
+                ("selected_board_path", "output_path"),
+                ("selected_board_url", "selected_board_url"),
+                ("selected_board_index", "selected_board_index"),
+                ("sessionId", "session_id"),
+                ("projectUuid", "project_uuid"),
+                ("projectUrl", "project_url"),
+            ):
+                if metadata.get(metadata_key) and not extra.get(event_key):
+                    extra[event_key] = metadata.get(metadata_key)
+            event_key = json.dumps(
+                {
+                    "metadata_path": str(metadata_path.resolve()),
+                    "status": status,
+                    "time": event.get("time", ""),
+                    "message": event.get("message", ""),
+                    "extra": extra,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            if event_key in self._libtv_metadata_event_keys:
+                continue
+            self._libtv_metadata_event_keys.add(event_key)
             self._record_invocation("libtv", cmd, status, event.get("message", ""), **extra)
         return metadata
 
@@ -491,18 +539,20 @@ class DualBoardGenerator:
 
         metadata = self._ingest_libtv_metadata_events(metadata_path, cmd)
         if proc.returncode != 0:
+            metadata_status = metadata.get("last_status", "") if isinstance(metadata, dict) else ""
+            metadata_error_type = "libtv_no_valid_3x3_board" if metadata_status == "no_valid_3x3_board" else "libtv_generate_failed"
             self._record_invocation(
                 "libtv",
                 cmd,
                 "generate_board_failed",
                 _truncate(proc.stderr or proc.stdout),
-                error_type="libtv_generate_failed",
+                error_type=metadata_error_type,
                 returncode=proc.returncode,
                 metadata_path=str(metadata_path) if metadata else "",
                 stdout=_truncate(proc.stdout),
                 stderr=_truncate(proc.stderr),
             )
-            raise RuntimeError(f"libtv_generate_failed: rc={proc.returncode}, stderr={_truncate(proc.stderr, 300)}")
+            raise RuntimeError(f"{metadata_error_type}: rc={proc.returncode}, stderr={_truncate(proc.stderr, 300)}")
 
         board_path = self._select_libtv_board_from_metadata(metadata, libtv_out_dir)
         if not board_path or not board_path.exists():
