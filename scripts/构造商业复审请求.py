@@ -56,7 +56,7 @@ def create_three_meter_preview(source_image_path: str | Path, out_path: str | Pa
         return None
 
 
-def build_review_prompt(image_path: str, fill_plan: dict, brief: dict, qc_report: dict = None, image_3m_path: str = "", image_label: str = "预览图") -> str:
+def build_review_prompt(image_path: str, fill_plan: dict, brief: dict, qc_report: dict = None, image_3m_path: str = "", image_label: str = "裁片联络单") -> str:
     """构造面向子Agent的整体商业感复审 prompt。"""
     pieces = fill_plan.get("pieces", [])
     hero_ids = [p["piece_id"] for p in pieces if (p.get("overlay") or {}).get("fill_type") == "motif"]

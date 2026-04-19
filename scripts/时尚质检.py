@@ -581,7 +581,7 @@ def _build_rework_request(issues: list, warnings: list, fill_plan: dict, out_dir
         "prompt_path": str(prompt_path.resolve()),
         "expected_output": str((out_dir / "ai_piece_fill_plan_revised.json").resolve()),
         "payload_budget": payload_budget,
-        "kimi_input_note": "返工请求默认只传文本 prompt，不要附加原始预览图；如需看图，请使用商业复审请求中的 preview_path 缩略图。",
+        "kimi_input_note": "返工请求默认只传文本 prompt，不要附加原始预览图；如需看图，请使用商业复审请求中的 piece_contact_sheet 缩略图。",
         "issues": issues,
         "warnings": warnings,
         "commercial_issues": commercial_issues,
