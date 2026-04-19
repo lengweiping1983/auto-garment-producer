@@ -198,7 +198,7 @@
     "garment_map": "6044cdd60037ffb76d6a80136bee8c1b5b93f52e7263d0df9ddba9e9d48a35a1",
     "garment_map_overview": "0b64ed7d3a986e5bfcffa80b6669d602138f02dd9b123dc49f3dad8adcc33b00"
   },
-  "qc": {
+  "validation": {
     "ok": true,
     "errors": [],
     "mask_count": 9,

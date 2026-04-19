@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-使用已批准的面料、图案和纯色填充服装裁片，输出透明 PNG、预览图与清单。
+使用可用的面料、图案和纯色填充服装裁片，输出透明 PNG、预览图与清单。
 """
 import argparse
 import json
@@ -20,7 +20,7 @@ def load_json(path: str | Path) -> dict:
 
 
 def approved_textures(texture_set: dict, base_dir: Path) -> dict:
-    """加载已批准的面料资产。"""
+    """加载可用面料资产。"""
     textures = {}
     for item in texture_set.get("textures", []):
         if not item.get("approved", False):
@@ -39,7 +39,7 @@ def approved_textures(texture_set: dict, base_dir: Path) -> dict:
 
 
 def approved_solids(texture_set: dict) -> dict:
-    """加载已批准的纯色。"""
+    """加载可用纯色。"""
     solids = {}
     for item in texture_set.get("solids", []):
         if item.get("approved", True):
@@ -48,7 +48,7 @@ def approved_solids(texture_set: dict) -> dict:
 
 
 def approved_motifs(texture_set: dict, base_dir: Path) -> dict:
-    """加载已批准的图案资产。"""
+    """加载可用图案资产。"""
     motifs = {}
     for item in texture_set.get("motifs", []):
         if not item.get("approved", False):
@@ -86,7 +86,7 @@ def make_default_fill_plan(pieces_payload: dict, texture_set: dict, textures: di
     for index, piece in enumerate(pieces_payload.get("pieces", [])):
         aspect = piece["width"] / max(1, piece["height"])
         if (piece.get("piece_role") == "strip" or aspect >= 3 or aspect <= 0.3) and solid_id:
-            entries.append({"piece_id": piece["piece_id"], "fill_type": "solid", "solid_id": solid_id, "reason": "细条或窄裁片使用已批准纯色"})
+            entries.append({"piece_id": piece["piece_id"], "fill_type": "solid", "solid_id": solid_id, "reason": "细条或窄裁片使用可用纯色"})
         else:
             texture_id = choose_texture_id(piece, index, textures)
             entries.append({"piece_id": piece["piece_id"], "fill_type": "texture", "texture_id": texture_id, "scale": 1.0, "rotation": 0, "offset_x": 0, "offset_y": 0, "mirror_x": False, "mirror_y": False, "reason": "按裁片尺寸与角色自动分配"})
@@ -364,12 +364,12 @@ def layer_to_image(piece: dict, layer: dict, textures: dict, solids: dict, motif
         motif_id = layer.get("motif_id")
         motif_info = motifs.get(motif_id)
         if not motif_info:
-            raise RuntimeError(f"裁片 {piece['piece_id']} 的图案 {motif_id!r} 未批准或缺失。")
+            raise RuntimeError(f"裁片 {piece['piece_id']} 的图案 {motif_id!r} 不可用或缺失。")
         return render_motif_layer(piece, layer, motif_info, underlay=underlay)
     texture_id = layer.get("texture_id")
     texture_info = textures.get(texture_id)
     if not texture_info:
-        raise RuntimeError(f"裁片 {piece['piece_id']} 的面料 {texture_id!r} 未批准或缺失。")
+        raise RuntimeError(f"裁片 {piece['piece_id']} 的面料 {texture_id!r} 不可用或缺失。")
     return render_texture_layer(piece, layer, texture_info)
 
 
@@ -378,13 +378,13 @@ def render_layered_piece(piece: dict, plan: dict, textures: dict, solids: dict, 
     layers = [plan.get("base"), plan.get("overlay"), plan.get("trim")]
     layers = [layer for layer in layers if isinstance(layer, dict)]
     if not layers:
-        # 向后兼容旧版单层计划
+        # 支持单层计划。
         if plan.get("fill_type") == "solid":
             return render_solid_piece(piece, plan, solids)
         texture_id = plan.get("texture_id")
         texture_info = textures.get(texture_id)
         if not texture_info:
-            raise RuntimeError(f"裁片 {piece['piece_id']} 的面料 {texture_id!r} 未批准或缺失。")
+            raise RuntimeError(f"裁片 {piece['piece_id']} 的面料 {texture_id!r} 不可用或缺失。")
         return render_texture_piece(piece, plan, texture_info)
     content = Image.new("RGBA", (piece["width"], piece["height"]), (0, 0, 0, 0))
     for layer in layers:
@@ -417,7 +417,7 @@ def render_all(pieces_payload: dict, texture_set: dict, fill_plan: dict, out_dir
     solids = approved_solids(texture_set)
     motifs = approved_motifs(texture_set, texture_set_path.parent)
     if not textures:
-        raise RuntimeError("没有已批准的面料。请在面料组合.json 中设置 approved=true 后再渲染。")
+        raise RuntimeError("没有可用面料。请在面料组合.json 中设置 approved=true 后再渲染。")
     entries = {item.get("piece_id"): item for item in fill_plan.get("pieces", [])}
     pieces_dir = out_dir / "pieces"
     pieces_dir.mkdir(parents=True, exist_ok=True)
@@ -472,7 +472,7 @@ def render_all(pieces_payload: dict, texture_set: dict, fill_plan: dict, out_dir
             if img.width != target_w or img.height != target_h:
                 if abs(img.width - target_w) > 5 or abs(img.height - target_h) > 5:
                     print(f"[警告] 裁片 {pid} 与 master {slave_info['source']} 尺寸偏差过大 "
-                          f"({img.width}x{img.height} vs {target_w}x{target_h})，回退到独立渲染")
+                          f"({img.width}x{img.height} vs {target_w}x{target_h})，改为独立渲染")
                     plan = entries.get(pid)
                     img = render_layered_piece(piece, plan, textures, solids, motifs)
                 else:
@@ -565,7 +565,7 @@ def write_manifest(texture_set: dict, fill_plan: dict, rendered: list[dict], pre
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="使用已批准的面料填充服装裁片，输出透明 PNG。")
+    parser = argparse.ArgumentParser(description="使用可用面料填充服装裁片，输出透明 PNG。")
     parser.add_argument("--pieces", required=True, help="裁片清单 JSON 路径")
     parser.add_argument("--texture-set", required=True, help="面料组合 JSON 路径")
     parser.add_argument("--fill-plan", default="", help="裁片填充计划 JSON 路径（可选）")

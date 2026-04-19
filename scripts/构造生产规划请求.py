@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-构造生产规划 AI 请求 —— 合并部位识别 + 审美决策为一次 AI 调用。
+构造生产规划 AI 请求。
 
 输出：
-- ai_production_plan_prompt.txt：面向子 Agent 的综合规划请求
+- ai_production_plan_prompt.txt：生产规划请求
 - ai_production_plan_request.json：结构化请求摘要
 
-子 Agent 预期输出：ai_production_plan.json，包含 garment_map + piece_fill_plan。
+预期输出：ai_production_plan.json，包含 garment_map + piece_fill_plan。
 """
 import argparse
 import json
@@ -53,8 +53,6 @@ def build_production_plan_prompt(
     garment_map: dict | None,
     piece_overview_path: str,
     texture_thumbnail_paths: list[str],
-    multi_scheme: bool = False,
-    max_schemes: int = 4,
 ) -> str:
     """构造合并后的生产规划 prompt。"""
     pieces = pieces_payload.get("pieces", [])
@@ -174,7 +172,7 @@ def build_production_plan_prompt(
     lines.extend([
         "",
         "===== Step 1: 部位识别 =====",
-        "请为每个裁片标注：garment_role, zone, symmetry_group, same_shape_group, texture_direction, confidence, needs_ai_review",
+        "请为每个裁片标注：garment_role, zone, symmetry_group, same_shape_group, texture_direction, confidence",
         "可选 garment_role: front_body / back_body / sleeve_left / sleeve_right / collar_or_upper_trim / hem_or_lower_trim / trim_strip / side_or_long_panel / front_hero / yoke / pocket / lining / small_detail / unknown",
         "zone: body / secondary / trim / detail",
         "",
@@ -217,20 +215,16 @@ def build_production_plan_prompt(
         "--- 可用面料资产 ---",
     ])
 
-    is_merged_set = any("source" in t for t in texture_set.get("textures", []))
     # 面料资产列表：压缩为 ID + role，省略 prompt（AI 会查看缩略图）
     asset_lines = []
     for tex in texture_set.get("textures", []):
         if tex.get("approved", False) or tex.get("candidate", False):
-            source_tag = f"[{tex.get('source','')}]" if is_merged_set else ""
-            asset_lines.append(f"{tex.get('texture_id')}:{tex.get('role','')}{source_tag}")
+            asset_lines.append(f"{tex.get('texture_id')}:{tex.get('role','')}")
     for motif in texture_set.get("motifs", []):
         if motif.get("approved", False) or motif.get("candidate", False):
-            source_tag = f"[{motif.get('source','')}]" if is_merged_set else ""
-            asset_lines.append(f"{motif.get('motif_id')}:{motif.get('role','')}{source_tag}")
+            asset_lines.append(f"{motif.get('motif_id')}:{motif.get('role','')}")
     for solid in texture_set.get("solids", []):
-        source_tag = f"[{solid.get('source','')}]" if is_merged_set else ""
-        asset_lines.append(f"{solid.get('solid_id')}:{solid.get('color','')}{source_tag}")
+        asset_lines.append(f"{solid.get('solid_id')}:{solid.get('color','')}")
     if asset_lines:
         lines.append("  " + ", ".join(asset_lines))
     else:
@@ -240,9 +234,8 @@ def build_production_plan_prompt(
         "",
         "--- 填充规则 ---",
         "  " + "；".join(COMMERCIAL_FILL_RULES_ZH) + "。",
-        "  大身裁片只能使用 1 套主底纹家族；左右/前后/袖片必须同源协调，不得像不同看板硬拼。",
+        "  大身裁片只能使用 1 套主底纹家族；左右/前后/袖片必须协调，不得像不同看板硬拼。",
         "  蘑菇、动物、角色、花丛、完整场景等具象元素不得作为大面积满版 body texture，除非用户明确要求；它们只能作为 1 个 hero motif 或小面积 accent。",
-        "  A/B 双源混合必须证明 palette、笔触、底色和饱和度一致；否则每个 scheme 优先使用单一来源，另一来源最多作小面积 accent/trim。",
         "  禁止半透明整张主题图贴片；motif overlay 必须是干净定位图案，只允许用于 1 个 hero 裁片。",
         "  纹理方向自主决定；可声明 intentional_asymmetry: true 保留有意不对称。",
         "",
@@ -251,7 +244,7 @@ def build_production_plan_prompt(
         "  Q2 三米测试：距离 3 米看，哪些纹理会糊、乱、花？大身 base 必须塌缩为受控色相。",
         "  Q3 挂架理由：和同价位 20 件上衣挂在一起，消费者为什么拿起它？",
         "  Q4 日常舒适：开会、吃饭、接孩子是否用力过猛？大身满版插画必须降级为低噪 base。",
-        "  每一问必须输出 answer、verdict(pass|fail)、evidence_in_plan。任一 verdict=fail 时，不得提交该方案，必须当场重选资产或改为 fallback safe plan。",
+        "  可在 art_direction.notes 中简要说明这些判断如何影响资产选择。",
         "",
         "--- Hero Motif 几何契约（硬约束）---",
         "  hero 只允许在 front_body/front_hero；宽度占前片 18%–42%，高度 18%–38%。",
@@ -260,13 +253,6 @@ def build_production_plan_prompt(
         "  piece_fill_plan 中每个 hero overlay 的 scale/anchor/offset 必须能换算成目标裁片 bounding box 内 18%–42% 宽、18%–38% 高；否则视为越界。",
         "  禁止半透明整张主题图 overlay、禁止跨缝线/领口/袖窿/肩缝、禁止同一件衣服出现 2 个以上 hero。",
         "  禁止完整场景叙事做 hero；只能提取 1 个角色、剪影或简化图标。",
-        "",
-        "--- 双源资产硬规则 ---",
-        "  若资产 ID 带 _a/_b，必须先在 asset_shortlist.primary_source 中二选一作为主源。",
-        "  当资产池同时存在 _a 和 _b 后缀时，primary_source 必须是 A 或 B，不允许 single；single 只允许在资产池本身只有一源时使用。",
-        "  primary_source 承担至少 80% 可见面积；所有大身 base、前后身主体、袖片主底纹必须来自 primary。",
-        "  secondary source 最多贡献 2 个小面积 accent/trim/cuff/collar/small_detail；不得用于大身 base。",
-        "  若 A/B 的 palette、底色、饱和度、笔触、媒介不一致，必须放弃混用并在 rejected_assets 说明。",
         "",
         "--- 模板 zone 规则 ---",
         "  若固定模板 garment_map 中提供 zone/garment_role/symmetry_group，必须直接按这些结构化生产事实执行。",
@@ -285,153 +271,30 @@ def build_production_plan_prompt(
                 )
             lines.append("")
 
-    # 多方案模式：插入策略指导和输出格式改造
-    if multi_scheme:
-        # 检测可用资产源数量（通过后缀 _a / _b 精确匹配）
-        image_assets = texture_set.get("textures", []) + texture_set.get("motifs", [])
-        solid_assets = texture_set.get("solids", [])
-        all_assets = image_assets + solid_assets
-        def _asset_id(a):
-            return a.get("texture_id", a.get("motif_id", a.get("solid_id", "")))
-        has_a = any(_asset_id(a).endswith("_a") for a in all_assets)
-        has_b = any(_asset_id(a).endswith("_b") for a in all_assets)
-        source_count = sum([has_a, has_b])
-
-        image_asset_count = len(image_assets)
-        solid_count = len(solid_assets)
-        if source_count >= 2:
-            strategy_lines = [
-                f"生成 {max_schemes} 套 schemes。资产池含 A/B 两源 {image_asset_count} 个图片资产 + {solid_count} 个纯色；双源各 3x3 时应视为 9+9 完整资产池，必须从完整资产池重新判断组合。",
-                "方案之间要有实质差异，覆盖安全量产、强卖点、深色高级、轻量呼吸、局部点缀、年轻化/秀场感等方向。",
-                "允许全A、全B、A/B混合；不用低质资产可以，但在 asset_coverage.unused_assets 说明原因。",
-                "asset_shortlist.primary_source 必须是 A 或 B，不允许 single；single 只用于资产池本身只有一个来源的情况。",
-                "所有 asset id 必须真实存在，例如 main_a、main_b、hero_motif_1_a、quiet_solid_b。",
-                "不要只输出 A/B 两个来源结果；每个 scheme 都必须是独立设计方案，并说明资产选择理由。",
-                "如果 A/B 色板或笔触明显不一致，不要混用到大身；优先单源成套，另一源只可小面积点缀。",
-            ]
-        else:
-            # 单源情况（1 套或 0 套有后缀都 fallback 为单源）：从 9 个资产中组合多套方案
-            source_label = "源A" if has_a else "源B" if has_b else "当前可用"
-            source_tag_note = "资产 ID 带 _a 后缀" if has_a else "资产 ID 带 _b 后缀" if has_b else "使用原始资产 ID（无后缀）"
-            strategy_lines = [
-                f"生成 {max_schemes} 套 schemes。当前为单源资产（{source_label}，{source_tag_note}）：{image_asset_count} 个图片资产 + {solid_count} 个纯色。",
-                "每套都从完整资产池重新判断 base/secondary/accent/hero/trim；差异不能只靠交换小面积 trim。",
-                "覆盖安全量产、强卖点、深色高级、轻量呼吸、局部点缀、年轻化/秀场感等方向。",
-                "不用低质资产可以，但在 asset_coverage.unused_assets 说明原因。",
-                "不要只输出单一结果；每个 scheme 都必须是独立设计方案，并说明资产选择理由。",
-            ]
-
-        lines.extend(["", "===== 多方案策略指导 ====="] + strategy_lines + [""])
-
     lines.extend([
         "===== 输出顺序硬约束 =====",
         "你必须先完成 Part 1，再写 Part 2。不要在确认 garment_map 和成衣自检之前生成 piece_fill_plan。",
         "Part 1: 输出 garment_map、garment_map_confidence_per_piece、garment_map_uncertainties。",
-        "Part 2: 输出 pre_design_self_check、asset_shortlist、theme_landing_summary、asset_mix_summary、piece_fill_plan、pre_submit_self_audit。",
-        "写 piece_fill_plan 时，body/base 资产必须来自 asset_shortlist.primary_base_ids；跨源 accent 不得超过 asset_shortlist.accent_ids_from_other_source 中的 2 个资产。",
-        "",
-        "===== 输出前自审 A–F（必须执行）=====",
-        "写完 piece_fill_plan 后，必须回头自审以下 6 条。任一条 fail 时不得提交原方案，必须在同一次输出中直接重做为通过方案或 fallback safe plan。",
-        "A. 三米测试：远看主体清楚，大身不糊、不乱、不像贴图拼接。",
-        "B. Hero geometry：hero 没有过大、靠边、跨缝线/领口/袖窿/肩缝；同衣服不超过 1 个 hero；没有半透明整图 overlay。",
-        "C. 双源混用：跨源资产不超过 2 个小面积 accent/trim；大身 base 没有混用 A/B 两源。",
-        "D. 关键自评：hero_clarity 和 style_cohesion 均 >= 8。",
-        "E. 大身 base：不含完整动物、人脸、文字、完整场景、建筑、复杂叙事插画。",
-        "F. Motif 清洁度：没有半透明残影、矩形边界、未去干净背景、水印或贴片边界。",
+        "Part 2: 输出 asset_shortlist、theme_landing_summary、asset_mix_summary、piece_fill_plan。",
+        "写 piece_fill_plan 时，body/base 资产必须来自 asset_shortlist.primary_base_ids。",
         "",
         "===== 输出格式 =====",
         STRICT_JSON_ONLY_ZH + " 格式如下：",
         "",
     ])
 
-    if multi_scheme:
-        lines.append(json.dumps({
-            "schemes": [
-                {
-                    "scheme_id": "scheme_01",
-                    "design_positioning": "量产安全款 / 精品陈列款 / 年轻潮流款等",
-                    "strategy_note": "从完整资产池独立判断后的组合策略",
-                    "garment_map_confidence_per_piece": {"piece_001": 0.88},
-                    "garment_map_uncertainties": [
-                        {"piece_id": "piece_004", "reason": "窄长弧形裁片可能是 collar 或 hem，采用安静 trim 处理"}
-                    ],
-                    "pre_design_self_check": {
-                        "overall_first_impression": {"answer": "胸口白色山猫剪影", "verdict": "pass", "evidence_in_plan": "唯一 hero 位于 piece_001 胸口，其他大身保持低噪"},
-                        "three_meter_test": {"answer": "大身低噪，远看塌缩为柔和绿色；hero 清晰可读", "verdict": "pass", "evidence_in_plan": "main_a 是低对比 base，hero 与底色明度差充足"},
-                        "rack_reason": {"answer": "自然系胸口图标比普通满版花草更容易上架", "verdict": "pass", "evidence_in_plan": "卖点集中在胸口，trim 安静"},
-                        "daily_wearability": {"answer": "大身安静，袖片同源，日常场景不会用力过猛", "verdict": "pass", "evidence_in_plan": "前后身和袖片均使用 primary_source base"}
-                    },
-                    "asset_shortlist": {
-                        "primary_source": "A",
-                        "primary_base_ids": ["main_a", "secondary_a"],
-                        "accent_ids_from_other_source": ["quiet_solid_b"],
-                        "rejected_assets": [{"asset_id": "hero_scene_b", "reason": "完整场景叙事，不能用于大身或 hero"}]
-                    },
-                    "theme_landing_summary": {"hero_piece": "piece_001", "base_atmosphere_pieces": ["piece_002"], "quiet_pieces": ["piece_003"], "accent_pieces": ["piece_004"], "reason": "主题主体只落在一个 hero 裁片，大身只保留氛围和色板"},
-                    "asset_mix_summary": {"body_base_assets": ["main_a"], "hero_assets": ["hero_motif_1_a"], "trim_assets": ["quiet_solid_b"], "source_mix_policy": "single_source_body_with_small_accent", "reason": "..."},
-                    "diversity_tags": ["quiet_body", "bold_hero", "accent_trim"],
-                    "garment_map": {"pieces": [{"piece_id": "piece_001", "garment_role": "front_body", "zone": "body", "symmetry_group": "sg_front", "same_shape_group": "", "texture_direction": "transverse", "confidence": 0.88, "needs_ai_review": False}]},
-                    "piece_fill_plan": {
-                        "pieces": [
-                            {
-                                "piece_id": "piece_001",
-                                "base": {"fill_type": "texture", "texture_id": "main_a", "scale": 1.0, "rotation": 0, "offset_x": 0, "offset_y": 0, "mirror_x": False, "mirror_y": False},
-                                "overlay": {"fill_type": "motif", "motif_id": "hero_motif_1_a", "anchor": "center", "scale": 0.72, "opacity": 1.0, "offset_x": 0, "offset_y": -40},
-                                "trim": None,
-                                "texture_direction": "transverse",
-                                "reason": "中文原因",
-                                "intentional_asymmetry": False
-                            }
-                        ],
-                        "art_direction": {"strategy": "单一卖点定位，低噪身片，协调副片，安静饰边", "hero_piece_ids": ["piece_001"]}
-                    },
-                    "pre_submit_self_audit": {
-                        "rule_A_passed": True,
-                        "rule_A_evidence": "三米远看大身低噪，hero 仍可读",
-                        "rule_B_passed": True,
-                        "rule_B_evidence": "hero 仅在 front_body，宽高位于 18%–42% / 18%–38% 区间，未跨缝线",
-                        "rule_C_passed": True,
-                        "rule_C_evidence": "大身 base 全部来自 A，B 仅 1 个 trim accent",
-                        "rule_D_passed": True,
-                        "rule_D_evidence": "hero_clarity/style_cohesion 自评均 >= 8",
-                        "rule_E_passed": True,
-                        "rule_E_evidence": "大身 base 不含动物、人脸、文字或完整场景",
-                        "rule_F_passed": True,
-                        "rule_F_evidence": "motif 为干净定位图案，无半透明矩形残影",
-                        "fallback_safe_plan_used": False
-                    }
-                }
-            ],
-            "portfolio_notes": "...",
-            "asset_coverage": {"used_assets": ["main_a"], "unused_assets": [{"asset_id": "trim_motif_a", "reason": "..."}], "coverage_strategy": "..."},
-            "risk_notes": []
-        }, ensure_ascii=False, indent=2))
-        lines.append("")
-        lines.append("注：顶层必须包含 schemes 数组、portfolio_notes 和 asset_coverage。每个 scheme 必须包含 scheme_id、design_positioning、strategy_note、theme_landing_summary、asset_mix_summary、diversity_tags、piece_fill_plan。")
-        lines.append("注：每个 scheme 还必须包含 garment_map_confidence_per_piece、garment_map_uncertainties、pre_design_self_check、asset_shortlist、pre_submit_self_audit；缺少任一字段视为无效。")
-        lines.append("注：模板模式下 garment_map 可省略；若提供 garment_map，也会被固定模板映射覆盖。")
-        lines.append("注：art_direction 可额外包含 notes[] 和可选的 self_assessment（overall_score/wearability/cohesion/hero_clarity/trim_quality/season_fit/customer_match/production_safety/color_balance/negative_space/narrative_control）。")
-    else:
-        lines.append(json.dumps({
+    lines.append(json.dumps({
             "garment_map": {
                 "pieces": [
-                    {"piece_id": "piece_001", "garment_role": "front_body", "zone": "body", "symmetry_group": "sg_front", "same_shape_group": "", "texture_direction": "transverse", "confidence": 0.88, "needs_ai_review": False}
+                    {"piece_id": "piece_001", "garment_role": "front_body", "zone": "body", "symmetry_group": "sg_front", "same_shape_group": "", "texture_direction": "transverse", "confidence": 0.88}
                 ]
             },
             "garment_map_confidence_per_piece": {"piece_001": 0.88},
             "garment_map_uncertainties": [
                 {"piece_id": "piece_004", "reason": "窄长裁片角色不确定，按 trim 安静处理"}
             ],
-            "pre_design_self_check": {
-                "overall_first_impression": {"answer": "胸口白色山猫剪影", "verdict": "pass", "evidence_in_plan": "唯一 hero 位于前片胸口"},
-                "three_meter_test": {"answer": "大身低噪，远看塌缩为受控色相", "verdict": "pass", "evidence_in_plan": "body/base 均为低对比主底纹"},
-                "rack_reason": {"answer": "有一个清晰但克制的自然系卖点", "verdict": "pass", "evidence_in_plan": "hero 明确，trim 安静"},
-                "daily_wearability": {"answer": "大身安静，袖片与身片同源，适合日常穿着", "verdict": "pass", "evidence_in_plan": "没有满版叙事插画"}
-            },
             "asset_shortlist": {
-                "primary_source": "single",
                 "primary_base_ids": ["main"],
-                "accent_ids_from_other_source": [],
                 "rejected_assets": [{"asset_id": "busy_scene", "reason": "完整叙事插画，不适合大身"}]
             },
             "piece_fill_plan": {
@@ -448,25 +311,10 @@ def build_production_plan_prompt(
                 ],
                 "art_direction": {"strategy": "单一卖点定位，低噪身片，协调副片，安静饰边", "hero_piece_ids": ["piece_001"]}
             },
-            "pre_submit_self_audit": {
-                "rule_A_passed": True,
-                "rule_A_evidence": "三米远看大身不糊不乱",
-                "rule_B_passed": True,
-                "rule_B_evidence": "hero 未越界、未跨缝线，且不超过 1 个",
-                "rule_C_passed": True,
-                "rule_C_evidence": "单源或双源跨源 accent 不超过 2 个，大身 base 来自主源",
-                "rule_D_passed": True,
-                "rule_D_evidence": "hero_clarity/style_cohesion 自评均 >= 8",
-                "rule_E_passed": True,
-                "rule_E_evidence": "大身 base 不含完整动物、人脸、文字或场景",
-                "rule_F_passed": True,
-                "rule_F_evidence": "无半透明残影或矩形边界",
-                "fallback_safe_plan_used": False
-            },
             "risk_notes": []
-        }, ensure_ascii=False, indent=2))
-        lines.append("")
-        lines.append("注：art_direction 可额外包含 notes[] 和可选的 self_assessment（overall_score/wearability/cohesion/hero_clarity/trim_quality/season_fit/customer_match/production_safety/color_balance/negative_space/narrative_control）。")
+    }, ensure_ascii=False, indent=2))
+    lines.append("")
+    lines.append("注：art_direction 可额外包含 notes[]，用于解释核心视觉策略。")
 
     lines.extend([
         "",
@@ -479,17 +327,15 @@ def build_production_plan_prompt(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="构造合并部位识别+审美决策的生产规划 AI 请求。")
+    parser = argparse.ArgumentParser(description="构造生产规划 AI 请求。")
     parser.add_argument("--pieces", required=True, help="pieces.json 路径")
     parser.add_argument("--texture-set", required=True, help="texture_set.json 路径")
     parser.add_argument("--brief", default="", help="commercial_design_brief.json 路径")
     parser.add_argument("--geometry-hints", default="", help="geometry_hints.json 路径")
     parser.add_argument("--visual-elements", default="", help="visual_elements.json 路径（可选，用于 motif 几何信息）")
-    parser.add_argument("--garment-map", default="", help="已有 garment_map.json（可选，作为 fallback 参考）")
+    parser.add_argument("--garment-map", required=True, help="固定模板 garment_map.json 路径")
     parser.add_argument("--piece-overview", default="", help="piece_overview.png 路径。若省略，尝试从 pieces.json 所在目录推断。")
     parser.add_argument("--out", required=True, help="输出目录")
-    parser.add_argument("--multi-scheme", action="store_true", help="启用多方案模式。要求 AI 输出 schemes 数组，每套包含独立的 piece_fill_plan。")
-    parser.add_argument("--max-schemes", type=int, default=8, help="最大方案数（默认 8；需要更丰富组合可设为 12）。")
     args = parser.parse_args()
 
     out_dir = Path(args.out)
@@ -540,12 +386,7 @@ def main() -> int:
         except Exception as exc:
             print(f"[警告] 无法读取 visual_elements: {exc}", file=sys.stderr)
 
-    garment_map = None
-    if args.garment_map:
-        try:
-            garment_map = load_json(args.garment_map)
-        except Exception as exc:
-            print(f"[警告] 无法读取 garment_map: {exc}", file=sys.stderr)
+    garment_map = load_json(args.garment_map)
 
     # 推断 piece_overview 路径
     overview_path = args.piece_overview
@@ -597,8 +438,6 @@ def main() -> int:
     prompt_text = build_production_plan_prompt(
         pieces_payload, texture_set, brief, geometry_hints,
         visual_elements, garment_map, overview_for_kimi, texture_kimi_images,
-        multi_scheme=args.multi_scheme,
-        max_schemes=args.max_schemes,
     )
 
     prompt_path = out_dir / "ai_production_plan_prompt.txt"
@@ -608,13 +447,13 @@ def main() -> int:
 
     request_path = out_dir / "ai_production_plan_request.json"
     request_summary = {
-        "request_id": "ai_multi_production_plan_v1" if args.multi_scheme else "ai_production_plan_v1",
+        "request_id": "ai_production_plan_v1",
         "pieces_json": relative_json_metadata_path(args.pieces, request_path),
         "texture_set": str(Path(args.texture_set).resolve()),
         "brief": str(Path(args.brief).resolve()) if args.brief else "",
         "geometry_hints": str(Path(args.geometry_hints).resolve()) if args.geometry_hints else "",
         "visual_elements": str(Path(args.visual_elements).resolve()) if args.visual_elements else "",
-        "garment_map": str(Path(args.garment_map).resolve()) if args.garment_map else "",
+        "garment_map": str(Path(args.garment_map).resolve()),
         "piece_overview": overview_for_kimi,
         "piece_overview_original": overview_path,
         "piece_overview_preprocessed": overview_preprocessed,
@@ -622,24 +461,8 @@ def main() -> int:
         "texture_thumbnails_debug": texture_thumbnails_debug,
         "texture_thumbnails": texture_kimi_images,
         "prompt_path": str(prompt_path.resolve()),
-        "expected_output": str((out_dir / ("ai_multi_production_plan.json" if args.multi_scheme else "ai_production_plan.json")).resolve()),
-        "multi_scheme": args.multi_scheme,
-        "max_schemes": args.max_schemes if args.multi_scheme else 1,
-        "expected_top_level": "schemes" if args.multi_scheme else "garment_map + piece_fill_plan",
-        "scheme_required_fields": [
-            "scheme_id",
-            "design_positioning",
-            "strategy_note",
-            "garment_map_confidence_per_piece",
-            "garment_map_uncertainties",
-            "pre_design_self_check",
-            "asset_shortlist",
-            "pre_submit_self_audit",
-            "theme_landing_summary",
-            "asset_mix_summary",
-            "diversity_tags",
-            "piece_fill_plan",
-        ] if args.multi_scheme else [],
+        "expected_output": str((out_dir / "ai_production_plan.json").resolve()),
+        "expected_top_level": "garment_map + piece_fill_plan",
         "payload_budget": payload_budget,
         "kimi_images": kimi_images,
         "kimi_input_note": "默认只传 piece_overview 和 texture_contact_sheet 的 Kimi 压缩图；不要传 texture_thumbnails_debug 中的单张原图/调试图。",
@@ -648,13 +471,11 @@ def main() -> int:
 
     print(json.dumps({
         "生产规划请求摘要": str(request_path.resolve()),
-        "子Agent提示词": str(prompt_path.resolve()),
+        "AI生产规划提示词": str(prompt_path.resolve()),
         "纸样总览图": overview_path,
         "Kimi纸样总览图": overview_for_kimi,
         "Kimi面料ContactSheet": contact_sheet.get("sheet_path", ""),
         "预期输出": request_summary["expected_output"],
-        "多方案模式": args.multi_scheme,
-        "最大方案数": args.max_schemes if args.multi_scheme else 1,
         "Kimi请求体预算": payload_budget,
     }, ensure_ascii=False, indent=2))
     print_payload_budget_warning(payload_budget)

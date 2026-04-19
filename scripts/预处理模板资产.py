@@ -201,7 +201,7 @@ def preprocess_size_dir(size_dir: Path, check_only: bool = False) -> dict:
         "ai_preview_details": ai_previews,
         "garment_map": garment_map,
         "hashes": hashes,
-        "qc": {
+        "validation": {
             "ok": not errors,
             "errors": errors,
             "mask_count": len(production_masks),
@@ -225,12 +225,11 @@ def preprocess_size_dir(size_dir: Path, check_only: bool = False) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description="预处理内置模板资产，生成 Kimi JPEG 预览和 template_assets manifest。")
     parser.add_argument("--template", default="", help="模板 ID；为空时处理 index 中所有模板。")
-    parser.add_argument("--size", default="s", help="模板资产目录，固定为 s。")
     parser.add_argument("--all", action="store_true", help="处理 index 中所有模板。")
     parser.add_argument("--check-only", action="store_true", help="只校验，不生成 JPEG/manifest。")
     args = parser.parse_args()
 
-    size_dirs = resolve_size_dirs(args.template, args.size, args.all)
+    size_dirs = resolve_size_dirs(args.template, "s", args.all)
     if not size_dirs:
         print(json.dumps({"ok": False, "error": "未找到可处理的模板资产目录"}, ensure_ascii=False, indent=2))
         return 1

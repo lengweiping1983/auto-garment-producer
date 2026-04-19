@@ -2,11 +2,11 @@
 """
 根据服装部位映射、面料组合和商业设计简报，创建艺术指导裁片填充计划。
 
-支持两种模式：
-1. 优先使用 ai_piece_fill_plan.json（子 Agent 审美决策输出）
-2. 回退到后端规则生成（当 AI 计划不存在或格式错误时）
+支持两种输入：
+1. ai_piece_fill_plan.json（AI 生产规划输出）
+2. 后端规则计划（当 AI 计划不存在或格式错误时）
 
-无论哪种模式，最终都会经过后端强制校验修正。
+最终由程序补齐必要字段，并强制加入主题前片切半 overlay。
 """
 import argparse
 import copy
@@ -210,83 +210,6 @@ def compute_motif_rotation(motif_orientation: str, texture_direction: str, piece
         return 90.0
     return 0.0
 
-
-def _group_similar_pieces(pieces: list[dict]) -> dict[str, str]:
-    """为几何相似的裁片自动分配 same_shape_group。
-    配对条件：面积比 ≥0.65、aspect 比 ≥0.55、y 坐标接近（在各自高度 2.5 倍内）。
-    主要用于 fallback 路径中让领子/袖口等小裁片保持同组一致。"""
-    group_map: dict[str, str] = {}
-    assigned: set[str] = set()
-    for i, p1 in enumerate(pieces):
-        if p1["piece_id"] in assigned:
-            continue
-        group = [p1]
-        for p2 in pieces[i + 1 :]:
-            if p2["piece_id"] in assigned:
-                continue
-            # 面积相似
-            area_ratio = min(p1["area"], p2["area"]) / max(p1["area"], p2["area"])
-            if area_ratio < 0.65:
-                continue
-            # y 坐标接近（都在顶部或都在底部）
-            cy1 = p1.get("cy", p1.get("y", 0) + p1.get("height", 0) / 2)
-            cy2 = p2.get("cy", p2.get("y", 0) + p2.get("height", 0) / 2)
-            if abs(cy1 - cy2) > max(p1.get("height", 1), p2.get("height", 1)) * 2.5:
-                continue
-            # aspect 相似
-            a1 = p1["width"] / max(1, p1["height"])
-            a2 = p2["width"] / max(1, p2["height"])
-            aspect_ratio = min(a1, a2) / max(a1, a2)
-            if aspect_ratio < 0.55:
-                continue
-            group.append(p2)
-        if len(group) >= 2:
-            gname = f"ssg_{p1['piece_id']}"
-            for p in group:
-                assigned.add(p["piece_id"])
-                group_map[p["piece_id"]] = gname
-    return group_map
-
-
-def infer_map_from_pieces(pieces_payload: dict) -> dict:
-    """当没有部位映射文件时，从裁片几何回退推断。"""
-    pieces = sorted(pieces_payload.get("pieces", []), key=lambda p: p["area"], reverse=True)
-    largest_area = pieces[0]["area"] if pieces else 1
-    group_map = _group_similar_pieces(pieces)
-    mapped = []
-    for index, piece in enumerate(pieces):
-        aspect = piece["width"] / max(1, piece["height"])
-        area_ratio = piece["area"] / max(1, largest_area)
-        if (aspect >= 3 or aspect <= 0.34) and area_ratio < 0.08:
-            role, zone, confidence = "trim_strip", "trim", 0.52
-        elif aspect >= 3 or aspect <= 0.34:
-            role, zone, confidence = "side_or_long_panel", "secondary", 0.5
-        elif index == 0:
-            role, zone, confidence = "front_hero", "body", 0.5
-        elif index == 1:
-            role, zone, confidence = "back_body", "body", 0.48
-        else:
-            role, zone, confidence = "small_detail", "detail", 0.42
-        texture_dir = "longitudinal" if (aspect >= 1.8 or aspect <= 0.55) else "transverse"
-        mapped.append({
-            "piece_id": piece["piece_id"],
-            "garment_role": role,
-            "zone": zone,
-            "symmetry_group": "",
-            "same_shape_group": group_map.get(piece["piece_id"], ""),
-            "direction_degrees": 90 if aspect >= 1.8 else 0,
-            "texture_direction": texture_dir,
-            "confidence": confidence,
-            "reason": "回退几何推断",
-        })
-    return {
-        "map_id": "fallback_garment_map",
-        "method": "fallback_geometry_inference",
-        "confidence": 0.48,
-        "pieces": mapped,
-    }
-
-
 def find_front_pair_piece_ids(pieces_payload: dict, garment_map: dict) -> tuple[str, str] | tuple[None, None]:
     """Find front-left/front-right pieces from fixed template metadata."""
     gm_entries = garment_map.get("pieces", [])
@@ -348,13 +271,13 @@ def force_theme_front_split_overlays(entries: list[dict], pieces_payload: dict, 
     return entries
 
 
-def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: dict, brief: dict, motif_geometries: dict = None) -> tuple[dict, dict]:
-    """后端回退规则生成填充计划（当 AI 计划不可用时）。"""
+def build_rule_plan(pieces_payload: dict, texture_set: dict, garment_map: dict, brief: dict, motif_geometries: dict = None) -> tuple[dict, dict]:
+    """后端规则生成填充计划（当 AI 计划不可用时）。"""
     texture_ids = approved_ids(texture_set, "textures", "texture_id")
     motif_ids = approved_ids(texture_set, "motifs", "motif_id")
     solid_ids = approved_ids(texture_set, "solids", "solid_id")
     if not texture_ids:
-        raise RuntimeError("没有已批准的面料可用于艺术指导填充计划。")
+        raise RuntimeError("没有可用面料可用于艺术指导填充计划。")
 
     # 注意：texture_id 实际值为 main/secondary/dark_base/accent_light/accent_mid/solid_quiet
     main_id = choose(texture_ids, ["main", "base", "secondary", "accent_light", "dark_base"])
@@ -371,10 +294,8 @@ def fallback_create_plan(pieces_payload: dict, texture_set: dict, garment_map: d
     entries = []
     hero_ids, quiet_ids, secondary_ids, trim_ids = [], [], [], []
     risk_notes = []
-    if garment_map.get("method", "").startswith("fallback"):
-        risk_notes.append("服装部位由几何回退估计得出")
     if not motif_id:
-        risk_notes.append("没有已批准的图案资产；卖点处理仅使用纹理层次")
+        risk_notes.append("没有可用图案资产；卖点处理仅使用纹理层次")
     group_params: dict[str, dict] = {}
 
     for index, piece in enumerate(sorted_pieces):
@@ -654,7 +575,7 @@ def apply_symmetry_relations(entries: list[dict], garment_map: dict, pieces_payl
             if auto_skipped:
                 print(f"[对称分析] {auto_skipped} 个关系未自动应用（大身裁片或 IoU<0.99），请查看上方建议")
         except Exception as exc:
-            print(f"[对称分析] 自动分析失败，回退到独立渲染: {exc}")
+            print(f"[对称分析] 自动分析失败，改为独立渲染: {exc}")
 
     if not slave_map:
         return entries
@@ -864,7 +785,7 @@ def enforce_validation(
     motif_geometries: dict = None,
     brief: dict = None,
 ) -> tuple[list[dict], list[dict]]:
-    """后端强制校验修正填充计划。"""
+    """补齐并修正填充计划。"""
     issues = []
     by_piece = {p["piece_id"]: p for p in pieces_payload.get("pieces", [])}
     largest_area = max((p.get("area", 0) for p in pieces_payload.get("pieces", [])), default=1)
@@ -934,7 +855,7 @@ def enforce_validation(
     # 2. Hero 数量修正
     hero_entries = [e for e in entries if e.get("garment_role") == "front_hero" or (e.get("overlay") or {}).get("fill_type") == "motif"]
     if len(hero_entries) == 0:
-        # 程序不做 hero 决策——留给 AI 子Agent判断哪个裁片最适合做 hero
+        # 程序不新增 hero；AI 计划或主题前片切半负责卖点图案。
         body_entries = [e for e in entries if e.get("zone") == "body"]
         if body_entries:
             # 列出候选 body 裁片信息供 AI 参考，但不强制指定
@@ -1322,16 +1243,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="为裁片创建艺术指导商业填充计划。")
     parser.add_argument("--pieces", required=True, help="裁片清单 JSON 路径")
     parser.add_argument("--texture-set", required=True, help="面料组合 JSON 路径")
-    parser.add_argument("--garment-map", default="", help="部位映射 JSON 路径（可选）")
+    parser.add_argument("--garment-map", required=True, help="固定模板部位映射 JSON 路径")
     parser.add_argument("--brief", default="", help="商业设计简报 JSON 路径（可选）")
-    parser.add_argument("--ai-plan", default="", help="子 Agent 生成的 AI 填充计划 JSON 路径（优先使用）")
+    parser.add_argument("--ai-plan", default="", help="AI 填充计划 JSON 路径（优先使用）")
     parser.add_argument("--visual-elements", default="", help="visual_elements.json 路径（可选，用于读取 motif 几何信息）")
     parser.add_argument("--out", required=True, help="输出目录")
     args = parser.parse_args()
 
     pieces_payload = load_json(args.pieces)
     texture_set = load_json(args.texture_set)
-    garment_map = load_json(args.garment_map) if args.garment_map else infer_map_from_pieces(pieces_payload)
+    garment_map = load_json(args.garment_map)
     brief = load_json(args.brief) if args.brief else {"aesthetic_direction": "商业畅销款打样"}
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1354,7 +1275,7 @@ def main() -> int:
                 if auto_ve_cv.exists():
                     motif_geometries = load_motif_geometries(auto_ve_cv)
 
-    # 阶段 1：获取填充计划（优先 AI 计划，回退后端规则）
+    # 阶段 1：获取填充计划（优先 AI 计划，其次后端规则）
     ai_plan_used = False
     if args.ai_plan:
         ai_plan_path = Path(args.ai_plan)
@@ -1365,27 +1286,27 @@ def main() -> int:
                 art_direction = ai_plan.get("art_direction", {})
                 if entries:
                     ai_plan_used = True
-                    print(f"使用子 Agent 审美计划: {ai_plan_path}")
+                    print(f"使用 AI 填充计划: {ai_plan_path}")
                 else:
-                    print("AI 计划为空，回退到后端规则")
+                    print("AI 填充计划无条目，使用后端规则")
                     art_direction, ai_plan = {}, {}
             except Exception as exc:
-                print(f"AI 计划解析失败 ({exc})，回退到后端规则")
+                print(f"AI 计划解析失败 ({exc})，使用后端规则")
                 art_direction, ai_plan = {}, {}
         else:
-            print(f"AI 计划不存在: {ai_plan_path}，回退到后端规则")
+            print(f"AI 计划不存在: {ai_plan_path}，使用后端规则")
             art_direction, ai_plan = {}, {}
     else:
         art_direction, ai_plan = {}, {}
 
     if not ai_plan_used:
-        art_direction, fill_plan = fallback_create_plan(pieces_payload, texture_set, garment_map, brief, motif_geometries)
+        art_direction, fill_plan = build_rule_plan(pieces_payload, texture_set, garment_map, brief, motif_geometries)
         entries = fill_plan.get("pieces", [])
 
     # 阶段 1.5：应用对称关系优化（slave 复制 master 参数，避免重复渲染）
     entries = apply_symmetry_relations(entries, garment_map, pieces_payload)
 
-    # 阶段 2：强制校验修正
+    # 阶段 2：程序修正
     entries, fix_issues = enforce_validation(entries, pieces_payload, texture_set, garment_map, motif_geometries, brief)
     entries = force_theme_front_split_overlays(entries, pieces_payload, texture_set, garment_map)
 
@@ -1434,7 +1355,7 @@ def main() -> int:
             "使用AI计划": ai_plan_used,
         "草稿预览": not ai_plan_used,
         "生产就绪": ai_plan_used,
-            "校验修正": len(fix_issues),
+            "程序修正": len(fix_issues),
             "卖点裁片": art_direction["hero_piece_ids"],
         },
         ensure_ascii=False,

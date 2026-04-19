@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-主题图视觉元素提取 — 构造子 Agent 审美分析请求。
+主题图视觉元素提取 — 构造 AI 视觉分析请求。
 
 本脚本不直接进行视觉推理，而是构造结构化提示词文件，
-供子 Agent（具备视觉理解能力的 Kimi）阅读主题图并输出分析结果。
+供具备视觉理解能力的模型阅读主题图并输出分析结果。
 
 输出：
-- ai_vision_prompt.txt：面向子 Agent 的自然语言视觉分析请求
+- ai_vision_prompt.txt：自然语言视觉分析请求
 - ai_vision_request.json：机器可读的结构化请求摘要
-- 子 Agent 预期输出：visual_elements.json
+- 预期输出：visual_elements.json
 
 使用方式：
 1. 运行本脚本生成提示词
-2. 启动子 Agent（coder 类型），传入 ai_vision_prompt.txt 和主题图路径
-3. 子 Agent 阅读图像后，输出严格的 visual_elements.json
+2. 将 ai_vision_prompt.txt 和主题图路径交给视觉模型
+3. 视觉模型阅读图像后，输出严格的 visual_elements.json
 4. 运行 生成设计简报.py --visual-elements visual_elements.json 生成后续文件
 """
 
@@ -33,7 +33,7 @@ except Exception:
 try:
     from image_utils import ensure_thumbnail, estimate_payload_budget, print_payload_budget_warning
 except Exception:
-    # fallback：如果 image_utils 不可用，直接返回原图
+    # image_utils 不可用时直接返回原图。
     def ensure_thumbnail(image_path, max_size=1024):
         return Path(image_path).resolve()
     def estimate_payload_budget(prompt_path=None, image_paths=None, **kwargs):
@@ -47,7 +47,7 @@ def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, s
 
 
 def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment_type: str, season: str) -> str:
-    """构造面向子 Agent 的视觉分析 prompt。"""
+    """构造视觉分析 prompt。"""
     image_lines = [
         f"图 {idx}: {path.resolve()} — {'主参考图' if idx == 1 else '辅助参考图'}"
         for idx, path in enumerate(theme_paths, 1)
@@ -152,7 +152,7 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "",
         "===== 重要约束 =====",
         "- 颜色必须从图像中真实提取，不要编造",
-        "- 提示词必须是英文，可直接用于 AI 图像生成器",
+        "- 提示词必须是英文，可直接用于 Neo AI",
         "- 如果图像中有动物或人物，谨慎建议用途，优先建议用于 motif 而非 texture",
         "- dominant_objects[] 必须包含 grade: S|A|B|C",
         "- dominant_objects[] 必须包含 garment_placement_hint；参考图 geometry 不能直接等同于上身比例",
@@ -175,7 +175,7 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="构造子 Agent 视觉元素提取请求。")
+    parser = argparse.ArgumentParser(description="构造 AI 视觉元素提取请求。")
     parser.add_argument("--theme-image", action="append", default=[], help="主题/参考图像路径。可重复传入多张。")
     parser.add_argument("--theme-images-manifest", default="", help="theme_images_manifest.json 路径（可选，优先使用其中的 images[].path）")
     parser.add_argument("--out", required=True, help="输出目录")
@@ -214,8 +214,7 @@ def main() -> int:
     prompt_path = out_dir / "ai_vision_prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
     
-    # 对示例中的 generated_prompts 也进行过滤（若视觉元素已存在）
-    # 注意：实际过滤应在子 Agent 输出 visual_elements.json 后由调用方处理
+    # 对示例中的 generated_prompts 也进行过滤（若视觉元素已存在）。
 
     payload_budget = estimate_payload_budget(prompt_path, theme_thumbs)
     request_summary = {
@@ -237,14 +236,14 @@ def main() -> int:
         "season": args.season,
         "user_prompt": args.user_prompt,
         "payload_budget": payload_budget,
-        "kimi_input_note": "只把 theme_image/theme_images 中的 Kimi 缩略图传给子 Agent，不要传原图或 base64。",
+        "kimi_input_note": "只把 theme_image/theme_images 中的 Kimi 缩略图传给视觉模型，不要传原图或 base64。",
     }
     request_path = out_dir / "ai_vision_request.json"
     request_path.write_text(json.dumps(request_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(json.dumps({
         "视觉分析请求摘要": str(request_path.resolve()),
-        "子Agent提示词": str(prompt_path.resolve()),
+        "AI视觉提示词": str(prompt_path.resolve()),
         "主题图路径": str(theme_thumbs[0].resolve()),
         "主题图数量": len(theme_thumbs),
         "主题图列表": [str(path.resolve()) for path in theme_thumbs],

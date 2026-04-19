@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-从主题图创建商业成衣设计简报、风格档案、纹理与图案提示词。
+从主题图创建商业成衣设计简报、风格档案和纹理提示词。
 """
 import argparse
 import json
@@ -15,18 +15,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 try:
     from prompt_sanitizer import sanitize_prompt, sanitize_prompts_in_dict
 except Exception:
-    # fallback: 如果导入失败，定义兼容空函数
+    # 导入失败时使用空过滤函数。
     def sanitize_prompt(text, domain="generic"):
         return text
     def sanitize_prompts_in_dict(data, keys=("prompt",), domain="generic"):
         return data
 
-from prompt_blocks import (
-    FRONT_EFFECT_NEGATIVE_EN,
-    board_negative_prompt_en,
-    build_collection_board_prompt_en,
-    build_collection_board_prompt_zh,
-)
+from prompt_blocks import build_collection_board_prompt_en, FRONT_EFFECT_NEGATIVE_EN
 
 
 def rgb_to_hex(rgb: tuple[int, int, int]) -> str:
@@ -69,7 +64,7 @@ def infer_motifs(user_prompt: str, theme_name: str) -> list[str]:
         ("river", "柔和水波"),
         ("stream", "柔和水波"),
         ("cottage", "温暖小屋花园氛围"),
-        ("animal", "仅在明确批准为图案时才使用动物元素"),
+        ("animal", "仅在明确作为图案元素时才使用动物元素"),
     ]
     for key, label in candidates:
         if key in text and label not in motifs:
@@ -80,67 +75,6 @@ def infer_motifs(user_prompt: str, theme_name: str) -> list[str]:
 def write_json(path: Path, payload: dict) -> Path:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
-
-
-def generate_prompt_variants(base_prompt: str, count: int = 3) -> list[str]:
-    """基于一个基础提示词生成多个措辞变体。
-
-    策略：
-    1. 主变体 = 原始提示词
-    2. 变体A = 调整密度描述（low noise → very subtle texture 等）
-    3. 变体B = 调整媒介/质感描述（watercolor → hand-painted gouache 等）
-    """
-    if not base_prompt:
-        return [""] * count
-    variants = [base_prompt]
-
-    # 密度/空间替换词表
-    density_swaps = [
-        ("low noise", "very subtle texture"),
-        ("lots of negative space", "generous breathing room"),
-        ("tiny scattered", "small clustered"),
-        ("medium density", "light airy pattern"),
-        ("abundant negative space", "plenty of quiet ground"),
-    ]
-
-    # 媒介/质感替换词表
-    texture_swaps = [
-        ("watercolor", "hand-painted gouache"),
-        ("seamless tileable", "continuous repeat"),
-        ("soft fading edges", "gentle blurred boundaries"),
-        ("paper grain", "canvas texture"),
-    ]
-
-    # 变体A：密度调整
-    v1 = base_prompt
-    for old, new in density_swaps:
-        if old.lower() in v1.lower():
-            v1 = v1.replace(old, new)
-            break
-    if v1 != base_prompt:
-        variants.append(v1)
-
-    # 变体B：质感调整
-    v2 = base_prompt
-    for old, new in texture_swaps:
-        if old.lower() in v2.lower():
-            v2 = v2.replace(old, new)
-            break
-    if v2 != base_prompt and v2 not in variants:
-        variants.append(v2)
-
-    # 如果变体不足，用更保守的改写补充
-    while len(variants) < count:
-        # 简单改写：调整形容词强度
-        extra = base_prompt.replace("very ", "extremely ").replace("delicate ", "fine ")
-        if extra not in variants:
-            variants.append(extra)
-        else:
-            variants.append(base_prompt)
-
-    # 过滤停用词和禁用词
-    variants = [sanitize_prompt(v, domain="fashion") for v in variants]
-    return variants[:count]
 
 
 def main() -> int:
@@ -156,17 +90,17 @@ def main() -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 如果提供了 visual_elements.json，基于子Agent分析结果生成所有文件
+    # 如果提供了 visual_elements.json，基于视觉分析结果生成所有文件。
     if args.visual_elements:
         ve_path = Path(args.visual_elements)
         if ve_path.exists():
-            print(f"[生成设计简报] 使用子Agent视觉元素分析: {ve_path}")
+            print(f"[生成设计简报] 使用视觉元素分析: {ve_path}")
             visual = json.loads(ve_path.read_text(encoding="utf-8"))
             outputs = _generate_from_visual_elements(visual, ve_path, out_dir, args.user_prompt, args.garment_type, args.season)
             print(json.dumps(outputs, ensure_ascii=False, indent=2))
             return 0
         else:
-            print(f"[警告] visual_elements 文件不存在: {ve_path}，回退到图像分析模式。")
+            print(f"[警告] visual_elements 文件不存在: {ve_path}，改用图像分析模式。")
 
     theme_path = Path(args.theme) if args.theme else None
     if not theme_path or not theme_path.exists():
@@ -192,7 +126,7 @@ def main() -> int:
 
 
 def _generate_from_visual_elements(visual: dict, ve_path: Path, out_dir: Path, user_prompt: str, garment_type: str, season: str) -> dict:
-    """基于子Agent输出的 visual_elements.json 生成所有设计文件。"""
+    """基于 visual_elements.json 生成所有设计文件。"""
     palette = visual.get("palette", {})
     style = visual.get("style", {})
     prompts = visual.get("generated_prompts", {})
@@ -271,7 +205,7 @@ def _generate_outputs(
     # 强制兜底：has_nap=true 时 nap_direction 不能为空
     if has_nap and not nap_direction:
         nap_direction = "vertical"
-        print(f"[警告] visual_elements 中 has_nap=true 但 nap_direction 为空，已强制兜底为 'vertical'。请检查子 Agent 输出是否遵循 prompt 约束。")
+        print("[警告] visual_elements 中 has_nap=true 但 nap_direction 为空，已设为 'vertical'。请检查视觉分析输出。")
 
     brief = {
         "brief_id": style_id,
@@ -348,7 +282,7 @@ def _generate_outputs(
         return item
 
     # 构建 9 面板提示词（3×3 看板全动态）
-    # 优先使用 generated_prompts（LLM 路径），否则 fallback 到基于 motifs 的模板
+    # 优先使用 generated_prompts；否则基于 motifs 生成模板提示词。
     gp = generated_prompts or {}
     motif_str = ", ".join(motifs[:3]) if motifs else "theme elements"
     medium = style_details.get("medium", "watercolor") if style_details else "watercolor"
@@ -471,74 +405,16 @@ def _generate_outputs(
 
     texture_prompts = {
         "style_id": style_id,
-        "generation_owner": "external_ai_image_model",
+        "generation_owner": "neo_ai",
         "prompts": prompts,
     }
     # 过滤所有 prompt 中的停用词和禁用词
     texture_prompts = sanitize_prompts_in_dict(texture_prompts, domain="fashion")
 
-    motif_prompts = {
-        "style_id": style_id,
-        "generation_owner": "external_ai_image_model",
-        "motifs": [
-            {
-                "motif_id": "hero_motif",
-                "purpose": "单一卖点定位，置于一个 hero 裁片",
-                "prompt": sanitize_prompt(generated_prompts.get("hero_motif", f"isolated foreground transparent PNG cutout placement print motif, simplified {hero_selling_point}, real alpha background, empty transparent pixels around the subject, balanced negative space, soft fading edges, no background, no background art, no colored rectangle, no scene, no text, no watermark"), domain="fashion") if generated_prompts else sanitize_prompt(f"isolated foreground transparent PNG cutout placement print motif, simplified {hero_selling_point}, real alpha background, empty transparent pixels around the subject, balanced negative space, soft fading edges, no background, no background art, no colored rectangle, no scene, no text, no watermark", domain="fashion"),
-                "negative_prompt": "complex background, full scene, poster, text, logo, watermark, faces, multiple subjects, frame, " + FRONT_EFFECT_NEGATIVE_EN,
-            }
-        ],
-    }
-
-    asset_generation_manifest = {
-        "manifest_id": f"{style_id}_asset_generation",
-        "status": "waiting_for_ai_generated_assets",
-        "required_assets": [
-            {"asset_id": "main", "asset_type": "texture", "output_requirement": "无缝可平铺正方形 PNG，至少 1024×1024", "prompt_ref": "texture_prompts.json#main"},
-            {"asset_id": "secondary", "asset_type": "texture", "output_requirement": "无缝可平铺正方形 PNG，至少 1024×1024", "prompt_ref": "texture_prompts.json#secondary"},
-            {"asset_id": "dark_base", "asset_type": "texture", "output_requirement": "无缝可平铺正方形 PNG，至少 1024×1024", "prompt_ref": "texture_prompts.json#dark_base"},
-            {"asset_id": "accent_light", "asset_type": "texture", "output_requirement": "无缝可平铺正方形 PNG，至少 1024×1024", "prompt_ref": "texture_prompts.json#accent_light"},
-            {"asset_id": "accent_mid", "asset_type": "texture", "output_requirement": "无缝可平铺正方形 PNG，至少 1024×1024", "prompt_ref": "texture_prompts.json#accent_mid"},
-            {"asset_id": "solid_quiet", "asset_type": "texture", "output_requirement": "无缝可平铺正方形 PNG，至少 1024×1024", "prompt_ref": "texture_prompts.json#solid_quiet"},
-            {"asset_id": "hero_motif_1", "asset_type": "motif", "output_requirement": "透明 PNG 定位图案，至少 1024px 宽", "prompt_ref": "texture_prompts.json#hero_motif_1"},
-            {"asset_id": "hero_motif_2", "asset_type": "motif", "output_requirement": "透明 PNG 定位图案，至少 1024px 宽", "prompt_ref": "texture_prompts.json#hero_motif_2"},
-            {"asset_id": "trim_motif", "asset_type": "motif", "output_requirement": "透明 PNG 定位图案，至少 1024px 宽", "prompt_ref": "texture_prompts.json#trim_motif"},
-        ],
-        "notes": [
-            "Codex 仅提供提示词与成衣美术指导。",
-            "使用 AI 图像生成器或设计师创建资产，然后将已批准文件列入面料组合.json。",
-            "在面料组合.json 引用真实已批准生成资产之前，不要渲染最终裁片。",
-        ],
-    }
-
-    # 生成每面板的 3 候选变体
-    candidates = {"panels": []}
-    for p in texture_prompts.get("prompts", []):
-        variants = generate_prompt_variants(p.get("prompt", ""), count=3)
-        candidates["panels"].append({
-            "panel_id": p.get("texture_id", ""),
-            "position": p.get("panel", ""),
-            "role": p.get("role", ""),
-            "variants": variants,
-        })
-
-    # ==================== 双源提示词生成 ====================
-    dual_prompts = generate_dual_collection_prompts_programmatic(
-        style_id=style_id,
-        prompts=prompts,
-        style_details=style_details,
-        palette=palette,
-        out_dir=out_dir,
-    )
-
     outputs = {
         "商业设计简报": str(write_json(out_dir / "commercial_design_brief.json", brief).resolve()),
         "风格档案": str(write_json(out_dir / "style_profile.json", style_profile).resolve()),
         "纹理提示词": str(write_json(out_dir / "texture_prompts.json", texture_prompts).resolve()),
-        "图案提示词": str(write_json(out_dir / "motif_prompts.json", motif_prompts).resolve()),
-        "候选提示词": str(write_json(out_dir / "collection_prompt_candidates.json", candidates).resolve()),
-        "资产生成清单": str(write_json(out_dir / "asset_generation_manifest.json", asset_generation_manifest).resolve()),
-        "双源提示词": str(write_json(out_dir / "dual_collection_prompts.json", dual_prompts).resolve()),
     }
     return outputs
 
@@ -548,132 +424,6 @@ def _build_collection_prompt_from_prompts(prompts: list[dict], style: dict) -> s
     逻辑与端到端自动化.py 的 _build_collection_prompt_from_visual_elements 类似。"""
     panel_map = {p.get("texture_id", ""): p.get("prompt", "") for p in prompts}
     return build_collection_board_prompt_en(panel_map, style)
-
-
-# =============================================================================
-# A/B 双风格提示词生成（结构化重定向）
-# =============================================================================
-# A 套 = 商业稳妥款（Mass Production Safe）：低噪、高可穿、安全克制
-# B 套 = 视觉冲击款（Statement / Runway）：更大胆、更高对比、更强叙事
-# =============================================================================
-
-_MASS_PRODUCTION_INJECT = {
-    "main": "low-density tonal leaf repeat, visible but quiet structure, abundant breathing room, highly wearable at retail distance, safe for mass production, no abstract wash",
-    "secondary": "coordinated but very quiet, medium density but still airy, safe for large garment panels, no visual risk",
-    "dark_base": "deep green micro stripe or tiny geometric repeat, crisp woven jacquard structure, controlled low contrast, understated elegance, no atmospheric scene",
-    "accent_light": "tiny scattered elements, very small scale repeating, charming but controlled density, whisper-level presence",
-    "accent_mid": "soft organic lattice, low noise, seamless tileable texture for secondary panels, gentle structure",
-    "solid_quiet": "quiet light-ground micro dot or mini woven repeat, subtle visible textile pattern, low contrast trim or lining function, not plain solid",
-    "hero_motif_1": "isolated foreground hero motif only, real alpha background, no scene, no garden, no foliage behind subject, no rectangular composition, one clear selling point only",
-    "hero_motif_2": "isolated secondary accent motif only, real alpha background, refined brushwork, gentle presence, no scenery",
-    "trim_motif": "isolated small decorative accent motif only, real alpha background, minimal composition, no scenery",
-}
-
-_STATEMENT_INJECT = {
-    "main": "more visible tonal leaf repeat, confident brush rhythm, stronger repeat structure while still wearable, no abstract wash",
-    "secondary": "coordinating with more visible pattern, medium-high density, stronger visual rhythm, bolder expression",
-    "dark_base": "deep rich micro stripe or tiny geometric repeat, crisp jacquard rhythm, visible repeat structure, statement depth without atmosphere or scenery",
-    "accent_light": "scattered elements with more presence, charming and lively, noticeable accent density, playful energy",
-    "accent_mid": "geometric or organic lattice with stronger rhythm, more visible structure, architectural confidence",
-    "solid_quiet": "quiet micro dot or mini woven repeat with subtle tactile structure, low contrast handcrafted trim character, not plain solid",
-    "hero_motif_1": "bold isolated foreground hero motif only, real alpha background, hero-worthy impact, no background art, no scene, no garden, no foliage behind subject",
-    "hero_motif_2": "expressive isolated accent motif only, real alpha background, confident artistic gesture, memorable accent, no scenery",
-    "trim_motif": "isolated decorative accent motif only, real alpha background, confident composition, eye-catching trim detail, no scenery",
-}
-
-
-def _apply_direction_style(prompts: list[dict], inject_map: dict[str, str]) -> list[dict]:
-    """为每个面板 prompt 追加风格导向注入，生成指定方向的变体。
-    注入追加在原有 prompt 末尾，保留主题元素和 palette 约束。"""
-    result = []
-    for p in prompts:
-        tid = p.get("texture_id", "")
-        original = p.get("prompt", "")
-        inject = inject_map.get(tid, "")
-        if inject:
-            # 去重：如果注入文本已存在则不重复追加
-            if inject.lower() not in original.lower():
-                new_prompt = f"{original}, {inject}"
-            else:
-                new_prompt = original
-        else:
-            new_prompt = original
-        result.append({
-            "texture_id": tid,
-            "purpose": p.get("purpose", ""),
-            "prompt": new_prompt,
-            "panel": p.get("panel", ""),
-            "role": p.get("role", ""),
-        })
-    return result
-
-
-def _build_libtv_description_from_prompts(prompts: list[dict], style: dict, direction_note: str = "") -> str:
-    """将 9 面板提示词转换为适合 libtv create_session 的中文自然语言描述。"""
-    panel_map = {p.get("texture_id", ""): p.get("prompt", "") for p in prompts}
-    return build_collection_board_prompt_zh(panel_map, style, direction_note=direction_note)
-
-
-def generate_dual_collection_prompts_programmatic(
-    style_id: str,
-    prompts: list[dict],
-    style_details: dict | None,
-    palette: dict,
-    out_dir: Path,
-) -> dict:
-    """程序化生成两套风格分化但主题一致的看板提示词。
-
-    Set A（Mass Production / 商业稳妥款）：
-    - 低噪、高可穿性、安全克制
-    - 适合量产大货，零售距离下安静可穿
-    - 卖点图案单一且克制
-
-    Set B（Statement / 视觉冲击款）：
-    - 更大胆的视觉表现、更强艺术张力
-    - 适合提案、秀场、限量款
-    - 图案密度和视觉重量更高，但仍保持成衣可用性
-    """
-    style = style_details or {}
-
-    # ---- Set A：商业稳妥款 ----
-    prompts_a = _apply_direction_style(prompts, _MASS_PRODUCTION_INJECT)
-    prompt_a = _build_collection_prompt_from_prompts(prompts_a, style)
-    negative_prompt_a = board_negative_prompt_en()
-    prompt_a_file = out_dir / "style_a_collection_prompt.txt"
-    prompt_a_file.write_text(prompt_a, encoding="utf-8")
-
-    # ---- Set B：视觉冲击款 ----
-    prompts_b = _apply_direction_style(prompts, _STATEMENT_INJECT)
-    prompt_b = _build_collection_prompt_from_prompts(prompts_b, style)
-    prompt_b_file = out_dir / "style_b_collection_prompt.txt"
-    prompt_b_file.write_text(prompt_b, encoding="utf-8")
-
-    # libtv 描述（中文）
-    description_a = _build_libtv_description_from_prompts(prompts_a, style, direction_note="商业稳妥款，低噪高可穿，适合量产")
-    description_b = _build_libtv_description_from_prompts(prompts_b, style, direction_note="视觉冲击款，更大胆的艺术表现，适合提案或秀场")
-
-    dual_prompts = {
-        "dual_prompt_id": f"{style_id}_dual_v1",
-        "direction_notes": {
-            "set_a": "商业稳妥款（Mass Production Safe）：低噪、高可穿、安全克制，适合量产大货",
-            "set_b": "视觉冲击款（Statement / Runway）：更大胆、更高对比、更强叙事，适合提案或秀场",
-        },
-        "style_a": {
-            "source": "neo",
-            "direction": "mass_production",
-            "prompt": prompt_a,
-            "negative_prompt": negative_prompt_a,
-            "prompt_file": str(prompt_a_file.resolve()),
-        },
-        "style_b": {
-            "source": "libtv",
-            "direction": "statement",
-            "description": description_b,
-            "prompt_file": str(prompt_b_file.resolve()),
-            "note": "由后端 Agent 自主选模型和写 prompt，用户侧仅传需求描述",
-        },
-    }
-    return dual_prompts
 
 
 if __name__ == "__main__":
