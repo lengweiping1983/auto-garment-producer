@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from image_utils import ensure_thumbnail
+from prompt_blocks import COMMERCIAL_FILL_RULES_ZH, STRICT_JSON_ONLY_ZH
 try:
     from template_loader import normalize_piece_asset_paths, relative_json_metadata_path
 except Exception:
@@ -283,18 +284,8 @@ def build_production_plan_prompt(
     lines.extend([
         "",
         "--- 填充规则 ---",
-        "  1. 同 symmetry_group / same_shape_group 的 base 层必须完全相同。",
-        "  2. 仅允许 1 个 hero overlay（motif），trim 禁用 motif。",
-        "  3. trim 区域 base 用 quiet solid 或 subtle dark texture。",
-        "  4. 每个裁片提供 reason（中文解释）。",
-        "  5. 纹理方向自主决定，不要硬套规则。",
-        "  6. 可声明 intentional_asymmetry: true 保留有意不对称。",
-        "",
-        "--- 审美原则 ---",
-        "  - 可穿性优先，大身低噪，hero 醒目但不突兀。",
-        "  - 避免叙事插画被切割到裁片中。",
-        "  - 优秀设计 = 1个卖点 + 安静支持纹理 + 克制饰边。",
-        "  - 大身裁片低对比度，零售距离可穿。",
+        "  " + "；".join(COMMERCIAL_FILL_RULES_ZH) + "。",
+        "  纹理方向自主决定；可声明 intentional_asymmetry: true 保留有意不对称。",
         "",
     ])
 
@@ -326,44 +317,27 @@ def build_production_plan_prompt(
         solid_count = len(solid_assets)
         if source_count >= 2:
             strategy_lines = [
-                f"你需要生成 {max_schemes} 套不同的设计方案（schemes）。每套方案必须有明确的商业定位差异，并且都达到专业成衣打样水准。",
-                "",
-                f"当前拥有两套差异化 3×3 看板资产（源A + 源B），合计 {image_asset_count} 个图片资产，另有 {solid_count} 个派生纯色。请把它们视为一个完整的可组合素材库，而不是两套互斥方案。",
-                "核心要求：每一套 scheme 都必须重新从完整资产池中判断 base、secondary、accent、hero、trim 的最佳组合。",
-                "严禁先选定 4 个或少数候选资产，再只在这个小范围内交换位置；这会损失多样性，不符合本任务目标。",
-                "允许出现全 A、全 B、A/B 混合、同源内变化等结果，但它们只能是你基于完整资产池审美判断后自然得出的组合，不能作为预设模板。",
-                "",
-                "组合规则：",
-                "  - 方案之间必须有实质差异，不能只是交换袖口、下摆或小面积 trim。",
-                "  - portfolio 层面至少覆盖：安全量产、强视觉卖点、深色高级、轻量呼吸感、局部点缀、年轻化/秀场感等不同商业方向。",
-                "  - 不追求机械使用所有资产；低质、不适合上身或破坏系列感的资产可以不用，但必须在 asset_coverage.unused_assets 中说明原因。",
-                "  - 每套方案仍必须遵守硬规则：同 symmetry_group / same_shape_group 的 base 一致，最多 1 个 hero overlay，trim 禁用 motif，每个裁片必须有 reason。",
-                "  - piece_fill_plan 中的 base.texture_id / overlay.motif_id / solid_id 必须使用真实存在的资产 ID，例如 main_a、main_b、hero_motif_1_a、hero_motif_1_b、quiet_solid_a 等。",
+                f"生成 {max_schemes} 套 schemes。资产池含 A/B 两源 {image_asset_count} 个图片资产 + {solid_count} 个纯色，必须从完整资产池重新判断组合。",
+                "方案之间要有实质差异，覆盖安全量产、强卖点、深色高级、轻量呼吸、局部点缀、年轻化/秀场感等方向。",
+                "允许全A、全B、A/B混合；不用低质资产可以，但在 asset_coverage.unused_assets 说明原因。",
+                "所有 asset id 必须真实存在，例如 main_a、main_b、hero_motif_1_a、quiet_solid_b。",
             ]
         else:
             # 单源情况（1 套或 0 套有后缀都 fallback 为单源）：从 9 个资产中组合多套方案
             source_label = "源A" if has_a else "源B" if has_b else "当前可用"
             source_tag_note = "资产 ID 带 _a 后缀" if has_a else "资产 ID 带 _b 后缀" if has_b else "使用原始资产 ID（无后缀）"
             strategy_lines = [
-                f"你需要生成 {max_schemes} 套不同的设计方案（schemes）。每套方案必须有明确的商业定位差异，并且都达到专业成衣打样水准。",
-                "",
-                f"当前只有一套 3×3 看板资产（{source_label}，{source_tag_note}），合计 {image_asset_count} 个图片资产，另有 {solid_count} 个派生纯色。请把所有资产视为一个完整素材库来探索组合。",
-                "核心要求：每一套 scheme 都必须重新从完整资产池中判断 base、secondary、accent、hero、trim 的最佳组合。",
-                "严禁先选定少数候选资产，再只在这个小范围内交换位置；这会损失多样性，不符合本任务目标。",
-                "",
-                "组合规则：",
-                "  - 方案之间必须有实质差异，不能只是交换袖口、下摆或小面积 trim。",
-                "  - portfolio 层面至少覆盖：安全量产、强视觉卖点、深色高级、轻量呼吸感、局部点缀、年轻化/秀场感等不同商业方向。",
-                "  - 不追求机械使用所有资产；低质、不适合上身或破坏系列感的资产可以不用，但必须在 asset_coverage.unused_assets 中说明原因。",
-                "  - 每套方案仍必须遵守硬规则：同 symmetry_group / same_shape_group 的 base 一致，最多 1 个 hero overlay，trim 禁用 motif，每个裁片必须有 reason。",
-                "  - 即使是同一套资产，不同的 base/overlay/scale/rotation/anchor/负空间策略也能产生截然不同的商业效果。",
+                f"生成 {max_schemes} 套 schemes。当前为单源资产（{source_label}，{source_tag_note}）：{image_asset_count} 个图片资产 + {solid_count} 个纯色。",
+                "每套都从完整资产池重新判断 base/secondary/accent/hero/trim；差异不能只靠交换小面积 trim。",
+                "覆盖安全量产、强卖点、深色高级、轻量呼吸、局部点缀、年轻化/秀场感等方向。",
+                "不用低质资产可以，但在 asset_coverage.unused_assets 说明原因。",
             ]
 
         lines.extend(["", "===== 多方案策略指导 ====="] + strategy_lines + [""])
 
     lines.extend([
         "===== 输出格式 =====",
-        "请返回严格的 JSON，格式如下（不要任何解释文字、不要 markdown 代码块，只返回纯 JSON）：",
+        STRICT_JSON_ONLY_ZH + " 格式如下：",
         "",
     ])
 
@@ -372,77 +346,29 @@ def build_production_plan_prompt(
             "schemes": [
                 {
                     "scheme_id": "scheme_01",
-                    "design_positioning": "量产安全款 / 精品陈列款 / 年轻潮流款 / 度假系列款等",
-                    "strategy_note": "从完整资产池独立判断后的组合策略，不是预设模板",
-                    "asset_mix_summary": {
-                        "body_base_assets": ["main_a"],
-                        "secondary_assets": ["accent_mid_b"],
-                        "hero_assets": ["hero_motif_1_a"],
-                        "trim_assets": ["quiet_solid_b"],
-                        "reason": "说明为什么这些资产在本方案中形成专业组合"
-                    },
+                    "design_positioning": "量产安全款 / 精品陈列款 / 年轻潮流款等",
+                    "strategy_note": "从完整资产池独立判断后的组合策略",
+                    "asset_mix_summary": {"body_base_assets": ["main_a"], "hero_assets": ["hero_motif_1_a"], "trim_assets": ["quiet_solid_b"], "reason": "..."},
                     "diversity_tags": ["quiet_body", "bold_hero", "accent_trim"],
-                    "garment_map": {
-                        "pieces": [
-                            {
-                                "piece_id": "piece_001",
-                                "garment_role": "front_body",
-                                "zone": "body",
-                                "symmetry_group": "sg_front",
-                                "same_shape_group": "",
-                                "texture_direction": "transverse",
-                                "confidence": 0.88,
-                                "needs_ai_review": False
-                            }
-                        ]
-                    },
+                    "garment_map": {"pieces": [{"piece_id": "piece_001", "garment_role": "front_body", "zone": "body", "symmetry_group": "sg_front", "same_shape_group": "", "texture_direction": "transverse", "confidence": 0.88, "needs_ai_review": False}]},
                     "piece_fill_plan": {
                         "pieces": [
                             {
                                 "piece_id": "piece_001",
-                                "base": {
-                                    "fill_type": "texture",
-                                    "texture_id": "main_a",
-                                    "scale": 1.0,
-                                    "rotation": 0,
-                                    "offset_x": 0,
-                                    "offset_y": 0,
-                                    "mirror_x": False,
-                                    "mirror_y": False
-                                },
-                                "overlay": {
-                                    "fill_type": "motif",
-                                    "motif_id": "hero_motif_1_a",
-                                    "anchor": "center",
-                                    "scale": 0.72,
-                                    "opacity": 0.92,
-                                    "offset_x": 0,
-                                    "offset_y": -40
-                                },
+                                "base": {"fill_type": "texture", "texture_id": "main_a", "scale": 1.0, "rotation": 0, "offset_x": 0, "offset_y": 0, "mirror_x": False, "mirror_y": False},
+                                "overlay": {"fill_type": "motif", "motif_id": "hero_motif_1_a", "anchor": "center", "scale": 0.72, "opacity": 0.92, "offset_x": 0, "offset_y": -40},
                                 "trim": None,
                                 "texture_direction": "transverse",
-                                "reason": "前片使用源A主底纹横向铺陈，中心定位源A牡丹图案",
+                                "reason": "中文原因",
                                 "intentional_asymmetry": False
                             }
                         ],
-                        "art_direction": {
-                            "strategy": "单一卖点定位，低噪身片，协调副片，安静饰边",
-                            "hero_piece_ids": ["piece_001"]
-                        }
+                        "art_direction": {"strategy": "单一卖点定位，低噪身片，协调副片，安静饰边", "hero_piece_ids": ["piece_001"]}
                     }
                 }
             ],
-            "portfolio_notes": "说明整组方案如何覆盖不同商业方向，以及如何充分利用完整资产池的优势。",
-            "asset_coverage": {
-                "used_assets": ["main_a", "accent_mid_b", "hero_motif_1_a", "quiet_solid_b"],
-                "unused_assets": [
-                    {
-                        "asset_id": "trim_motif_a",
-                        "reason": "trim 禁用 motif，且该图案不适合大面积上身"
-                    }
-                ],
-                "coverage_strategy": "质量优先，不机械使用全部资产；但每套方案都从完整资产池出发判断。"
-            },
+            "portfolio_notes": "...",
+            "asset_coverage": {"used_assets": ["main_a"], "unused_assets": [{"asset_id": "trim_motif_a", "reason": "..."}], "coverage_strategy": "..."},
             "risk_notes": []
         }, ensure_ascii=False, indent=2))
         lines.append("")
@@ -452,51 +378,22 @@ def build_production_plan_prompt(
         lines.append(json.dumps({
             "garment_map": {
                 "pieces": [
-                    {
-                        "piece_id": "piece_001",
-                        "garment_role": "front_body",
-                        "zone": "body",
-                        "symmetry_group": "sg_front",
-                        "same_shape_group": "",
-                        "texture_direction": "transverse",
-                        "confidence": 0.88,
-                        "needs_ai_review": False
-                    }
+                    {"piece_id": "piece_001", "garment_role": "front_body", "zone": "body", "symmetry_group": "sg_front", "same_shape_group": "", "texture_direction": "transverse", "confidence": 0.88, "needs_ai_review": False}
                 ]
             },
             "piece_fill_plan": {
                 "pieces": [
                     {
                         "piece_id": "piece_001",
-                        "base": {
-                            "fill_type": "texture",
-                            "texture_id": "main",
-                            "scale": 1.0,
-                            "rotation": 0,
-                            "offset_x": 0,
-                            "offset_y": 0,
-                            "mirror_x": False,
-                            "mirror_y": False
-                        },
-                        "overlay": {
-                            "fill_type": "motif",
-                            "motif_id": "hero_motif_1",
-                            "anchor": "center",
-                            "scale": 0.72,
-                            "opacity": 0.92,
-                            "offset_x": 0,
-                            "offset_y": -40
-                        },
+                        "base": {"fill_type": "texture", "texture_id": "main", "scale": 1.0, "rotation": 0, "offset_x": 0, "offset_y": 0, "mirror_x": False, "mirror_y": False},
+                        "overlay": {"fill_type": "motif", "motif_id": "hero_motif_1", "anchor": "center", "scale": 0.72, "opacity": 0.92, "offset_x": 0, "offset_y": -40},
                         "trim": None,
                         "texture_direction": "transverse",
-                        "reason": "前片使用主底纹横向铺陈，中心定位牡丹图案",
+                        "reason": "中文原因",
                         "intentional_asymmetry": False
                     }
                 ],
-                "art_direction": {
-                    "strategy": "单一卖点定位，低噪身片，协调副片，安静饰边",
-                    "hero_piece_ids": ["piece_001"]
-                }
+                "art_direction": {"strategy": "单一卖点定位，低噪身片，协调副片，安静饰边", "hero_piece_ids": ["piece_001"]}
             },
             "risk_notes": []
         }, ensure_ascii=False, indent=2))

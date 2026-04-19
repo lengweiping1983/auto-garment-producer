@@ -170,6 +170,25 @@ def validate_collection_board_shape(board_path: Path) -> dict:
     }
 
 
+def _clean_libtv_output_dir(output_dir: Path) -> None:
+    """Remove stale libtv board artifacts before a new flat-directory run."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    patterns = [
+        "collection_board_*.png",
+        "collection_board_*.jpg",
+        "collection_board_*.jpeg",
+        "collection_board_*.webp",
+    ]
+    for pattern in patterns:
+        for path in output_dir.glob(pattern):
+            if path.is_file():
+                path.unlink()
+    for name in ("metadata.json", "libtv_collection_prompt.txt"):
+        path = output_dir / name
+        if path.is_file():
+            path.unlink()
+
+
 class DualBoardGenerator:
     """双源看板生成器：并行调用 Neo AI 和 libtv。"""
 
@@ -498,10 +517,9 @@ class DualBoardGenerator:
     # libtv
     # ------------------------------------------------------------------
     def run_libtv(self, description: str) -> Path:
-        """调用 libtv-skill 的稳定入口生成看板，并只读取本次 run 目录产物。"""
-        run_id = f"run_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{int(time.time() * 1000) % 100000}"
-        libtv_out_dir = self.out_dir / "libtv_collection_board" / run_id
-        libtv_out_dir.mkdir(parents=True, exist_ok=True)
+        """调用 libtv-skill 的稳定入口生成看板，并只读取本次目录产物。"""
+        libtv_out_dir = self.out_dir / "libtv_collection_board"
+        _clean_libtv_output_dir(libtv_out_dir)
         prompt_file = libtv_out_dir / "libtv_collection_prompt.txt"
         prompt_file.write_text(description, encoding="utf-8")
 
@@ -592,18 +610,6 @@ class DualBoardGenerator:
             stdout=_truncate(proc.stdout),
         )
         print(f"[libtv] 看板已生成: {board_path}")
-
-        # ---- 清理历史 run 目录：只保留本次成功的 run ----
-        libtv_parent = libtv_out_dir.parent
-        if libtv_parent.exists():
-            for old_dir in libtv_parent.glob("run_*"):
-                if old_dir.is_dir() and old_dir.name != run_id:
-                    try:
-                        import shutil
-                        shutil.rmtree(old_dir)
-                        print(f"[libtv] 清理历史 run 目录: {old_dir.name}")
-                    except Exception as exc:
-                        print(f"[libtv] 清理历史目录失败 {old_dir.name}: {exc}")
 
         return board_path.resolve()
 

@@ -24,6 +24,9 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from prompt_blocks import build_collection_board_prompt_en, STRICT_JSON_ONLY_ZH
+
 
 def load_json(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -55,14 +58,10 @@ def build_selection_prompt(candidates: dict, brief: dict, style_profile: dict) -
 
     lines.extend([
         "",
-        "===== 选择原则（必读） =====",
-        "1. 9 个面板必须看起来像同一个设计师的同一系列作品，palette、brush style、paper texture 完全一致",
-        "2. Row 1（底纹）和 Row 2（辅纹）应强调 seamless tileable、low noise、可平铺",
-        "3. Row 3（定位图案）应有 plain light background、soft fading edges、适合背景去除",
-        "4. 整体颜色必须协调，不能出现面板间颜色冲突或跳色",
-        "5. 优先选择含 'low noise'、'lots of negative space'、'quiet'、'subtle' 等可穿性关键词的变体",
-        "6. 避免选择含 'dense'、'busy'、'high contrast'、'overcrowded'、'harsh' 等不可穿描述的变体",
-        "7. 9 个面板的复杂度应呈梯度：Row1 最安静 → Row2 中等 → Row3 最具体（定位图案）",
+        "===== 选择原则 =====",
+        "同一系列感优先：palette、brush style、paper texture 一致。",
+        "Row1/Row2 选择可平铺、低噪、可穿变体；Row3 选择浅底、边缘柔和、适合去背景的定位图案。",
+        "避免 dense/busy/high contrast/overcrowded/harsh，除非用户明确要视觉冲击款。",
         "",
         "===== 候选面板（9 panels × 3 variants）=====",
     ])
@@ -78,20 +77,14 @@ def build_selection_prompt(candidates: dict, brief: dict, style_profile: dict) -
     lines.extend([
         "",
         "===== 输出格式 =====",
-        "请返回严格的 JSON，不要任何解释文字、不要 markdown 代码块，只返回纯 JSON：",
+        STRICT_JSON_ONLY_ZH,
         "",
         json.dumps({
             "selected_variants": [
-                {
-                    "panel_id": "main",
-                    "variant_index": 1,
-                    "reason": "低噪底纹与整体 pale ivory 色板最协调，abundant negative space 确保可穿性"
-                }
+                {"panel_id": "main", "variant_index": 1, "reason": "低噪、同色板、适合大身"}
             ],
-            "overall_strategy": "一句话总结你的选择策略和审美判断",
-            "coordination_notes": [
-                "如果发现某两个面板颜色冲突，在此说明"
-            ]
+            "overall_strategy": "一句话策略",
+            "coordination_notes": []
         }, ensure_ascii=False, indent=2),
         "",
         "要求：",
@@ -133,33 +126,7 @@ def build_collection_prompt_from_selection(candidates: dict, selected: dict, sty
         else:
             panel_prompts[pid] = ""
 
-    lines = [
-        "Create a 3x3 commercial textile collection board, nine coordinated fabric panels arranged in a clean equal grid with thin white gutters between all panels, all inside one square image. Absolutely no text, no labels, no captions, no titles, no words, no letters, no typography, no descriptions anywhere in the image.",
-        "",
-        f"Overall art direction: {style.get('overall_impression', 'Elegant commercial textile collection')}. {style.get('mood', 'Quiet and wearable')}. {style.get('medium', 'Watercolor')}. Low contrast, highly wearable, refined hand-painted brush language, graceful breathing space, not busy, cohesive as one fashion print suite.",
-        "",
-        "Row 1 — Base textures for large garment panels (seamless tileable):",
-        f"Top-left: {panel_prompts.get('main', 'pale base with faint pattern, very low noise, lots of negative space, no text')}",
-        f"Top-center: {panel_prompts.get('secondary', 'coordinated medium-density pattern on light ground, same palette, no text')}",
-        f"Top-right: {panel_prompts.get('dark_base', 'deep dark ground with very subtle texture, quiet and minimal, no text')}",
-        "",
-        "Row 2 — Mid-scale accent textures (seamless tileable):",
-        f"Middle-left: {panel_prompts.get('accent_light', 'tiny scattered small-scale pattern on light ground, charming but controlled, no text')}",
-        f"Middle-center: {panel_prompts.get('accent_mid', 'soft geometric or organic lattice on pale ground, same palette, seamless tileable texture for secondary panels, no text')}",
-        f"Middle-right: {panel_prompts.get('solid_quiet', 'quiet warm solid with only subtle paper grain, no pattern, calm and minimal, seamless tileable solid texture for quiet trim or lining, no text')}",
-        "",
-        "Row 3 — Placement motifs and hero elements (plain backgrounds for background removal):",
-        f"Bottom-left: {panel_prompts.get('hero_motif_1', 'a single elegant main subject centered in a delicate decorative frame, plain light background, soft fading edges, balanced negative space, designed as a placement print element, no text')}",
-        f"Bottom-center: {panel_prompts.get('hero_motif_2', 'a secondary accent subject, centered, plain light background, refined brushwork, designed as a placement accent motif, no text')}",
-        f"Bottom-right: {panel_prompts.get('trim_motif', 'a small delicate decorative accent, minimal composition, plain warm background, designed as a trim detail placement element, no text')}",
-        "",
-        "All nine panels must look like one coordinated textile collection by the same fashion print designer, identical palette, identical paper texture, identical hand-painted brush style, identical commercial apparel mood.",
-        "",
-        "No animals other than approved subjects, no characters, no faces, no people, no text, no logo, no watermark, no house, no river, no full landscape scene, no poster composition, no sticker sheet, no harsh black outlines, no dense confetti, no neon colors, no muddy dark colors, no gradient backgrounds inside individual panels.",
-        "",
-        "Row 1 and Row 2 panels should be seamless tileable textile swatches usable as fabric repeats. Row 3 panels should be clean placement motifs with plain light backgrounds suitable for background removal.",
-    ]
-    return "\n".join(lines)
+    return build_collection_board_prompt_en(panel_prompts, style)
 
 
 def main() -> int:

@@ -27,13 +27,11 @@ from PIL import Image, ImageColor, ImageEnhance, ImageFilter, ImageStat
 SKILL_DIR = Path(__file__).resolve().parents[1]
 NEO_AI_SCRIPT = SKILL_DIR.parent / "neo-ai" / "scripts" / "generate_texture_collection_board.py"
 
-FRONT_EFFECT_NEGATIVE_PROMPT = (
-    "no garment mockup, no front-view clothing render, no fashion model, no mannequin, "
-    "no person wearing garment, no on-body render, no T-shirt mockup, no product photo, no lookbook"
-)
-
 # 导入模板加载器（用于多尺寸自动渲染）
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
+from prompt_blocks import FRONT_EFFECT_NEGATIVE_EN, build_collection_board_prompt_en
+
+FRONT_EFFECT_NEGATIVE_PROMPT = FRONT_EFFECT_NEGATIVE_EN
 try:
     from template_loader import (
         load_size_mappings,
@@ -393,35 +391,7 @@ def _build_collection_prompt_from_visual_elements(out_dir: Path, visual_elements
 
     style = ve.get("style", {})
 
-    # 9 面板全部从 prompts 字典读取，fallback 为兜底模板（确保任何情况下都有内容）
-    lines = [
-        "Create a 3x3 commercial textile collection board, nine coordinated fabric panels arranged in a clean equal grid with thin white gutters between all panels, all inside one square image. Absolutely no text, no labels, no captions, no titles, no words, no letters, no typography, no descriptions anywhere in the image.",
-        "",
-        f"Overall art direction: {style.get('overall_impression', 'Elegant commercial textile collection')}. {style.get('mood', 'Quiet and wearable')}. {style.get('medium', 'Watercolor')}. Low contrast, highly wearable, refined hand-painted brush language, graceful breathing space, not busy, cohesive as one fashion print suite.",
-        "",
-        "Row 1 — Base textures for large garment panels (seamless tileable):",
-        f"Top-left: {prompts.get('main', 'pale base with faint pattern, very low noise, lots of negative space, no text')}",
-        f"Top-center: {prompts.get('secondary', 'coordinated medium-density pattern on light ground, same palette, no text')}",
-        f"Top-right: {prompts.get('dark_base', 'deep dark ground with very subtle texture, quiet and minimal, no text')}",
-        "",
-        "Row 2 — Mid-scale accent textures (seamless tileable):",
-        f"Middle-left: {prompts.get('accent_light', 'tiny scattered small-scale pattern on light ground, charming but controlled, no text')}",
-        f"Middle-center: {prompts.get('accent_mid', 'soft geometric or organic lattice on pale ground, same palette, seamless tileable texture for secondary panels, no text')}",
-        f"Middle-right: {prompts.get('solid_quiet', 'quiet warm solid with only subtle paper grain, no pattern, calm and minimal, seamless tileable solid texture for quiet trim or lining, no text')}",
-        "",
-        "Row 3 — Placement motifs and hero elements (plain backgrounds for background removal):",
-        f"Bottom-left: {prompts.get('hero_motif_1', 'a single elegant main subject centered in a delicate decorative frame, plain light background, soft fading edges, balanced negative space, designed as a placement print element, no text')}",
-        f"Bottom-center: {prompts.get('hero_motif_2', 'a secondary accent subject, centered, plain light background, refined brushwork, designed as a placement accent motif, no text')}",
-        f"Bottom-right: {prompts.get('trim_motif', 'a small delicate decorative accent, minimal composition, plain warm background, designed as a trim detail placement element, no text')}",
-        "",
-        "All nine panels must look like one coordinated textile collection by the same fashion print designer, identical palette, identical paper texture, identical hand-painted brush style, identical commercial apparel mood.",
-        "",
-        "No animals other than approved subjects, no characters, no faces, no people, no text, no logo, no watermark, no house, no river, no full landscape scene, no poster composition, no sticker sheet, no harsh black outlines, no dense confetti, no neon colors, no muddy dark colors, no gradient backgrounds inside individual panels.",
-        FRONT_EFFECT_NEGATIVE_PROMPT + ".",
-        "",
-        "Row 1 and Row 2 panels should be seamless tileable textile swatches usable as fabric repeats. Row 3 panels should be clean placement motifs with plain light backgrounds suitable for background removal.",
-    ]
-    return "\n".join(lines)
+    return build_collection_board_prompt_en(prompts, style)
 
 
 def validate_board_colors(board_path: Path, palette: dict, threshold: int = 80) -> list[dict]:
@@ -1732,63 +1702,143 @@ def main() -> int:
     if not args.commercial_review and args.mode != "fast":
         print("[模式] 商业复审已关闭")
 
-    out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # ---- 输出目录自动隔离：防止新任务覆盖旧目录 ----
-    def _compute_task_fingerprint() -> str:
-        """基于当前 CLI 原始输入计算任务指纹（排除中间产物路径）。"""
-        parts = []
-        # 主题图（原始输入）
-        for t in (args.theme_images or []):
-            parts.append(file_sha256(t))
-        # 纸样（原始输入）
-        if args.pattern:
-            parts.append(file_sha256(args.pattern))
-        # 视觉元素（原始输入）
-        if args.visual_elements:
-            parts.append(file_sha256(args.visual_elements))
-        # 服装类型与模式
-        parts.append(args.garment_type or "")
-        parts.extend([args.mode, str(args.dual_source), str(args.multi_scheme)])
-        return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
-
     import re
-    fingerprint_path = out_dir / ".task_fingerprint.json"
-    need_new_subdir = False
-    # 如果目录名已经是时间戳格式（如 20260419_110639），视为已隔离，不再嵌套
-    is_timestamp_dir = bool(re.match(r"^\d{8}_\d{6}$", out_dir.name))
 
-    if not is_timestamp_dir and out_dir.exists() and any(out_dir.iterdir()):
-        existing_fp = ""
-        if fingerprint_path.exists():
+    # 主题图输入归一化前，先保存 CLI 原始值，用于稳定 task key。
+    raw_theme_images = list(args.theme_image or [])
+    raw_theme_images_extra = args.theme_images
+
+    def _is_timestamp_dir(path: Path) -> bool:
+        return bool(re.match(r"^\d{8}_\d{6}$", path.name))
+
+    def _split_identity_values(value) -> list[str]:
+        if not value:
+            return []
+        if isinstance(value, (list, tuple)):
+            values = []
+            for item in value:
+                values.extend(_split_identity_values(item))
+            return values
+        text = str(value).strip()
+        if not text:
+            return []
+        if text.startswith("data:image/") or re.match(r"^https?://", text) or text.startswith("file://"):
+            return [text]
+        return [part.strip().strip("'\"") for part in re.split(r"[\n,;]", text) if part.strip()]
+
+    def _identity_for_value(value: str) -> str:
+        if not value:
+            return ""
+        path = Path(value).expanduser()
+        if path.exists() and path.is_file():
+            return f"file:{path.resolve()}:{file_sha256(path)}"
+        if path.exists() and path.is_dir():
+            images = sorted(
+                p for p in path.iterdir()
+                if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+            )
+            digest_parts = [f"{p.name}:{file_sha256(p)}" for p in images[:20]]
+            return f"dir:{path.resolve()}:{'|'.join(digest_parts)}"
+        if value.startswith("data:image/") or len(value) > 512:
+            return "payload:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+        return "literal:" + value
+
+    def _raw_theme_identity_parts() -> list[str]:
+        values = _split_identity_values(raw_theme_images) + _split_identity_values(raw_theme_images_extra)
+        if not values:
+            for key in (
+                "AUTO_GARMENT_THEME_IMAGE",
+                "AUTO_GARMENT_THEME_IMAGES",
+                "CODEX_THEME_IMAGE",
+                "CODEX_INPUT_IMAGE",
+                "CODEX_INPUT_IMAGES",
+                "CODEX_ATTACHED_IMAGE",
+                "CODEX_ATTACHED_IMAGES",
+                "CODEX_ATTACHED_IMAGE_PATH",
+                "CODEX_ATTACHED_IMAGE_PATHS",
+            ):
+                values.extend(_split_identity_values(os.environ.get(key, "")))
+        return [_identity_for_value(value) for value in values if value]
+
+    def _compute_task_key() -> tuple[str, bool]:
+        """Compute a stable task identity, excluding stage artifacts."""
+        theme_parts = _raw_theme_identity_parts()
+        parts = [
+            "garment_type=" + (args.garment_type or ""),
+            "user_prompt=" + getattr(args, "user_prompt", ""),
+            "pattern=" + (_identity_for_value(args.pattern) if args.pattern else ""),
+            "template=" + (args.template or ""),
+            "template_size=" + (args.template_size or ""),
+            "template_file=" + (_identity_for_value(args.template_file) if args.template_file else ""),
+            "no_template=" + str(bool(args.no_template)),
+            "dual_source=" + str(bool(args.dual_source)),
+            "multi_scheme=" + str(bool(args.multi_scheme)),
+            "max_schemes=" + str(args.max_schemes),
+            "full_set=" + str(bool(args.full_set)),
+        ]
+        parts.extend("theme=" + item for item in theme_parts)
+        has_primary_identity = bool(theme_parts or args.pattern or args.template or args.template_file)
+        return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16], has_primary_identity
+
+    def _next_timestamp_dir(root: Path) -> Path:
+        candidate_time = datetime.datetime.now()
+        for _ in range(120):
+            candidate = root / candidate_time.strftime("%Y%m%d_%H%M%S")
+            if not candidate.exists():
+                return candidate
+            candidate_time += datetime.timedelta(seconds=1)
+        raise RuntimeError(f"无法在 {root} 下创建唯一时间戳输出目录")
+
+    def _resolve_run_output_dir(requested_out: Path) -> tuple[Path, Path | None, str]:
+        task_key, has_primary_identity = _compute_task_key()
+        requested_out = requested_out.expanduser()
+        if _is_timestamp_dir(requested_out):
+            requested_out.mkdir(parents=True, exist_ok=True)
+            print(f"[目录隔离] 使用显式任务目录: {requested_out}")
+            return requested_out, None, task_key
+
+        root = requested_out
+        root.mkdir(parents=True, exist_ok=True)
+        current_path = root / ".current_run.json"
+        current = {}
+        if current_path.exists():
             try:
-                existing_fp = json.loads(fingerprint_path.read_text(encoding="utf-8")).get("fingerprint", "")
+                current = json.loads(current_path.read_text(encoding="utf-8"))
             except Exception:
-                pass
-        current_fp = _compute_task_fingerprint()
-        if existing_fp and existing_fp != current_fp:
-            need_new_subdir = True
-        elif not existing_fp:
-            # 目录非空但没有指纹文件，说明是旧任务遗留，也应隔离
-            need_new_subdir = True
+                current = {}
 
-    if need_new_subdir:
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = out_dir / ts
-        out_dir.mkdir(parents=True, exist_ok=True)
-        print(f"[目录隔离] 检测到旧任务目录，自动创建新子目录: {out_dir}")
+        current_dir = Path(current.get("run_dir", "")) if current.get("run_dir") else None
+        if current_dir and not current_dir.is_absolute():
+            current_dir = root / current_dir
+        can_reuse_current = (
+            current_dir is not None
+            and current_dir.exists()
+            and (
+                current.get("task_key") == task_key
+                or not has_primary_identity
+            )
+        )
+        if can_reuse_current:
+            print(f"[目录隔离] 复用当前任务目录: {current_dir}")
+            return current_dir, current_path, str(current.get("task_key") or task_key)
 
-    # 写入当前指纹
-    fingerprint_path = out_dir / ".task_fingerprint.json"
-    fingerprint_path.write_text(json.dumps({
-        "fingerprint": _compute_task_fingerprint(),
-        "created_at": datetime.datetime.now().isoformat(),
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+        run_dir = _next_timestamp_dir(root)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        current_payload = {
+            "task_key": task_key,
+            "run_dir": run_dir.name,
+            "run_dir_abs": str(run_dir.resolve()),
+            "created_at": datetime.datetime.now().isoformat(),
+            "updated_at": datetime.datetime.now().isoformat(),
+        }
+        current_path.write_text(json.dumps(current_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[目录隔离] 创建新任务目录: {run_dir}")
+        return run_dir, current_path, task_key
+
+    out_dir, current_run_path, task_key = _resolve_run_output_dir(Path(args.out))
 
     # 主题图输入归一化：端到端流程只能消费本地文件。会话附件如果由
     # 客户端/集成以环境变量、URL、base64 或 out/input 目录提供，在这里落成稳定路径。
-    raw_theme_images = list(args.theme_image or [])
     if resolve_theme_images:
         try:
             resolved_themes = resolve_theme_images(
@@ -1816,6 +1866,28 @@ def main() -> int:
     else:
         args.theme_images = raw_theme_images
         args.theme_image = raw_theme_images[0] if raw_theme_images else ""
+
+    # 写入 run 目录指纹；父级 out 只保留 .current_run.json，不写业务产物。
+    fingerprint_path = out_dir / ".task_fingerprint.json"
+    fingerprint_path.write_text(json.dumps({
+        "fingerprint": task_key,
+        "task_key": task_key,
+        "out_root": str(Path(args.out).expanduser().resolve()) if not _is_timestamp_dir(Path(args.out).expanduser()) else "",
+        "run_dir": str(out_dir.resolve()),
+        "created_at": datetime.datetime.now().isoformat(),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    if current_run_path and current_run_path.exists():
+        try:
+            current_payload = json.loads(current_run_path.read_text(encoding="utf-8"))
+        except Exception:
+            current_payload = {}
+        current_payload.update({
+            "task_key": task_key,
+            "run_dir": out_dir.name,
+            "run_dir_abs": str(out_dir.resolve()),
+            "updated_at": datetime.datetime.now().isoformat(),
+        })
+        current_run_path.write_text(json.dumps(current_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # ===== brief 校验 =====
     brief_path = Path(args.brief) if args.brief else None

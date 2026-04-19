@@ -44,159 +44,71 @@ def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, s
 
 def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment_type: str, season: str) -> str:
     """构造面向子 Agent 的视觉分析 prompt。"""
-    image_lines = []
-    for idx, path in enumerate(theme_paths, 1):
-        role = "主参考图（主体优先）" if idx == 1 else "辅助参考图（风格/配色/辅助元素）"
-        image_lines.append(f"图 {idx}: {path.resolve()} — {role}")
+    image_lines = [
+        f"图 {idx}: {path.resolve()} — {'主参考图' if idx == 1 else '辅助参考图'}"
+        for idx, path in enumerate(theme_paths, 1)
+    ]
 
     multi_note = (
-        "本次只有 1 张主题参考图，请按单图流程分析。"
+        "单图：直接分析该主题。"
         if len(theme_paths) == 1
         else (
-            f"本次有 {len(theme_paths)} 张主题参考图。请先逐张观察，再融合为一个商业面料主题系统；"
-            "不要输出多套独立方案。默认图 1 是主参考，其余图用于补充辅助元素、背景色彩、纹理语言和风格。"
+            f"多图：逐张观察后融合为一个商业面料主题系统；不要输出多套方案。"
+            "默认图1为主体，其余补充风格/配色/纹理；用户提示优先。"
         )
     )
+    schema = {
+        "dominant_objects": [
+            {
+                "name": "主体名",
+                "type": "main_subject",
+                "description": "颜色、形态、位置、占比",
+                "suggested_usage": "hero_motif",
+                "source_image_refs": [1],
+                "geometry": {
+                    "pixel_width": 0,
+                    "pixel_height": 0,
+                    "canvas_ratio": 0.0,
+                    "aspect_ratio": 1.0,
+                    "orientation": "vertical|horizontal|radial|symmetric|irregular",
+                    "visual_center": [0.5, 0.5],
+                    "form_type": "short label"
+                }
+            }
+        ],
+        "supporting_elements": [{"name": "元素名", "type": "decoration|background|texture|frame", "description": "...", "source_image_refs": [1]}],
+        "palette": {"primary": ["#hex"], "secondary": ["#hex"], "accent": ["#hex"], "dark": ["#hex"]},
+        "style": {"medium": "", "brush_quality": "", "mood": "", "pattern_density": "low|medium|high", "line_style": "", "overall_impression": ""},
+        "fabric_hints": {"has_nap": False, "nap_confidence": 0.0, "nap_direction": "", "reason": ""},
+        "source_images": [{"index": 1, "path": str(theme_paths[0].resolve()) if theme_paths else "", "role": "primary"}],
+        "image_analyses": [{"image_ref": 1, "dominant_subject_summary": "", "palette_summary": "", "style_summary": ""}],
+        "fusion_strategy": {"primary_reference": 1, "hero_subject_source": [1], "palette_sources": [1], "style_sources": [1], "strategy_note": ""},
+        "generated_prompts": {
+            "main": "English seamless tileable low-noise base texture prompt",
+            "secondary": "English coordinating repeat prompt",
+            "accent": "English small-scale accent repeat prompt",
+            "dark": "English quiet dark trim repeat prompt",
+            "hero_motif": "English centered placement motif on plain light background prompt"
+        }
+    }
     lines = [
-        "你是一位高级服装印花设计分析师和视觉艺术指导。请详细分析附带的主题参考图像，提取所有可用于商业成衣面料设计的视觉元素。",
+        "你是一位高级服装印花设计分析师。观察参考图，提取可用于商业成衣面料的视觉元素，并生成英文图像提示词。",
         "",
         "===== 参考图像 =====",
         multi_note,
         *image_lines,
         "",
-        "===== 分析任务 =====",
+        "===== 任务 =====",
+        "1. dominant_objects: 最突出的1-3个主体；写名称、颜色/形态/位置/占比、source_image_refs、geometry、suggested_usage。",
+        "2. supporting_elements: 边框/背景/纹理/点缀等；标注 source_image_refs。",
+        "3. palette: 从图像真实提取 primary/secondary/accent/dark HEX，不要编造。",
+        "4. style: medium、brush_quality、mood、pattern_density、line_style、overall_impression。",
+        "5. fabric_hints: 判断 has_nap；若 true，nap_direction 必填 vertical/horizontal。关键词含 corduroy/velvet/fleece/suede/plush/毛呢/法兰绒等。",
+        "6. generated_prompts: 生成英文 main/secondary/accent/dark/hero_motif；texture 要 seamless tileable、low noise；motif 要 centered、plain light background、适合去背景。",
         "",
-        "0. 多图融合要求（Multi-reference Fusion）",
-        "   - 如有多张图，必须先分别分析每张图的主体、辅助元素、背景色彩与风格，再合并成一个统一的商业面料方向",
-        "   - dominant_objects 与 supporting_elements 中必须用 source_image_refs 标注来源图编号，如 [1] 或 [1, 2]",
-        "   - 第一张图默认承担主参考/主体优先，其余图片用于补充风格、色彩、背景纹理和辅助图形；若用户提示指定角色，则按用户提示优先",
-        "   - 输出 fusion_strategy，说明多图如何取舍：主卖点、辅助元素、背景色、风格语言如何融合",
-        "",
-        "1. 主体元素（Dominant Objects）",
-        "   - 识别图像中最突出的 1-3 个主体物体",
-        "   - 描述每个主体的：名称、颜色、形态、在画面中的位置与占比",
-        "   - 估算每个主体的像素尺寸（width × height）和画面占比（%）",
-        "   - 判断主体的方向性：vertical（竖向，如直立的花）/ horizontal（横向，如横枝）/ radial（放射形）/ symmetric（对称形）/ irregular（不规则）",
-        "   - 判断该主体适合用作：hero_motif（定位图案）还是 main_texture（底纹元素）",
-        "",
-        "2. 辅助元素（Supporting Elements）",
-        "   - 识别次要装饰：边框、背景纹理、点缀图案、配景物体等",
-        "   - 描述每个辅助元素的：名称、类型（decoration/background/texture/frame）、视觉特征",
-        "",
-        "3. 色彩方案（Palette）",
-        "   - 从图像中提取真实的 4 组色彩：",
-        "     * primary（主色，2-3 个）：画面中最多的颜色，用于大身底纹",
-        "     * secondary（辅色，1-2 个）：协调色，用于袖子/侧片",
-        "     * accent（点缀色，1 个）：小面积亮色，用于细节点缀",
-        "     * dark（深色，1 个）：最深色，用于饰边/袖口/暗部",
-        "   - 每个颜色必须提供 HEX 色值（如 #f3f1df）",
-        "   - 必须从图像中真实提取，不要编造",
-        "",
-        "4. 风格特征（Style）",
-        "   - medium：媒介（水彩/工笔/油画/矢量/摄影/数字绘画/综合媒介等）",
-        "   - brush_quality：笔触特征（如：柔和晕染、清晰勾线、干刷肌理、平滑矢量）",
-        "   - mood：情绪关键词（如：优雅安静、活泼童趣、复古浪漫、清冷现代）",
-        "   - pattern_density：图案密度（low/medium/high）",
-        "   - line_style：线条特征（如：无轮廓、淡墨勾线、硬笔轮廓、渐变边缘）",
-        "   - overall_impression：一句话总体印象",
-        "",
-        "6. 面料工艺推断（Fabric Engineering）",
-        "   根据主题图像的风格关键词和视觉特征，推断面料是否有方向性/绒毛：",
-        "   - has_nap: true/false —— 是否有倒顺毛（灯芯绒、丝绒、植绒、毛呢、法兰绒、麂皮、羊羔绒等）",
-        "   - nap_confidence: 0-1 —— 推断确信度",
-        "   - 触发关键词（中文/英文）：灯芯绒、丝绒、植绒、毛呢、法兰绒、麂皮、羊羔绒、corduroy、velvet、fleece、suede、plush、boiled wool",
-        "   - **如果 has_nap=true，nap_direction 必填，不允许留空**（vertical/horizontal）。绝大多数绒毛面料为经向裁，默认填 vertical。",
-        "   - ⚠️ 如果 has_nap=true 但 nap_direction 为空或未提供，输出将被视为无效，下游程序会强制 fallback 为 vertical。",
-        "",
-        "5. 自动生成面料提示词（Generated Prompts）",
-        "   基于以上分析，为每种面料资产生成英文 AI 图像生成提示词：",
-        "   - main：大面积底纹提示词。要求 seamless tileable、low noise、lots of negative space",
-        "   - secondary：协调辅纹提示词",
-        "   - accent：小型点缀纹提示词",
-        "   - dark：深色饰边底纹提示词",
-        "   - hero_motif：定位图案提示词。要求 plain light background、centered、suitable for background removal",
-        "   所有提示词中必须包含 negative prompt 逻辑：no text, no watermark, no logo, no faces, no animals（除非用户明确要求）",
-        "   ⚠️ 重要约束：生成的英文提示词中不得包含停用词（stop words）和禁用词（banned words）。",
-        "     停用词包括：very, really, quite, beautiful, nice, good, bad, wonderful, fantastic, great, perfect 等模糊修饰词。",
-        "     禁用词包括：任何可能触发内容安全过滤的词汇（暴力、色情、仇恨相关）。",
-        "     提示词应使用具体、可视觉化的描述词，避免主观评价性形容词。",
-        "",
-        "===== 输出格式 =====",
-        "请返回严格的 JSON，格式如下（不要任何解释文字、不要 markdown 代码块，只返回纯 JSON）：",
-        "",
-        json.dumps({
-            "dominant_objects": [
-                {
-                    "name": "蓝牡丹",
-                    "type": "main_subject",
-                    "description": "淡蓝色牡丹花，中心偏深蓝，花瓣边缘柔和晕染，约占画面中心 15%",
-                    "suggested_usage": "hero_motif",
-                    "source_image_refs": [1],
-                    "geometry": {
-                        "pixel_width": 320,
-                        "pixel_height": 480,
-                        "canvas_ratio": 0.15,
-                        "aspect_ratio": 0.67,
-                        "orientation": "vertical",
-                        "visual_center": [0.52, 0.48],
-                        "form_type": "tall_flower"
-                    }
-                }
-            ],
-            "supporting_elements": [
-                {
-                    "name": "卷草边框",
-                    "type": "decoration",
-                    "description": "淡蓝色洛可可卷草纹，环绕主体，线条纤细优雅",
-                    "source_image_refs": [1]
-                }
-            ],
-            "palette": {
-                "primary": ["#f3f1df", "#e8f0f8"],
-                "secondary": ["#a8c4d9"],
-                "accent": ["#2d3f5f"],
-                "dark": ["#1a2530"]
-            },
-            "style": {
-                "medium": "水彩",
-                "brush_quality": "柔和晕染，边缘有纸纹渗透感",
-                "mood": "优雅安静，青花瓷洛可可",
-                "pattern_density": "low",
-                "line_style": "淡墨勾线，无硬笔轮廓",
-                "overall_impression": "淡蓝与象牙白交织的东方洛可可水彩风格"
-            },
-            "fabric_hints": {
-                "has_nap": False,
-                "nap_confidence": 0.3,
-                "nap_direction": "",
-                "reason": "水彩纸张风格，无明显绒毛面料特征。若 has_nap=true，nap_direction 必须提供 vertical 或 horizontal，不允许留空。"
-            },
-            "source_images": [
-                {"index": 1, "path": str(theme_paths[0].resolve()) if theme_paths else "", "role": "primary"}
-            ],
-            "image_analyses": [
-                {
-                    "image_ref": 1,
-                    "dominant_subject_summary": "蓝牡丹与卷草边框",
-                    "palette_summary": "象牙白、浅蓝、深靛蓝",
-                    "style_summary": "柔和水彩纸纹"
-                }
-            ],
-            "fusion_strategy": {
-                "primary_reference": 1,
-                "hero_subject_source": [1],
-                "palette_sources": [1],
-                "style_sources": [1],
-                "strategy_note": "以主图主体作为唯一卖点，将辅助装饰转译为低噪连续纹理"
-            },
-            "generated_prompts": {
-                "main": "seamless tileable commercial textile texture, pale ivory ground with very faint blue peony scrolls, extremely low noise, abundant negative space, watercolor paper grain, no text, no watermark",
-                "secondary": "seamless tileable coordinating textile texture, soft sky-blue ground with delicate blue acanthus scroll pattern, medium density but airy, same watercolor brush style, no text, no watermark",
-                "accent": "seamless tileable small-scale accent pattern, tiny scattered blue floral buds on warm ivory, very small scale repeating pattern, charming but controlled density, no text, no watermark",
-                "dark": "seamless tileable quiet dark trim texture, deep indigo-navy ground with tiny ivory pin-dot texture, very subtle and dark-quiet, no text, no watermark",
-                "hero_motif": "elegant blue peony bloom centered in a delicate scroll frame, plain light ivory background, soft fading edges, balanced negative space, watercolor hand-painted, designed as placement print element, no text, no watermark"
-            }
-        }, ensure_ascii=False, indent=2),
+        "===== 输出 JSON schema =====",
+        "只返回严格 JSON，不要解释文字、不要 markdown 代码块：",
+        json.dumps(schema, ensure_ascii=False, indent=2),
         "",
         "===== 用户上下文 =====",
         f"服装类型: {garment_type}",
@@ -209,7 +121,8 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "- 如果图像中有动物或人物，谨慎建议用途，优先建议用于 motif 而非 texture",
         "- 多张参考图必须融合为同一个主题方向，不要输出多套方案",
         "- 每个主体/辅助元素要标注 source_image_refs，便于后续追溯来源",
-        "- 所有 generated_prompts 的值在输出前必须经过停用词/禁用词过滤",
+        "- generated_prompts 用具体视觉词；避免 very/really/beautiful/nice/good/great/perfect 等空泛词",
+        "- 负向逻辑必须覆盖 no text, no watermark, no logo, no faces；除非用户明确要求，不要动物",
         "- 不要返回任何解释文字，只返回 JSON",
     ]
     return "\n".join(lines)

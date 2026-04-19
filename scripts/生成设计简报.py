@@ -21,14 +21,11 @@ except Exception:
     def sanitize_prompts_in_dict(data, keys=("prompt",), domain="generic"):
         return data
 
-
-FRONT_EFFECT_NEGATIVE_EN = (
-    "no garment mockup, no front-view clothing render, no fashion model, no mannequin, "
-    "no person wearing garment, no on-body render, no T-shirt mockup, no product photo, no lookbook"
-)
-FRONT_EFFECT_NEGATIVE_ZH = (
-    "不要正面成衣效果图、不要服装mockup、不要模特上身图、不要假人、不要穿在人身上的衣服、"
-    "不要T恤产品图、不要商品摄影、不要lookbook；只生成面料九宫格看板、连续纹理小样和干净定位图案"
+from prompt_blocks import (
+    FRONT_EFFECT_NEGATIVE_EN,
+    board_negative_prompt_en,
+    build_collection_board_prompt_en,
+    build_collection_board_prompt_zh,
 )
 
 
@@ -492,35 +489,7 @@ def _build_collection_prompt_from_prompts(prompts: list[dict], style: dict) -> s
     """基于 9 面板提示词列表构造完整的英文 3x3 看板 prompt。
     逻辑与端到端自动化.py 的 _build_collection_prompt_from_visual_elements 类似。"""
     panel_map = {p.get("texture_id", ""): p.get("prompt", "") for p in prompts}
-
-    lines = [
-        "Create a 3x3 commercial textile collection board, nine coordinated fabric panels arranged in a clean equal grid with thin white gutters between all panels, all inside one square image. Absolutely no text, no labels, no captions, no titles, no words, no letters, no typography, no descriptions anywhere in the image.",
-        "",
-        f"Overall art direction: {style.get('overall_impression', 'Elegant commercial textile collection')}. {style.get('mood', 'Quiet and wearable')}. {style.get('medium', 'Watercolor')}. Low contrast, highly wearable, refined hand-painted brush language, graceful breathing space, not busy, cohesive as one fashion print suite.",
-        "",
-        "Row 1 — Base textures for large garment panels (seamless tileable):",
-        f"Top-left: {panel_map.get('main', 'pale base with faint pattern, very low noise, lots of negative space, no text')}",
-        f"Top-center: {panel_map.get('secondary', 'coordinated medium-density pattern on light ground, same palette, no text')}",
-        f"Top-right: {panel_map.get('dark_base', 'deep dark ground with very subtle texture, quiet and minimal, no text')}",
-        "",
-        "Row 2 — Mid-scale accent textures (seamless tileable):",
-        f"Middle-left: {panel_map.get('accent_light', 'tiny scattered small-scale pattern on light ground, charming but controlled, no text')}",
-        f"Middle-center: {panel_map.get('accent_mid', 'soft geometric or organic lattice on pale ground, same palette, seamless tileable texture for secondary panels, no text')}",
-        f"Middle-right: {panel_map.get('solid_quiet', 'quiet warm solid with only subtle paper grain, no pattern, calm and minimal, seamless tileable solid texture for quiet trim or lining, no text')}",
-        "",
-        "Row 3 — Placement motifs and hero elements (plain backgrounds for background removal):",
-        f"Bottom-left: {panel_map.get('hero_motif_1', 'a single elegant main subject centered in a delicate decorative frame, plain light background, soft fading edges, balanced negative space, designed as a placement print element, no text')}",
-        f"Bottom-center: {panel_map.get('hero_motif_2', 'a secondary accent subject, centered, plain light background, refined brushwork, designed as a placement accent motif, no text')}",
-        f"Bottom-right: {panel_map.get('trim_motif', 'a small delicate decorative accent, minimal composition, plain warm background, designed as a trim detail placement element, no text')}",
-        "",
-        "All nine panels must look like one coordinated textile collection by the same fashion print designer, identical palette, identical paper texture, identical hand-painted brush style, identical commercial apparel mood.",
-        "",
-        "No animals other than approved subjects, no characters, no faces, no people, no text, no logo, no watermark, no house, no river, no full landscape scene, no poster composition, no sticker sheet, no harsh black outlines, no dense confetti, no neon colors, no muddy dark colors, no gradient backgrounds inside individual panels.",
-        FRONT_EFFECT_NEGATIVE_EN + ".",
-        "",
-        "Row 1 and Row 2 panels should be seamless tileable textile swatches usable as fabric repeats. Row 3 panels should be clean placement motifs with plain light backgrounds suitable for background removal.",
-    ]
-    return "\n".join(lines)
+    return build_collection_board_prompt_en(panel_map, style)
 
 
 # =============================================================================
@@ -584,40 +553,7 @@ def _apply_direction_style(prompts: list[dict], inject_map: dict[str, str]) -> l
 def _build_libtv_description_from_prompts(prompts: list[dict], style: dict, direction_note: str = "") -> str:
     """将 9 面板提示词转换为适合 libtv create_session 的中文自然语言描述。"""
     panel_map = {p.get("texture_id", ""): p.get("prompt", "") for p in prompts}
-    medium = style.get("medium", "水彩")
-    mood = style.get("mood", "优雅安静")
-    impression = style.get("overall_impression", "商业畅销款打样")
-
-    direction_line = f"设计方向：{direction_note}。" if direction_note else ""
-
-    lines = [
-        f"请帮我生成一张3x3商业面料看板图片。整体艺术方向：{impression}，{mood}，{medium}风格。{direction_line}低对比度、高可穿性、优雅的手绘笔触、充足的呼吸感，不拥挤，整体协调统一。",
-        "",
-        "要求九宫格等分布局，白色细间隔，所有面板在一个正方形图片内。图片中绝对不要出现任何文字、标签、标题、字母、排版。",
-        "",
-        "第一行 — 大身底纹（可平铺无缝纹理）：",
-        f"左上：{panel_map.get('main', '淡色底极低噪底纹')}",
-        f"中上：{panel_map.get('secondary', '协调中密度图案')}",
-        f"右上：{panel_map.get('dark_base', '深底微纹理')}",
-        "",
-        "第二行 — 中调点缀纹理（可平铺无缝纹理）：",
-        f"左中：{panel_map.get('accent_light', '浅色小图案点缀')}",
-        f"中中：{panel_map.get('accent_mid', '中调几何/有机格子')}",
-        f"右中：{panel_map.get('solid_quiet', '安静纯色/衬里')}",
-        "",
-        "第三行 — 定位图案（浅色干净背景，方便后期去背景）：",
-        f"左下：{panel_map.get('hero_motif_1', '主卖点定位图案')}",
-        f"中下：{panel_map.get('hero_motif_2', '次卖点定位图案')}",
-        f"右下：{panel_map.get('trim_motif', '小型饰边装饰图案')}",
-        "",
-        "所有9个面板必须是同一个设计师的同一个系列作品，完全相同的调色板、纸质纹理、手绘风格、商业成衣氛围。",
-        "",
-        "不要动物（除非明确批准的主题元素）、不要人物、不要人脸、不要文字、不要商标、不要水印、不要房屋、不要河流、不要完整风景场景、不要海报构图、不要贴纸页、不要粗黑轮廓、不要密集纸屑、不要霓虹色、不要浑浊深色、不要单个面板内的渐变背景。",
-        FRONT_EFFECT_NEGATIVE_ZH + "。",
-        "",
-        "第一行和第二行面板应该是可平铺无缝的面料小样。第三行面板应该是干净背景的定位图案，适合背景去除。",
-    ]
-    return "\n".join(lines)
+    return build_collection_board_prompt_zh(panel_map, style, direction_note=direction_note)
 
 
 def generate_dual_collection_prompts_programmatic(
@@ -644,7 +580,7 @@ def generate_dual_collection_prompts_programmatic(
     # ---- Set A：商业稳妥款 ----
     prompts_a = _apply_direction_style(prompts, _MASS_PRODUCTION_INJECT)
     prompt_a = _build_collection_prompt_from_prompts(prompts_a, style)
-    negative_prompt_a = "animals, characters, faces, people, text, labels, captions, titles, typography, words, letters, logo, watermark, house, full landscape, poster, sticker, harsh black outline, dense confetti, neon colors, muddy colors, " + FRONT_EFFECT_NEGATIVE_EN
+    negative_prompt_a = board_negative_prompt_en()
     prompt_a_file = out_dir / "style_a_collection_prompt.txt"
     prompt_a_file.write_text(prompt_a, encoding="utf-8")
 
