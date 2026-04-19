@@ -640,14 +640,23 @@ def make_motif_transparent(panel: Image.Image, threshold: int = 235) -> Image.Im
     bg_mean, bright_thresh, chroma_thresh = _estimate_bg_color(img)
 
     # ---- 阶段 1：基础阈值去背景 ----
+    # 收紧条件：不仅要求 bright+low_chroma，还要求颜色接近背景色。
+    # 避免把小熊白色高光、吉他浅色等前景误判为背景。
     for y in range(height):
         for x in range(width):
             r, g, b, a = pixels[x, y]
             total = r + g + b
             bright = total >= bright_thresh
             low_chroma = max(r, g, b) - min(r, g, b) < chroma_thresh
-            if bright and low_chroma:
+            bg_dist = abs(r - bg_mean[0]) + abs(g - bg_mean[1]) + abs(b - bg_mean[2])
+            # 收紧接近背景色的判断：只有颜色真正接近背景时才去除。
+            # 避免把小熊白色高光、吉他浅色等前景误判为背景。
+            close_to_bg = bg_dist < chroma_thresh * 1.2
+            if bright and low_chroma and close_to_bg:
                 pixels[x, y] = (r, g, b, 0)
+            elif bright and low_chroma:
+                # 亮且低色度但不接近背景色：保留为不透明前景
+                pixels[x, y] = (r, g, b, 255)
             elif bright:
                 pixels[x, y] = (r, g, b, max(0, min(a, 140)))
 
@@ -711,11 +720,12 @@ def make_motif_transparent(panel: Image.Image, threshold: int = 235) -> Image.Im
 
     # ---- 阶段 3：形态学收缩（切除渐变晕染残留）----
     # 水彩/手绘 motif 常有渐变过渡带，阈值法无法彻底去除。
-    # 用 MinFilter 模拟 erode：让前景向内收缩 3-5px，切除边缘渐变残留。
+    # 用 MinFilter 模拟 erode：让前景向内收缩 1-2px，切除边缘渐变残留。
+    # 注意：半径过大会吃掉前景细节（如小熊高光），因此保持保守。
     alpha = img.getchannel("A")
-    # 自适应收缩半径：大图 5px，小图 3px
-    erode_radius = max(3, min(5, round(min(width, height) / 80)))
-    if erode_radius >= 2:
+    # 自适应收缩半径：大图 2px，小图 1px
+    erode_radius = max(1, min(2, round(min(width, height) / 120)))
+    if erode_radius >= 1:
         # MinFilter 模拟 erode：alpha 区域向内收缩
         alpha = alpha.filter(ImageFilter.MinFilter(size=erode_radius * 2 + 1))
         img.putalpha(alpha)
@@ -914,11 +924,11 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
     paths = {}
     for asset_id, box in boxes.items():
         crop = board.crop(box)
-        # Row 3: motifs → transparent RGBA
+        # Row 3: motifs → 直接保存原图，不做透明化/去背景/erode 等处理，
+        # 避免破坏 AI 生成的前景内容（如小熊白色高光被误伤）。
         if asset_id in ("hero_motif_1", "hero_motif_2", "trim_motif"):
-            crop = make_motif_transparent(crop)
             path = assets_dir / f"{asset_id}.png"
-            crop.save(path)
+            crop.convert("RGBA").save(path)
         else:
             # Row 1 & 2: textures → clean + tile repair + RGB
             crop = clean_internal_text_strip(crop)

@@ -25,13 +25,38 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from image_utils import ensure_thumbnail, estimate_payload_budget, print_payload_budget_warning
+try:
+    from PIL import Image
+except Exception:
+    Image = None
 
 
 def load_json(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def build_review_prompt(preview_path: str, fill_plan: dict, brief: dict, qc_report: dict = None) -> str:
+def create_three_meter_preview(preview_path: str | Path, out_path: str | Path) -> Path | None:
+    """Create a 64px mental-distance preview enlarged to 512px for review."""
+    if Image is None:
+        return None
+    src = Path(preview_path)
+    dst = Path(out_path)
+    try:
+        with Image.open(src) as im:
+            im = im.convert("RGB")
+            im.thumbnail((64, 64), Image.Resampling.LANCZOS)
+            canvas = Image.new("RGB", (64, 64), "white")
+            x = (64 - im.width) // 2
+            y = (64 - im.height) // 2
+            canvas.paste(im, (x, y))
+            big = canvas.resize((512, 512), Image.Resampling.NEAREST)
+            big.save(dst)
+        return dst
+    except Exception:
+        return None
+
+
+def build_review_prompt(preview_path: str, fill_plan: dict, brief: dict, qc_report: dict = None, preview_3m_path: str = "") -> str:
     """构造面向子Agent的整体商业感复审 prompt。"""
     pieces = fill_plan.get("pieces", [])
     hero_ids = [p["piece_id"] for p in pieces if (p.get("overlay") or {}).get("fill_type") == "motif"]
@@ -44,7 +69,9 @@ def build_review_prompt(preview_path: str, fill_plan: dict, brief: dict, qc_repo
         "",
         "===== 必看图片 =====",
         f"预览图: {preview_path}",
+        f"三米模拟图: {preview_3m_path}" if preview_3m_path else "三米模拟图: 未提供，请在脑中把预览缩成 64×64 像素再判断。",
         "你必须先查看这张图片，再做判断。",
+        "三米测试必须以 64px 远看效果为准：在 64×64 模拟图上仍能分辨 hero、身片和袖片关系才算通过；如果只剩花、糊、乱或拼贴感，rule A 必须 fail。",
         "",
         "===== 设计简报 =====",
         f"服装类型: {brief.get('garment_type', '成衣')}",
@@ -83,7 +110,7 @@ def build_review_prompt(preview_path: str, fill_plan: dict, brief: dict, qc_repo
         "11. motif 质量：是否有半透明整张贴片、背景未去干净、主题残影或矩形边界？",
         "",
         "===== 硬否决条件（任一触发 approved 必须为 false）=====",
-        "A. 三米测试不通过：远看主体不清、纹理糊、整体花乱、像贴图拼接。",
+        "A. 三米测试不通过：64px 远看主体不清、纹理糊、整体花乱、像贴图拼接。",
         "B. Hero geometry 越界：hero 过大、靠边、跨缝线/领口/袖窿/肩缝、超过 1 个 hero、或半透明整图 overlay。",
         "C. 双源混用失控：跨源资产超过 2 个小面积 accent/trim，或大身 base 混用 A/B 两源。",
         "D. 关键分数低：hero_clarity 或 style_cohesion 低于 8。",
@@ -199,21 +226,33 @@ def main() -> int:
     # 模式A：生成复审请求（使用缩略图避免 413）
     if not args.selected:
         preview_thumb = ensure_thumbnail(args.preview, max_size=384, provider="kimi")
-        prompt = build_review_prompt(str(preview_thumb), fill_plan, brief, qc_report)
+        preview_3m = create_three_meter_preview(args.preview, out_dir / "preview_3m.png")
+        preview_3m_thumb = ensure_thumbnail(preview_3m, max_size=384, provider="kimi") if preview_3m else None
+        prompt = build_review_prompt(
+            str(preview_thumb),
+            fill_plan,
+            brief,
+            qc_report,
+            str(preview_3m_thumb) if preview_3m_thumb else "",
+        )
         prompt_path = out_dir / "ai_commercial_review_prompt.txt"
         prompt_path.write_text(prompt, encoding="utf-8")
-        payload_budget = estimate_payload_budget(prompt_path, [preview_thumb])
+        kimi_images = [preview_thumb] + ([preview_3m_thumb] if preview_3m_thumb else [])
+        payload_budget = estimate_payload_budget(prompt_path, kimi_images)
 
         request_summary = {
             "request_id": "commercial_review_v1",
             "preview_path": str(preview_thumb.resolve()),
+            "preview_3m_path": str(preview_3m_thumb.resolve()) if preview_3m_thumb else "",
+            "preview_3m_original_path": str(preview_3m.resolve()) if preview_3m else "",
             "preview_original_path": str(Path(args.preview).resolve()),
             "fill_plan_path": str(Path(args.fill_plan).resolve()),
             "brief_path": str(Path(args.brief).resolve()),
             "prompt_path": str(prompt_path.resolve()),
             "expected_output": str((out_dir / "ai_commercial_review.json").resolve()),
             "payload_budget": payload_budget,
-            "kimi_input_note": "只传 preview_path 指向的 Kimi 缩略图，不要传 preview_original_path 原图。",
+            "kimi_images": [str(path.resolve()) for path in kimi_images],
+            "kimi_input_note": "只传 preview_path 和 preview_3m_path 指向的 Kimi 缩略图，不要传 preview_original_path 原图。",
         }
         req_path = out_dir / "ai_commercial_review_request.json"
         req_path.write_text(json.dumps(request_summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -223,8 +262,9 @@ def main() -> int:
             "子Agent提示词": str(prompt_path.resolve()),
             "预期输出": request_summary["expected_output"],
             "Kimi预览图": str(preview_thumb.resolve()),
+            "Kimi三米模拟图": str(preview_3m_thumb.resolve()) if preview_3m_thumb else "",
             "Kimi请求体预算": payload_budget,
-            "说明": "请启动 coder 子Agent，传入 ai_commercial_review_prompt.txt + preview_path 缩略图，要求输出严格的 ai_commercial_review.json；不要传原始 preview.png。",
+            "说明": "请启动 coder 子Agent，传入 ai_commercial_review_prompt.txt + preview_path/preview_3m_path 缩略图，要求输出严格的 ai_commercial_review.json；不要传原始 preview.png。",
         }, ensure_ascii=False, indent=2))
         print_payload_budget_warning(payload_budget)
         return 0

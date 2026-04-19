@@ -23,6 +23,14 @@ def _load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _existing_path(value: str | Path, base_dir: Path) -> str:
+    """Resolve an optional path and return it only when it exists."""
+    if not value:
+        return ""
+    path = resolve_asset_path(value, base_dir)
+    return str(path.resolve()) if path.exists() else ""
+
+
 def load_index() -> dict:
     """加载模板注册表索引。"""
     if INDEX_PATH.exists():
@@ -101,6 +109,39 @@ def normalize_piece_asset_paths(pieces_payload: dict, pieces_json_path: str | Pa
     return pieces_payload
 
 
+def load_template_assets_manifest(asset_dir: str | Path, size_label: str) -> dict | None:
+    """Load preprocessed template asset manifest when present."""
+    path = Path(asset_dir) / f"template_assets_{size_label}.json"
+    if not path.exists():
+        return None
+    try:
+        manifest = _load_json(path)
+    except Exception:
+        return None
+    manifest["_manifest_path"] = str(path.resolve())
+    return manifest
+
+
+def template_kimi_preview_for_pieces(pieces_json_path: str | Path, image_kind: str = "piece_overview") -> str:
+    """Return preprocessed Kimi preview path for a template pieces file, if available.
+
+    image_kind: piece_overview | prepared_pattern | garment_map_overview
+    """
+    pieces_path = Path(pieces_json_path).resolve()
+    size_label = pieces_path.stem.removeprefix("pieces_")
+    manifest = load_template_assets_manifest(pieces_path.parent, size_label)
+    if not manifest:
+        return ""
+    ai_previews = manifest.get("ai_previews", {}) if isinstance(manifest.get("ai_previews"), dict) else {}
+    key_map = {
+        "piece_overview": "piece_overview_kimi",
+        "prepared_pattern": "prepared_pattern_kimi",
+        "garment_map_overview": "garment_map_overview_kimi",
+    }
+    value = ai_previews.get(key_map.get(image_kind, image_kind), "")
+    return _existing_path(value, pieces_path.parent)
+
+
 def resolve_template_assets(
     template_id: str = "",
     size_label: str = "base",
@@ -126,6 +167,7 @@ def resolve_template_assets(
     prepared_pattern_path = asset_dir / f"prepared_pattern_{resolved_size}.png"
     garment_map_path = asset_dir / f"garment_map_{resolved_size}.json"
     garment_map_overview_path = asset_dir / f"garment_map_overview_{resolved_size}.jpg"
+    manifest = load_template_assets_manifest(asset_dir, resolved_size)
 
     required = [
         pieces_path,
@@ -152,7 +194,7 @@ def resolve_template_assets(
         if not ref or not Path(ref).exists():
             return None
 
-    return {
+    result = {
         "template_id": tid,
         "template_name": entry.get("template_name", ""),
         "size_label": resolved_size,
@@ -163,6 +205,19 @@ def resolve_template_assets(
         "garment_map_path": str(garment_map_path.resolve()),
         "garment_map_overview_path": str(garment_map_overview_path.resolve()),
     }
+    if manifest:
+        result["template_assets_manifest_path"] = manifest.get("_manifest_path", "")
+        ai_previews = manifest.get("ai_previews", {}) if isinstance(manifest.get("ai_previews"), dict) else {}
+        piece_overview_kimi = _existing_path(ai_previews.get("piece_overview_kimi", ""), asset_dir)
+        prepared_pattern_kimi = _existing_path(ai_previews.get("prepared_pattern_kimi", ""), asset_dir)
+        garment_map_overview_kimi = _existing_path(ai_previews.get("garment_map_overview_kimi", ""), asset_dir)
+        if piece_overview_kimi:
+            result["piece_overview_kimi_path"] = piece_overview_kimi
+        if prepared_pattern_kimi:
+            result["prepared_pattern_kimi_path"] = prepared_pattern_kimi
+        if garment_map_overview_kimi:
+            result["garment_map_overview_kimi_path"] = garment_map_overview_kimi
+    return result
 
 
 def find_template_by_id(template_id: str, size: str = "base") -> dict | None:

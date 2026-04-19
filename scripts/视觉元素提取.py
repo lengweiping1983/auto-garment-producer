@@ -78,6 +78,13 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
                     "orientation": "vertical|horizontal|radial|symmetric|irregular",
                     "visual_center": [0.5, 0.5],
                     "form_type": "short label"
+                },
+                "garment_placement_hint": {
+                    "recommended_target_piece": "front_body|front_hero|none",
+                    "recommended_width_ratio_in_piece": 0.30,
+                    "recommended_height_ratio_in_piece": 0.28,
+                    "recommended_anchor": "chest_center|center|small_accent|do_not_place",
+                    "anti_examples": ["full bleed", "shoulder seam crossing", "neckline crossing"]
                 }
             }
         ],
@@ -111,7 +118,7 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         *image_lines,
         "",
         "===== 任务 =====",
-        "1. dominant_objects: 最突出的1-3个主体；写名称、grade(S|A|B|C)、颜色/形态/位置/占比、source_image_refs、geometry、suggested_usage。",
+        "1. dominant_objects: 最突出的1-3个主体；写名称、grade(S|A|B|C)、颜色/形态/位置/占比、source_image_refs、geometry、suggested_usage、garment_placement_hint。",
         "2. supporting_elements: 边框/背景/纹理/点缀等；标注 source_image_refs。",
         "3. palette: 从图像真实提取 primary/secondary/accent/dark HEX，不要编造。",
         "4. style: medium、brush_quality、mood、pattern_density、line_style、overall_impression。",
@@ -126,6 +133,9 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "C级：主题色彩晕染、无具象形状的抽象纹理、水彩底、低对比噪点底、低对比小循环几何。可作大身 base。",
         "所有 S 级元素、以及不适合大身的 A 级元素，必须写入 theme_to_piece_strategy.do_not_use_as_full_body_texture。",
         "generated_prompts.main 和 generated_prompts.secondary 只能继承色彩、笔触、氛围，不得直接包含 S/A 级具象主体名称。",
+        "geometry 只描述主体在参考图中的尺寸和位置；真正穿到衣服上时，必须通过 garment_placement_hint 转换成裁片 bounding box 内的比例。",
+        "S/A 级主体若允许作为 hero，garment_placement_hint 必须建议小型胸口定位：宽度默认 0.28–0.34，高度默认 0.22–0.32，anchor 默认 chest_center。",
+        "garment_placement_hint.anti_examples 必须列出禁止用法，例如 full bleed、跨肩缝、跨袖窿、跨领口、完整场景满版。",
         "",
         "===== 输出 JSON schema =====",
         "只返回严格 JSON，不要解释文字、不要 markdown 代码块：",
@@ -141,7 +151,9 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "- 提示词必须是英文，可直接用于 AI 图像生成器",
         "- 如果图像中有动物或人物，谨慎建议用途，优先建议用于 motif 而非 texture",
         "- dominant_objects[] 必须包含 grade: S|A|B|C",
+        "- dominant_objects[] 必须包含 garment_placement_hint；参考图 geometry 不能直接等同于上身比例",
         "- S级元素必须进入 theme_to_piece_strategy.do_not_use_as_full_body_texture，且不得出现在 generated_prompts.main/secondary",
+        "- S/A级主体如果允许作 hero，推荐上身宽度控制在 0.28–0.34，高度控制在 0.22–0.32；不得 full bleed、不得跨肩缝/袖窿/领口",
         "- 主题必须落地到裁片：大身只继承色彩/氛围，唯一 hero motif 承载主体，小元素只做 accent",
         "- 蘑菇、动物、角色、花丛、完整场景等具象元素不得建议为大面积 body texture，除非用户明确要求",
         "- 多张参考图必须融合为同一个主题方向，不要输出多套方案",

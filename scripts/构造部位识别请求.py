@@ -33,6 +33,11 @@ except Exception:
         return {}
     def print_payload_budget_warning(budget):
         return
+try:
+    from template_loader import template_kimi_preview_for_pieces
+except Exception:
+    def template_kimi_preview_for_pieces(pieces_json_path, image_kind="piece_overview"):
+        return ""
 
 
 def load_json(path: str | Path) -> dict:
@@ -282,7 +287,8 @@ def main() -> int:
 
     # 模式A：生成识别请求
     if not args.selected:
-        overview_thumb = ensure_thumbnail(overview_path, max_size=512, provider="kimi")
+        preprocessed_overview = template_kimi_preview_for_pieces(args.pieces, "piece_overview")
+        overview_thumb = Path(preprocessed_overview) if preprocessed_overview else ensure_thumbnail(overview_path, max_size=512, provider="kimi")
         prompt = build_identification_prompt(pieces, garment_type, str(overview_thumb.resolve()))
         prompt_path = out_dir / "ai_garment_map_prompt.txt"
         prompt_path.write_text(prompt, encoding="utf-8")
@@ -293,6 +299,7 @@ def main() -> int:
             "pieces_path": str(Path(args.pieces).resolve()),
             "overview_path": str(overview_thumb.resolve()),
             "overview_original_path": str(Path(overview_path).resolve()),
+            "overview_preprocessed": bool(preprocessed_overview),
             "garment_type": garment_type,
             "prompt_path": str(prompt_path.resolve()),
             "expected_output": str((out_dir / "ai_garment_map.json").resolve()),

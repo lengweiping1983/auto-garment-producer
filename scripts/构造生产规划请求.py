@@ -18,12 +18,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 from image_utils import ensure_thumbnail, make_contact_sheet, estimate_payload_budget, print_payload_budget_warning
 from prompt_blocks import COMMERCIAL_FILL_RULES_ZH, STRICT_JSON_ONLY_ZH
 try:
-    from template_loader import normalize_piece_asset_paths, relative_json_metadata_path
+    from template_loader import normalize_piece_asset_paths, relative_json_metadata_path, template_kimi_preview_for_pieces
 except Exception:
     normalize_piece_asset_paths = None
     def relative_json_metadata_path(target: str | Path, owner_json_path: str | Path) -> str:
         import os
         return os.path.relpath(Path(target).resolve(), Path(owner_json_path).resolve().parent)
+    def template_kimi_preview_for_pieces(pieces_json_path, image_kind="piece_overview"):
+        return ""
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 STYLE_REFERENCE_DIR = SKILL_DIR / "references" / "styles"
@@ -321,16 +323,19 @@ def build_production_plan_prompt(
         "  Q2 三米测试：距离 3 米看，哪些纹理会糊、乱、花？大身 base 必须塌缩为受控色相。",
         "  Q3 挂架理由：和同价位 20 件上衣挂在一起，消费者为什么拿起它？",
         "  Q4 日常舒适：开会、吃饭、接孩子是否用力过猛？大身满版插画必须降级为低噪 base。",
+        "  每一问必须输出 answer、verdict(pass|fail)、evidence_in_plan。任一 verdict=fail 时，不得提交该方案，必须当场重选资产或改为 fallback safe plan。",
         "",
         "--- Hero Motif 几何契约（硬约束）---",
         "  hero 只允许在 front_body/front_hero；宽度占前片 18%–42%，高度 18%–38%。",
         "  hero 顶端距上沿 >=12%，底端距下沿 >=22%，距任意裁片边 >=8%，旋转限制 -8° 到 +8°。",
         "  motif 与底色明度差 ΔL* >=25；不满足时远看会糊，必须换 motif 或放弃 hero。",
+        "  piece_fill_plan 中每个 hero overlay 的 scale/anchor/offset 必须能换算成目标裁片 bounding box 内 18%–42% 宽、18%–38% 高；否则视为越界。",
         "  禁止半透明整张主题图 overlay、禁止跨缝线/领口/袖窿/肩缝、禁止同一件衣服出现 2 个以上 hero。",
         "  禁止完整场景叙事做 hero；只能提取 1 个角色、剪影或简化图标。",
         "",
         "--- 双源资产硬规则 ---",
         "  若资产 ID 带 _a/_b，必须先在 asset_shortlist.primary_source 中二选一作为主源。",
+        "  当资产池同时存在 _a 和 _b 后缀时，primary_source 必须是 A 或 B，不允许 single；single 只允许在资产池本身只有一源时使用。",
         "  primary_source 承担至少 80% 可见面积；所有大身 base、前后身主体、袖片主底纹必须来自 primary。",
         "  secondary source 最多贡献 2 个小面积 accent/trim/cuff/collar/small_detail；不得用于大身 base。",
         "  若 A/B 的 palette、底色、饱和度、笔触、媒介不一致，必须放弃混用并在 rejected_assets 说明。",
@@ -371,6 +376,7 @@ def build_production_plan_prompt(
                 f"生成 {max_schemes} 套 schemes。资产池含 A/B 两源 {image_asset_count} 个图片资产 + {solid_count} 个纯色；双源各 3x3 时应视为 9+9 完整资产池，必须从完整资产池重新判断组合。",
                 "方案之间要有实质差异，覆盖安全量产、强卖点、深色高级、轻量呼吸、局部点缀、年轻化/秀场感等方向。",
                 "允许全A、全B、A/B混合；不用低质资产可以，但在 asset_coverage.unused_assets 说明原因。",
+                "asset_shortlist.primary_source 必须是 A 或 B，不允许 single；single 只用于资产池本身只有一个来源的情况。",
                 "所有 asset id 必须真实存在，例如 main_a、main_b、hero_motif_1_a、quiet_solid_b。",
                 "不要只输出 A/B 两个来源结果；每个 scheme 都必须是独立设计方案，并说明资产选择理由。",
                 "如果 A/B 色板或笔触明显不一致，不要混用到大身；优先单源成套，另一源只可小面积点缀。",
@@ -393,8 +399,17 @@ def build_production_plan_prompt(
         "===== 输出顺序硬约束 =====",
         "你必须先完成 Part 1，再写 Part 2。不要在确认 garment_map 和成衣自检之前生成 piece_fill_plan。",
         "Part 1: 输出 garment_map、garment_map_confidence_per_piece、garment_map_uncertainties。",
-        "Part 2: 输出 pre_design_self_check、asset_shortlist、theme_landing_summary、asset_mix_summary、piece_fill_plan。",
+        "Part 2: 输出 pre_design_self_check、asset_shortlist、theme_landing_summary、asset_mix_summary、piece_fill_plan、pre_submit_self_audit。",
         "写 piece_fill_plan 时，body/base 资产必须来自 asset_shortlist.primary_base_ids；跨源 accent 不得超过 asset_shortlist.accent_ids_from_other_source 中的 2 个资产。",
+        "",
+        "===== 输出前自审 A–F（必须执行）=====",
+        "写完 piece_fill_plan 后，必须回头自审以下 6 条。任一条 fail 时不得提交原方案，必须在同一次输出中直接重做为通过方案或 fallback safe plan。",
+        "A. 三米测试：远看主体清楚，大身不糊、不乱、不像贴图拼接。",
+        "B. Hero geometry：hero 没有过大、靠边、跨缝线/领口/袖窿/肩缝；同衣服不超过 1 个 hero；没有半透明整图 overlay。",
+        "C. 双源混用：跨源资产不超过 2 个小面积 accent/trim；大身 base 没有混用 A/B 两源。",
+        "D. 关键自评：hero_clarity 和 style_cohesion 均 >= 8。",
+        "E. 大身 base：不含完整动物、人脸、文字、完整场景、建筑、复杂叙事插画。",
+        "F. Motif 清洁度：没有半透明残影、矩形边界、未去干净背景、水印或贴片边界。",
         "",
         "===== 输出格式 =====",
         STRICT_JSON_ONLY_ZH + " 格式如下：",
@@ -413,10 +428,10 @@ def build_production_plan_prompt(
                         {"piece_id": "piece_004", "reason": "窄长弧形裁片可能是 collar 或 hem，采用安静 trim 处理"}
                     ],
                     "pre_design_self_check": {
-                        "overall_first_impression": "胸口白色山猫剪影",
-                        "three_meter_test": "大身低噪，远看塌缩为柔和绿色；hero 清晰可读",
-                        "rack_reason": "自然系胸口图标比普通满版花草更容易上架",
-                        "daily_wearability": "大身安静，袖片同源，日常场景不会用力过猛"
+                        "overall_first_impression": {"answer": "胸口白色山猫剪影", "verdict": "pass", "evidence_in_plan": "唯一 hero 位于 piece_001 胸口，其他大身保持低噪"},
+                        "three_meter_test": {"answer": "大身低噪，远看塌缩为柔和绿色；hero 清晰可读", "verdict": "pass", "evidence_in_plan": "main_a 是低对比 base，hero 与底色明度差充足"},
+                        "rack_reason": {"answer": "自然系胸口图标比普通满版花草更容易上架", "verdict": "pass", "evidence_in_plan": "卖点集中在胸口，trim 安静"},
+                        "daily_wearability": {"answer": "大身安静，袖片同源，日常场景不会用力过猛", "verdict": "pass", "evidence_in_plan": "前后身和袖片均使用 primary_source base"}
                     },
                     "asset_shortlist": {
                         "primary_source": "A",
@@ -441,6 +456,21 @@ def build_production_plan_prompt(
                             }
                         ],
                         "art_direction": {"strategy": "单一卖点定位，低噪身片，协调副片，安静饰边", "hero_piece_ids": ["piece_001"]}
+                    },
+                    "pre_submit_self_audit": {
+                        "rule_A_passed": True,
+                        "rule_A_evidence": "三米远看大身低噪，hero 仍可读",
+                        "rule_B_passed": True,
+                        "rule_B_evidence": "hero 仅在 front_body，宽高位于 18%–42% / 18%–38% 区间，未跨缝线",
+                        "rule_C_passed": True,
+                        "rule_C_evidence": "大身 base 全部来自 A，B 仅 1 个 trim accent",
+                        "rule_D_passed": True,
+                        "rule_D_evidence": "hero_clarity/style_cohesion 自评均 >= 8",
+                        "rule_E_passed": True,
+                        "rule_E_evidence": "大身 base 不含动物、人脸、文字或完整场景",
+                        "rule_F_passed": True,
+                        "rule_F_evidence": "motif 为干净定位图案，无半透明矩形残影",
+                        "fallback_safe_plan_used": False
                     }
                 }
             ],
@@ -450,7 +480,7 @@ def build_production_plan_prompt(
         }, ensure_ascii=False, indent=2))
         lines.append("")
         lines.append("注：顶层必须包含 schemes 数组、portfolio_notes 和 asset_coverage。每个 scheme 必须包含 scheme_id、design_positioning、strategy_note、theme_landing_summary、asset_mix_summary、diversity_tags、piece_fill_plan。")
-        lines.append("注：每个 scheme 还必须包含 garment_map_confidence_per_piece、garment_map_uncertainties、pre_design_self_check、asset_shortlist；缺少任一字段视为无效。")
+        lines.append("注：每个 scheme 还必须包含 garment_map_confidence_per_piece、garment_map_uncertainties、pre_design_self_check、asset_shortlist、pre_submit_self_audit；缺少任一字段视为无效。")
         lines.append("注：模板模式下 garment_map 可省略；若提供 garment_map，也会被固定模板映射覆盖。")
         lines.append("注：art_direction 可额外包含 notes[] 和可选的 self_assessment（overall_score/wearability/cohesion/hero_clarity/trim_quality/season_fit/customer_match/production_safety/color_balance/negative_space/narrative_control）。")
     else:
@@ -465,13 +495,13 @@ def build_production_plan_prompt(
                 {"piece_id": "piece_004", "reason": "窄长裁片角色不确定，按 trim 安静处理"}
             ],
             "pre_design_self_check": {
-                "overall_first_impression": "胸口白色山猫剪影",
-                "three_meter_test": "大身低噪，远看塌缩为受控色相",
-                "rack_reason": "有一个清晰但克制的自然系卖点",
-                "daily_wearability": "大身安静，袖片与身片同源，适合日常穿着"
+                "overall_first_impression": {"answer": "胸口白色山猫剪影", "verdict": "pass", "evidence_in_plan": "唯一 hero 位于前片胸口"},
+                "three_meter_test": {"answer": "大身低噪，远看塌缩为受控色相", "verdict": "pass", "evidence_in_plan": "body/base 均为低对比主底纹"},
+                "rack_reason": {"answer": "有一个清晰但克制的自然系卖点", "verdict": "pass", "evidence_in_plan": "hero 明确，trim 安静"},
+                "daily_wearability": {"answer": "大身安静，袖片与身片同源，适合日常穿着", "verdict": "pass", "evidence_in_plan": "没有满版叙事插画"}
             },
             "asset_shortlist": {
-                "primary_source": "A|B|single",
+                "primary_source": "single",
                 "primary_base_ids": ["main"],
                 "accent_ids_from_other_source": [],
                 "rejected_assets": [{"asset_id": "busy_scene", "reason": "完整叙事插画，不适合大身"}]
@@ -489,6 +519,21 @@ def build_production_plan_prompt(
                     }
                 ],
                 "art_direction": {"strategy": "单一卖点定位，低噪身片，协调副片，安静饰边", "hero_piece_ids": ["piece_001"]}
+            },
+            "pre_submit_self_audit": {
+                "rule_A_passed": True,
+                "rule_A_evidence": "三米远看大身不糊不乱",
+                "rule_B_passed": True,
+                "rule_B_evidence": "hero 未越界、未跨缝线，且不超过 1 个",
+                "rule_C_passed": True,
+                "rule_C_evidence": "单源或双源跨源 accent 不超过 2 个，大身 base 来自主源",
+                "rule_D_passed": True,
+                "rule_D_evidence": "hero_clarity/style_cohesion 自评均 >= 8",
+                "rule_E_passed": True,
+                "rule_E_evidence": "大身 base 不含完整动物、人脸、文字或场景",
+                "rule_F_passed": True,
+                "rule_F_evidence": "无半透明残影或矩形边界",
+                "fallback_safe_plan_used": False
             },
             "risk_notes": []
         }, ensure_ascii=False, indent=2))
@@ -619,8 +664,14 @@ def main() -> int:
         style_references.append(ref)
 
     overview_for_kimi = overview_path
+    overview_preprocessed = False
     if overview_path:
-        overview_for_kimi = str(ensure_thumbnail(overview_path, max_size=512, provider="kimi").resolve())
+        preprocessed_overview = template_kimi_preview_for_pieces(args.pieces, "piece_overview")
+        if preprocessed_overview:
+            overview_for_kimi = preprocessed_overview
+            overview_preprocessed = True
+        else:
+            overview_for_kimi = str(ensure_thumbnail(overview_path, max_size=512, provider="kimi").resolve())
 
     prompt_text = build_production_plan_prompt(
         pieces_payload, texture_set, brief, geometry_hints,
@@ -646,6 +697,7 @@ def main() -> int:
         "garment_map": str(Path(args.garment_map).resolve()) if args.garment_map else "",
         "piece_overview": overview_for_kimi,
         "piece_overview_original": overview_path,
+        "piece_overview_preprocessed": overview_preprocessed,
         "texture_contact_sheet": contact_sheet,
         "texture_thumbnails_debug": texture_thumbnails_debug,
         "texture_thumbnails": texture_kimi_images,
@@ -663,6 +715,7 @@ def main() -> int:
             "garment_map_uncertainties",
             "pre_design_self_check",
             "asset_shortlist",
+            "pre_submit_self_audit",
             "theme_landing_summary",
             "asset_mix_summary",
             "diversity_tags",
