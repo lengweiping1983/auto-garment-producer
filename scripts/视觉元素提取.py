@@ -7,7 +7,6 @@
 
 输出：
 - ai_vision_prompt.txt：自然语言视觉分析请求
-- ai_vision_request.json：机器可读的结构化请求摘要
 - 预期输出：visual_elements.json
 
 使用方式：
@@ -31,19 +30,12 @@ except Exception:
         return text
 
 try:
-    from image_utils import ensure_thumbnail, estimate_payload_budget, print_payload_budget_warning
+    from image_utils import estimate_payload_budget, print_payload_budget_warning
 except Exception:
-    # image_utils 不可用时直接返回原图。
-    def ensure_thumbnail(image_path, max_size=1024):
-        return Path(image_path).resolve()
     def estimate_payload_budget(prompt_path=None, image_paths=None, **kwargs):
         return {}
     def print_payload_budget_warning(budget):
         return
-
-
-def build_vision_prompt(theme_path: Path, user_prompt: str, garment_type: str, season: str) -> str:
-    return build_vision_prompt_multi([theme_path], user_prompt, garment_type, season)
 
 
 def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment_type: str, season: str) -> str:
@@ -309,48 +301,19 @@ def main() -> int:
         print(f"错误: 主题图不存在: {missing[0]}", file=sys.stderr)
         return 1
 
-    theme_thumbs = [ensure_thumbnail(path, max_size=512, provider="kimi") for path in theme_paths]
-    prompt = build_vision_prompt_multi(theme_thumbs, args.user_prompt, args.garment_type, args.season)
+    prompt = build_vision_prompt_multi(theme_paths, args.user_prompt, args.garment_type, args.season)
     prompt_path = out_dir / "ai_vision_prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
     
     # 对示例中的 generated_prompts 也进行过滤（若视觉元素已存在）。
 
-    payload_budget = estimate_payload_budget(prompt_path, theme_thumbs)
-    request_summary = {
-        "request_id": "ai_vision_extraction_v1" if len(theme_thumbs) == 1 else "ai_vision_multi_extraction_v1",
-        "theme_image": str(theme_thumbs[0].resolve()),
-        "theme_image_original": str(theme_paths[0].resolve()),
-        "theme_images": [
-            {
-                "index": idx + 1,
-                "path": str(path.resolve()),
-                "original_path": str(theme_paths[idx].resolve()) if idx < len(theme_paths) else "",
-                "role_hint": "primary" if idx == 0 else "reference",
-            }
-            for idx, path in enumerate(theme_thumbs)
-        ],
-        "prompt_path": str(prompt_path.resolve()),
-        "expected_output": str((out_dir / "visual_elements.json").resolve()),
-        "garment_type": args.garment_type,
-        "season": args.season,
-        "user_prompt": args.user_prompt,
-        "payload_budget": payload_budget,
-        "kimi_input_note": "只把 theme_image/theme_images 中的 Kimi 缩略图传给视觉模型，不要传原图或 base64。",
-    }
-    request_path = out_dir / "ai_vision_request.json"
-    request_path.write_text(json.dumps(request_summary, ensure_ascii=False, indent=2), encoding="utf-8")
-
+    estimate_payload_budget(prompt_path, theme_paths)
     print(json.dumps({
-        "视觉分析请求摘要": str(request_path.resolve()),
         "AI视觉提示词": str(prompt_path.resolve()),
-        "主题图路径": str(theme_thumbs[0].resolve()),
-        "主题图数量": len(theme_thumbs),
-        "主题图列表": [str(path.resolve()) for path in theme_thumbs],
-        "预期输出": request_summary["expected_output"],
-        "Kimi请求体预算": payload_budget,
+        "主题图路径": str(theme_paths[0].resolve()),
+        "主题图数量": len(theme_paths),
+        "预期输出": str((out_dir / "visual_elements.json").resolve()),
     }, ensure_ascii=False, indent=2))
-    print_payload_budget_warning(payload_budget)
     return 0
 
 

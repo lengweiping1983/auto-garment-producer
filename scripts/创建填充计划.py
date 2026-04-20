@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """
-根据服装部位映射、面料组合和商业设计简报，创建艺术指导裁片填充计划。
-
-支持两种输入：
-1. ai_piece_fill_plan.json（AI 生产规划输出）
-2. 后端规则计划（当 AI 计划不存在或格式错误时）
+根据服装部位映射、面料组合，使用规则引擎创建裁片填充计划。
 
 最终由程序补齐必要字段，并强制加入主题前片切半 overlay。
 """
@@ -436,16 +432,14 @@ def force_theme_front_split_overlays(entries: list[dict], pieces_payload: dict, 
     return entries
 
 
-def build_rule_plan(pieces_payload: dict, texture_set: dict, garment_map: dict, brief: dict, motif_geometries: dict = None) -> tuple[dict, dict]:
-    """后端规则生成填充计划（当 AI 计划不可用时）。"""
+def build_rule_plan(pieces_payload: dict, texture_set: dict, garment_map: dict, brief: dict, motif_geometries: dict = None) -> dict:
+    """后端规则生成填充计划。"""
     texture_ids = approved_ids(texture_set, "textures", "texture_id")
     motif_ids = approved_ids(texture_set, "motifs", "motif_id")
     solid_ids = approved_ids(texture_set, "solids", "solid_id")
     if not texture_ids:
-        raise RuntimeError("没有可用面料可用于艺术指导填充计划。")
+        raise RuntimeError("没有可用面料可用于填充计划。")
 
-    # 注意：默认单纹理 texture_id 为 main/secondary/accent_light；
-    # dark_base 仅作为兼容旧 texture_set 的可选回退。
     main_id = choose(texture_ids, ["main", "base", "secondary", "accent_light", "dark_base"])
     secondary_id = choose(texture_ids, ["secondary", "main", "accent_light", "accent_mid", "dark_base"])
     accent_id = choose(texture_ids, ["accent_light", "accent_mid", "accent", "secondary", "main", "dark_base"])
@@ -458,10 +452,6 @@ def build_rule_plan(pieces_payload: dict, texture_set: dict, garment_map: dict, 
     largest_area = sorted_pieces[0]["area"] if sorted_pieces else 1
     hero_count = 0
     entries = []
-    hero_ids, quiet_ids, secondary_ids, trim_ids = [], [], [], []
-    risk_notes = []
-    if not motif_id:
-        risk_notes.append("没有可用图案资产；卖点处理仅使用纹理层次")
     group_params: dict[str, dict] = {}
 
     for index, piece in enumerate(sorted_pieces):
@@ -502,7 +492,6 @@ def build_rule_plan(pieces_payload: dict, texture_set: dict, garment_map: dict, 
             "reason": "",
         }
         if is_trim:
-            trim_ids.append(piece["piece_id"])
             piece_scale = params.get("scale") or 1.18
             if group_key and params.get("scale") is None:
                 params["scale"] = piece_scale
@@ -536,7 +525,6 @@ def build_rule_plan(pieces_payload: dict, texture_set: dict, garment_map: dict, 
             entry["reason"] = "饰边使用协调纹理或 subtle accent，保持视觉边界感"
         elif is_hero:
             hero_count += 1
-            hero_ids.append(piece["piece_id"])
             piece_scale = params.get("scale") or 1.12
             if group_key and params.get("scale") is None:
                 params["scale"] = piece_scale
@@ -586,7 +574,6 @@ def build_rule_plan(pieces_payload: dict, texture_set: dict, garment_map: dict, 
                 )
             entry["reason"] = "前片卖点区承载简化主题，不切割叙事插画"
         elif zone == "body" or role in ("back_body", "secondary_body"):
-            quiet_ids.append(piece["piece_id"])
             piece_scale = params.get("scale") or 1.18
             if group_key and params.get("scale") is None:
                 params["scale"] = piece_scale
@@ -601,7 +588,6 @@ def build_rule_plan(pieces_payload: dict, texture_set: dict, garment_map: dict, 
             )
             entry["reason"] = "大身裁片保持低对比度，确保产品可穿"
         elif zone == "secondary" or role in ("sleeve_pair", "sleeve_or_side_panel"):
-            secondary_ids.append(piece["piece_id"])
             mirror_x = bool(symmetry_group and piece["source_x"] > (pieces_payload.get("canvas", {}).get("width", 0) / 2))
             piece_scale = params.get("scale") or 1.22
             if group_key and params.get("scale") is None:
@@ -618,7 +604,6 @@ def build_rule_plan(pieces_payload: dict, texture_set: dict, garment_map: dict, 
             )
             entry["reason"] = "副面板增加节奏感，同形裁片保持视觉一致"
         else:
-            secondary_ids.append(piece["piece_id"])
             piece_scale = params.get("scale") or 1.35
             if group_key and params.get("scale") is None:
                 params["scale"] = piece_scale
@@ -634,23 +619,12 @@ def build_rule_plan(pieces_payload: dict, texture_set: dict, garment_map: dict, 
             entry["reason"] = "小细节支撑色板，避免杂乱"
         entries.append(entry)
 
-    art_direction = {
-        "plan_id": "commercial_art_direction_v1",
-        "aesthetic_direction": brief.get("aesthetic_direction", "商业畅销款打样"),
-        "hero_piece_ids": hero_ids,
-        "quiet_base_piece_ids": quiet_ids,
-        "secondary_piece_ids": secondary_ids,
-        "trim_piece_ids": trim_ids,
-        "strategy": "单一卖点定位，低噪身片，协调副片，安静饰边",
-        "risk_notes": risk_notes,
-    }
-    fill_plan = {
+    return {
         "plan_id": "commercial_piece_fill_plan_v1",
         "texture_set_id": texture_set.get("texture_set_id", ""),
         "locked": False,
         "pieces": entries,
     }
-    return art_direction, fill_plan
 
 
 def apply_symmetry_relations(entries: list[dict], garment_map: dict, pieces_payload: dict | None = None) -> list[dict]:
@@ -1410,8 +1384,6 @@ def main() -> int:
     parser.add_argument("--pieces", required=True, help="裁片清单 JSON 路径")
     parser.add_argument("--texture-set", required=True, help="面料组合 JSON 路径")
     parser.add_argument("--garment-map", required=True, help="固定模板部位映射 JSON 路径")
-    parser.add_argument("--brief", default="", help="商业设计简报 JSON 路径（可选）")
-    parser.add_argument("--ai-plan", default="", help="AI 填充计划 JSON 路径（优先使用）")
     parser.add_argument("--visual-elements", default="", help="visual_elements.json 路径（可选，用于读取 motif 几何信息）")
     parser.add_argument("--out", required=True, help="输出目录")
     args = parser.parse_args()
@@ -1419,7 +1391,6 @@ def main() -> int:
     pieces_payload = load_json(args.pieces)
     texture_set = load_json(args.texture_set)
     garment_map = load_json(args.garment_map)
-    brief = load_json(args.brief) if args.brief else {"aesthetic_direction": "商业畅销款打样"}
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1441,33 +1412,10 @@ def main() -> int:
                 if auto_ve_cv.exists():
                     motif_geometries = load_motif_geometries(auto_ve_cv)
 
-    # 阶段 1：获取填充计划（优先 AI 计划，其次后端规则）
-    ai_plan_used = False
-    if args.ai_plan:
-        ai_plan_path = Path(args.ai_plan)
-        if ai_plan_path.exists():
-            try:
-                ai_plan = load_json(ai_plan_path)
-                entries = ai_plan.get("pieces", [])
-                art_direction = ai_plan.get("art_direction", {})
-                if entries:
-                    ai_plan_used = True
-                    print(f"使用 AI 填充计划: {ai_plan_path}")
-                else:
-                    print("AI 填充计划无条目，使用后端规则")
-                    art_direction, ai_plan = {}, {}
-            except Exception as exc:
-                print(f"AI 计划解析失败 ({exc})，使用后端规则")
-                art_direction, ai_plan = {}, {}
-        else:
-            print(f"AI 计划不存在: {ai_plan_path}，使用后端规则")
-            art_direction, ai_plan = {}, {}
-    else:
-        art_direction, ai_plan = {}, {}
-
-    if not ai_plan_used:
-        art_direction, fill_plan = build_rule_plan(pieces_payload, texture_set, garment_map, brief, motif_geometries)
-        entries = fill_plan.get("pieces", [])
+    # 使用后端规则引擎生成填充计划
+    brief = {"aesthetic_direction": "商业畅销款打样"}
+    fill_plan = build_rule_plan(pieces_payload, texture_set, garment_map, brief, motif_geometries)
+    entries = fill_plan.get("pieces", [])
 
     # 阶段 1.5：应用对称关系优化（slave 复制 master 参数，避免重复渲染）
     entries = apply_symmetry_relations(entries, garment_map, pieces_payload)
@@ -1476,53 +1424,22 @@ def main() -> int:
     entries, fix_issues = enforce_validation(entries, pieces_payload, texture_set, garment_map, motif_geometries, brief)
     entries = force_theme_front_split_overlays(entries, pieces_payload, texture_set, garment_map, Path(args.pieces).resolve().parent)
 
-    # 重新组装 art_direction
     hero_ids = [e["piece_id"] for e in entries if (e.get("overlay") or {}).get("fill_type") == "motif"]
-    quiet_ids = [e["piece_id"] for e in entries if e.get("zone") == "body" and e["piece_id"] not in hero_ids]
-    secondary_ids = [e["piece_id"] for e in entries if e.get("zone") == "secondary"]
-    trim_ids = [e["piece_id"] for e in entries if e.get("zone") == "trim"]
-
-    if ai_plan_used and art_direction:
-        art_direction["hero_piece_ids"] = hero_ids
-        art_direction["validation_fixes"] = fix_issues
-        art_direction["draft_preview_only"] = False
-        art_direction["production_ready"] = True
-    else:
-        art_direction = {
-            "plan_id": "commercial_art_direction_v1",
-            "aesthetic_direction": brief.get("aesthetic_direction", "商业畅销款打样"),
-            "hero_piece_ids": hero_ids,
-            "quiet_base_piece_ids": quiet_ids,
-            "secondary_piece_ids": secondary_ids,
-            "trim_piece_ids": trim_ids,
-            "strategy": "单一卖点定位，低噪身片，协调副片，安静饰边",
-            "validation_fixes": fix_issues,
-            "risk_notes": ["使用后端规则生成，仅作草稿预览"] if not ai_plan_used else [],
-            "draft_preview_only": True,
-            "production_ready": False,
-        }
 
     fill_plan = {
         "plan_id": "commercial_piece_fill_plan_v1",
         "texture_set_id": texture_set.get("texture_set_id", ""),
         "locked": False,
-        "ai_plan_used": ai_plan_used,
         "pieces": entries,
     }
 
-    art_path = out_dir / "art_direction_plan.json"
     fill_path = out_dir / "piece_fill_plan.json"
-    art_path.write_text(json.dumps(art_direction, ensure_ascii=False, indent=2), encoding="utf-8")
     fill_path.write_text(json.dumps(fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(
         {
-            "艺术指导方案": str(art_path.resolve()),
             "裁片填充计划": str(fill_path.resolve()),
-            "使用AI计划": ai_plan_used,
-        "草稿预览": not ai_plan_used,
-        "生产就绪": ai_plan_used,
             "程序修正": len(fix_issues),
-            "卖点裁片": art_direction["hero_piece_ids"],
+            "卖点裁片": hero_ids,
         },
         ensure_ascii=False,
     ))

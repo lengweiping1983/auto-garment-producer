@@ -4,6 +4,12 @@
 Keep long policy text in one place so prompt builders stay compact and consistent.
 """
 
+try:
+    from prompt_sanitizer import sanitize_blur_risks
+except Exception:
+    def sanitize_blur_risks(text):
+        return text
+
 FRONT_EFFECT_NEGATIVE_EN = (
     "no garment mockup, no front-view clothing render, no fashion model, no mannequin, "
     "no person wearing garment, no on-body render, no T-shirt mockup, no product photo, no lookbook"
@@ -34,34 +40,12 @@ HERO_NEGATIVE_EN = (
     "blurry, out of focus, smeared, smudged, distorted, deformed, low quality, jpeg artifacts, grainy"
 )
 
-# 保留 BOARD_NEGATIVE_EN 以兼容旧调用方
-BOARD_NEGATIVE_EN = TEXTURE_NEGATIVE_EN
-
-STRICT_JSON_ONLY_ZH = "只返回严格 JSON；不要解释文字、不要 markdown 代码块。"
-
-COMMERCIAL_FILL_RULES_ZH = [
-    "同 symmetry_group / same_shape_group 的 base 完全一致",
-    "1 个 hero overlay；trim 禁用 motif",
-    "大身低噪可穿，辅片协调，饰边克制",
-    "不得把叙事插画直接切割进裁片",
-    "每个裁片给中文 reason",
-]
-
 PANEL_DEFAULTS_EN = {
     "main": "seamless tileable visible repeat pattern with concrete small botanical or geometric motifs on pale ground, stable low-to-medium density, clearly repeatable elements, commercial apparel base fabric, no abstract wash, no plain texture, no paper grain only, no gradient, no empty background, no tonal atmosphere only, no blurred background, no scene, no landscape, no text",
     "secondary": "seamless tileable coordinating visible repeat pattern with concrete small motifs, lattice, linework, leaves, dots, or controlled geometric elements, stable repeat structure on light ground, same palette, no abstract wash, no plain texture, no paper grain only, no gradient, no empty background, no tonal atmosphere only, no scene, no text",
     "accent_light": "tiny scattered small-scale pattern on light ground, controlled density, no text",
     "hero_motif_1": "isolated foreground hero motif only, centered complete subject, transparent PNG cutout, real alpha background, preserve and recreate the primary subject from the user's reference image as much as possible, keep the recognizable silhouette, color identity, pose, proportions, and key visual details, full head and hair visible, uncropped subject, generous transparent margin above and around the subject, no background, no checkerboard transparency preview, no background art, no scenery, no garden, no foliage behind subject, no botanical backdrop, no painted wash, no rectangular composition, no full illustration scene, no vignette, no ground shadow, no text",
 }
-
-SINGLE_TEXTURE_IDS_EN = ("main", "secondary", "accent_light")
-
-TEXTURE_2X2_POSITIONS_EN = [
-    ("Top-left", "main"),
-    ("Top-right", "secondary"),
-    ("Bottom-left", "accent_light"),
-]
-
 
 def compact_style_line(style: dict | None) -> str:
     style = style or {}
@@ -130,37 +114,6 @@ def build_family_contract_text(style: dict | None = None, palette: dict | None =
 
     result = " ".join(parts)
     # 最后过一遍模糊风险词清理
-    from prompt_sanitizer import sanitize_blur_risks
-    return sanitize_blur_risks(result)
-
-
-def build_texture_2x2_board_prompt_en(panel_prompts: dict, style: dict | None = None) -> str:
-    """Build a legacy grouped texture-board prompt.
-
-    The default pipeline now generates single textures independently. This
-    helper remains for compatibility with callers that still provide boards.
-    """
-    lines = [
-        "Create one square commercial textile texture board with three coordinated fabric swatches. No text anywhere.",
-        f"Art direction: {compact_style_line(style)}",
-        "All 3 swatches are seamless tileable fabric repeats only.",
-        "All 3 swatches must look like one coherent textile family: same palette, same brush language, same saturation range.",
-        "Do not mix separate visual worlds such as warm beige line-art mushrooms with green watercolor meadow panels unless the palette and brush style are fully unified.",
-        "Every swatch must look like a fabric swatch, not a painting, scene, mockup, sticker sheet, or placement motif.",
-        "No large figurative subject, complete scene, landscape, scenery, environment, animal, character, mushroom, or flower bouquet as a full-body hero texture.",
-        "Each swatch must be a concrete visible repeat pattern with clear repeated elements, stable density, and cuttable textile structure.",
-        "Swatches must not be abstract waves, gradient wash, paper grain only, plain texture, tonal atmosphere, empty background, blurred background, or blank fabric.",
-    ]
-    for label, panel_id in TEXTURE_2X2_POSITIONS_EN:
-        prompt = panel_prompts.get(panel_id) or PANEL_DEFAULTS_EN[panel_id]
-        lines.append(f"{label}: {prompt}")
-    lines.extend([
-        "All swatches share one palette, fabric texture, brush language, and commercial apparel mood.",
-        BOARD_NEGATIVE_EN + ".",
-        "All 3 swatches must be usable seamless fabric repeats.",
-    ])
-    result = "\n".join(lines)
-    from prompt_sanitizer import sanitize_blur_risks
     return sanitize_blur_risks(result)
 
 
@@ -197,7 +150,6 @@ def build_single_texture_prompt_en(
         "Required output: one seamless tileable fabric texture only, full square artwork, no gutters, no labels, no text, no garment, no model.",
     ]
     result = "\n".join(lines)
-    from prompt_sanitizer import sanitize_blur_risks
     return sanitize_blur_risks(result)
 
 
@@ -256,10 +208,6 @@ def build_transparent_hero_prompt_en(
     )
     lines.append(HERO_NEGATIVE_EN + ".")
     result = "\n".join(lines)
-    from prompt_sanitizer import sanitize_blur_risks
     return sanitize_blur_risks(result)
 
 
-def build_collection_board_prompt_en(panel_prompts: dict, style: dict | None = None) -> str:
-    """Compatibility wrapper for callers that still import the old name."""
-    return build_texture_2x2_board_prompt_en(panel_prompts, style)

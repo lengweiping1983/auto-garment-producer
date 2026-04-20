@@ -55,7 +55,7 @@ def _edge_background_palette(rgb: Image.Image) -> list[tuple[int, int, int]]:
         counts[key] = counts.get(key, 0) + 1
     ranked = sorted(counts.items(), key=lambda item: item[1], reverse=True)
     edge_count = max(1, len(_edge_pixels(rgb)))
-    palette = [color for color, count in ranked[:6] if count / edge_count >= 0.015]
+    palette = [color for color, count in ranked[:10] if count / edge_count >= 0.005]
     return palette
 
 
@@ -73,14 +73,26 @@ def _remove_false_transparency_background(img: Image.Image) -> Image.Image:
     src = rgba.load()
     alpha = Image.new("L", rgba.size, 255)
     alpha_px = alpha.load()
-    threshold = 54
+    threshold = 72
     w, h = rgba.size
+
+    edge_avgs = [sum(c) / 3 for c in _edge_pixels(rgb) if _is_background_like(c)]
+    min_edge_avg = min(edge_avgs) if edge_avgs else 0
+    max_edge_avg = max(edge_avgs) if edge_avgs else 255
 
     def is_removable_bg(x: int, y: int) -> bool:
         r, g, b, _ = src[x, y]
         if not _is_background_like((r, g, b)):
             return False
-        return any(abs(r - bg[0]) + abs(g - bg[1]) + abs(b - bg[2]) <= threshold for bg in palette)
+        if any(abs(r - bg[0]) + abs(g - bg[1]) + abs(b - bg[2]) <= threshold for bg in palette):
+            return True
+        # Fallback for continuous gray checkerboard ranges that quantisation misses
+        spread = max((r, g, b)) - min((r, g, b))
+        if spread <= 20:
+            avg = (r + g + b) / 3
+            if min_edge_avg - 8 <= avg <= max_edge_avg + 8:
+                return True
+        return False
 
     # Only remove fake transparency that is connected to the image edge. A
     # global color erase can punch holes in white teeth, eye highlights, or
@@ -112,9 +124,50 @@ def _remove_false_transparency_background(img: Image.Image) -> Image.Image:
             queue.append(idx - w)
         if y + 1 < h:
             queue.append(idx + w)
+
+    # Remove small opaque islands left behind by the flood fill (e.g. stray
+    # checkerboard pixels trapped inside the subject silhouette).
+    alpha = _cleanup_alpha_islands(alpha, min_area=500)
     alpha = alpha.filter(ImageFilter.GaussianBlur(0.45))
     rgba.putalpha(alpha)
     return rgba
+
+
+def _cleanup_alpha_islands(alpha: Image.Image, min_area: int = 500) -> Image.Image:
+    """Erase small opaque connected components, keeping only the largest one."""
+    px = alpha.load()
+    w, h = alpha.size
+    visited = bytearray(w * h)
+    largest_comp: list[tuple[int, int]] = []
+
+    for y in range(h):
+        for x in range(w):
+            idx = y * w + x
+            if px[x, y] > 0 and not visited[idx]:
+                comp: list[tuple[int, int]] = []
+                q: deque[int] = deque([idx])
+                visited[idx] = 1
+                while q:
+                    ci = q.popleft()
+                    cx = ci % w
+                    cy = ci // w
+                    comp.append((cx, cy))
+                    for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                        nx, ny = cx + dx, cy + dy
+                        ni = ny * w + nx
+                        if 0 <= nx < w and 0 <= ny < h and not visited[ni] and px[nx, ny] > 0:
+                            visited[ni] = 1
+                            q.append(ni)
+                if len(comp) > len(largest_comp):
+                    largest_comp = comp
+
+    # Wipe anything that is not part of the largest component
+    kept = set((x, y) for x, y in largest_comp)
+    for y in range(h):
+        for x in range(w):
+            if px[x, y] > 0 and (x, y) not in kept:
+                px[x, y] = 0
+    return alpha
 
 
 def _background_sample(img: Image.Image) -> tuple[int, int, int]:

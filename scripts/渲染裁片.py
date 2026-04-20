@@ -200,22 +200,6 @@ def anchor_position(anchor: str, canvas_size: tuple[int, int], item_size: tuple[
     return x + offset_x, y + offset_y
 
 
-def compute_mask_centroid(mask: Image.Image) -> tuple[float, float]:
-    """计算二值 mask 的像素 centroid（密度加权重心）。
-    对于不对称裁片，centroid 可能偏离几何中心，更接近视觉重心。"""
-    pixels = list(mask.get_flattened_data())
-    w, h = mask.size
-    xs, ys = [], []
-    for y in range(h):
-        for x in range(w):
-            if pixels[y * w + x] > 128:
-                xs.append(x)
-                ys.append(y)
-    if not xs:
-        return w / 2.0, h / 2.0
-    return sum(xs) / len(xs), sum(ys) / len(ys)
-
-
 def compute_motif_visibility(motif: Image.Image, piece_size: tuple[int, int], pos: tuple[int, int], mask_path: str | Path) -> float:
     """计算 motif 在裁片内的可见比例（0-1）。
 
@@ -333,7 +317,7 @@ def render_texture_layer(piece: dict, layer: dict, texture_info: dict) -> Image.
     return apply_opacity(content, float(layer.get("opacity", 1) or 1))
 
 
-def render_motif_layer(piece: dict, layer: dict, motif_info: dict, underlay: Image.Image = None) -> Image.Image:
+def render_motif_layer(piece: dict, layer: dict, motif_info: dict) -> Image.Image:
     """渲染图案图层，保持 motif 原始透明度和颜色。"""
     motif = Image.open(motif_info["path"]).convert("RGBA")
     if layer.get("mirror_x"):
@@ -376,7 +360,7 @@ def render_motif_layer(piece: dict, layer: dict, motif_info: dict, underlay: Ima
     return content
 
 
-def layer_to_image(piece: dict, layer: dict, textures: dict, solids: dict, motifs: dict, underlay: Image.Image = None) -> Image.Image:
+def layer_to_image(piece: dict, layer: dict, textures: dict, solids: dict, motifs: dict) -> Image.Image:
     """将单层定义渲染为图像。"""
     fill_type = layer.get("fill_type", "texture")
     if fill_type == "solid":
@@ -386,7 +370,7 @@ def layer_to_image(piece: dict, layer: dict, textures: dict, solids: dict, motif
         motif_info = motifs.get(motif_id)
         if not motif_info:
             raise RuntimeError(f"裁片 {piece['piece_id']} 的图案 {motif_id!r} 不可用或缺失。")
-        return render_motif_layer(piece, layer, motif_info, underlay=underlay)
+        return render_motif_layer(piece, layer, motif_info)
     texture_id = layer.get("texture_id")
     texture_info = textures.get(texture_id)
     if not texture_info:
@@ -411,8 +395,7 @@ def render_layered_piece(piece: dict, plan: dict, textures: dict, solids: dict, 
     for layer in layers:
         # Motifs are generated/cropped as final cutouts. Do not post-blend them
         # into the base fabric; keep the original motif alpha and color.
-        underlay = None
-        layer_image = layer_to_image(piece, layer, textures, solids, motifs, underlay=underlay)
+        layer_image = layer_to_image(piece, layer, textures, solids, motifs)
         content.alpha_composite(layer_image)
     return apply_mask(content, piece["mask_path"])
 
@@ -829,40 +812,6 @@ def compose_preview(pieces_payload: dict, rendered: list[dict], out_path: Path) 
     return out_path
 
 
-def write_manifest(texture_set: dict, fill_plan: dict, rendered: list[dict], preview_path: Path, out_path: Path) -> Path:
-    """写入填充清单。"""
-    manifest_dir = out_path.parent.resolve()
-    manifest = {
-        "texture_set_id": texture_set.get("texture_set_id", ""),
-        "fill_plan_id": fill_plan.get("plan_id", ""),
-        "preview_path": str(preview_path.resolve()),
-        "preview_file": preview_path.name,
-        "preview_relpath": str(preview_path.resolve().relative_to(manifest_dir)) if preview_path.resolve().is_relative_to(manifest_dir) else preview_path.name,
-        "pieces": [
-            {
-                "piece_id": item["piece_id"],
-                "output_path": item["output_path"],
-                "output_file": Path(item["output_path"]).name,
-                "output_relpath": str(Path(item["output_path"]).resolve().relative_to(manifest_dir)) if Path(item["output_path"]).resolve().is_relative_to(manifest_dir) else Path(item["output_path"]).name,
-                "fill_type": item["plan"].get("fill_type"),
-                "texture_id": item["plan"].get("texture_id"),
-                "solid_id": item["plan"].get("solid_id"),
-                "scale": item["plan"].get("scale", 1),
-                "rotation": item["plan"].get("rotation", 0),
-                "texture_direction": item["plan"].get("texture_direction", ""),
-                "base": item["plan"].get("base"),
-                "overlay": item["plan"].get("overlay"),
-                "trim": item["plan"].get("trim"),
-                "garment_role": item["plan"].get("garment_role"),
-                "reason": item["plan"].get("reason", ""),
-            }
-            for item in rendered
-        ],
-    }
-    out_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    return out_path
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="使用可用面料填充服装裁片，输出透明 PNG。")
     parser.add_argument("--pieces", required=True, help="裁片清单 JSON 路径")
@@ -890,9 +839,8 @@ def main() -> int:
 
     preview = compose_preview(pieces_payload, rendered, out_dir / "preview.png")
 
-    manifest = write_manifest(texture_set, fill_plan, rendered, preview, out_dir / "texture_fill_manifest.json")
     print(json.dumps(
-        {"裁片数量": len(rendered), "预览图": str(preview.resolve()), "白底预览图": str(preview.with_name("preview_white.jpg").resolve()), "清单": str(manifest.resolve())},
+        {"裁片数量": len(rendered), "预览图": str(preview.resolve()), "白底预览图": str(preview.with_name("preview_white.jpg").resolve())},
         ensure_ascii=False,
     ))
     return 0

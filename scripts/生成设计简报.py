@@ -22,8 +22,6 @@ except Exception:
         return data
 
 from prompt_blocks import (
-    build_texture_2x2_board_prompt_en,
-    FRONT_EFFECT_NEGATIVE_EN,
     TEXTURE_NEGATIVE_EN,
     HERO_NEGATIVE_EN,
     build_family_contract_text,
@@ -298,75 +296,10 @@ def _generate_outputs(
         nap_direction = "vertical"
         print("[警告] visual_elements 中 has_nap=true 但 nap_direction 为空，已设为 'vertical'。请检查视觉分析输出。")
 
-    brief = {
-        "brief_id": style_id,
-        "aesthetic_direction": style_details.get("mood", "商业畅销款打样") if style_details else "商业畅销款打样",
-        "garment_type": garment_type,
-        "target_customer": "寻找可穿、有记忆点印花的主流客户",
-        "season": season,
-        "price_tier_signal": "中端精致",
-        "hero_selling_point": hero_selling_point,
-        "fabric": {
-            "has_nap": has_nap,
-            "nap_direction": nap_direction,
-            "nap_confidence": nap_confidence,
-            "notes": fabric_hints.get("reason", "") if isinstance(fabric_hints, dict) else "",
-        },
-        "theme_image": theme_image,
-        "theme_images": theme_images,
-        "fusion_strategy": fusion_strategy,
-        "theme_to_piece_strategy": theme_to_piece_strategy,
-        "reference_fidelity": reference_fidelity,
-        "design_dna": design_dna,
-        "single_texture_derivation": single_texture_derivation,
-        "hero_texture_fusion_plan": hero_texture_fusion_plan,
-        "user_prompt": user_prompt,
-        "wearability_notes": [
-            "保留一个明确的组合卖点概念",
-            "大面板使用低噪纹理",
-            "饰边和窄条保持安静",
-            "图案是简化的成衣定位，而非故事裁剪",
-        ],
-        "avoid": [
-            "直接叙事裁剪",
-            "人脸",
-            "文字",
-            "商标",
-            "水印",
-            "过度堆砌袖口",
-            "均匀密度全身填充",
-            "正面成衣效果图",
-            "模特上身图",
-            "服装mockup",
-        ],
-    }
-
-    style_profile = {
-        "style_id": style_id,
-        "art_style": f"从主题图衍生的商业成衣印花 — {style_details.get('medium', '综合媒介') if style_details else '综合媒介'}",
-        "palette": {
-            "primary": primary,
-            "secondary": secondary,
-            "accent": accent,
-            "dark": dark,
-        },
-        "motifs": motifs,
-        "avoid": brief["avoid"],
-        "texture_density": style_details.get("pattern_density", "低-中") if style_details else "低-中",
-        "contrast": "受控",
-        "style_details": style_details or {},
-        "fusion_strategy": fusion_strategy,
-        "theme_to_piece_strategy": theme_to_piece_strategy,
-        "reference_fidelity": reference_fidelity,
-        "design_dna": design_dna,
-        "single_texture_derivation": single_texture_derivation,
-        "hero_texture_fusion_plan": hero_texture_fusion_plan,
-    }
-
     # 构建家族契约文本，供后续注入每张单纹理提示词
     family_contract = build_family_contract_text(
         style=style_details,
-        palette=palette if isinstance(palette, dict) else style_profile.get("palette", {}),
+        palette=palette if isinstance(palette, dict) else {},
         design_dna=design_dna,
     )
 
@@ -548,7 +481,6 @@ def _generate_outputs(
         return f"{context}{prompt_text}"
 
     # 构建独立主图 + 3 张单纹理提示词。主图放在第一位，确保下游按清单顺序提交时先发主图。
-    palette = style_profile.get("palette", {})
     _prompts = [
         ("hero_motif_1", "AI生成主图透明定位图案", hero_motif_1_prompt, "single_hero", "placement_motif"),
         ("main", "可穿大身裁片", _reference_context("main", _inject_micro_structure(main_prompt, "main", texture_micro_structure)), "single_texture", "base_texture"),
@@ -570,18 +502,9 @@ def _generate_outputs(
     texture_prompts = sanitize_prompts_in_dict(texture_prompts, keys=("prompt", "negative_prompt"), domain="fashion")
 
     outputs = {
-        "商业设计简报": str(write_json(out_dir / "commercial_design_brief.json", brief).resolve()),
-        "风格档案": str(write_json(out_dir / "style_profile.json", style_profile).resolve()),
         "纹理提示词": str(write_json(out_dir / "texture_prompts.json", texture_prompts).resolve()),
     }
     return outputs
-
-
-def _build_collection_prompt_from_prompts(prompts: list[dict], style: dict) -> str:
-    """基于提示词列表构造完整的英文 2x2 纹理看板 prompt。
-    逻辑与端到端自动化.py 的 _build_collection_prompt_from_visual_elements 类似。"""
-    panel_map = {p.get("texture_id", ""): p.get("prompt", "") for p in prompts}
-    return build_texture_2x2_board_prompt_en(panel_map, style)
 
 
 if __name__ == "__main__":
