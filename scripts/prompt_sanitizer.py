@@ -24,7 +24,7 @@ _STOP_WORDS_CORE = frozenset({
     "wonderful", "fantastic", "great", "perfect",
     "just", "simply", "basically", "actually", "definitely",
     "truly", "absolutely", "totally", "completely", "highly",
-    "so", "too", "much", "many", "more", "most", "less", "least",
+    "so",
 })
 
 # 通用图像领域的停用词（包含审美词，用于人像/风景等通用场景）
