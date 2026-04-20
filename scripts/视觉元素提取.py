@@ -162,8 +162,8 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
             "hero_motif_1": "英文 isolated foreground hero motif only as transparent PNG cutout with real alpha background。结构要求：先写主体观察段（覆盖 identity/pose/expression/hair/clothing/props/accessories/composition/art_style_details 全部9维），再接透明格式约束。必须：1) preserve and recreate the primary subject from reference image；2) complete uncropped subject, full head and hair visible；3) 主体边界到图像边缘至少 30% 留白（min_margin_ratio 0.30）；4) 边缘仅 2-6px 软抗锯齿，禁止 gradient halo / semi-transparent halo / colored fringe；5) alpha 内部为硬二值，边界单像素软过渡，外部纯透明；6) no background, no checkerboard preview, no fake grid, no colored box, no plain light box, no scenery, no garden, no foliage, no painted wash, no vignette, no ground shadow"
         },
         "prompt_quality_check": {
-            "texture_passed": false,
-            "hero_passed": false,
+            "texture_passed": False,
+            "hero_passed": False,
             "rewrite_count": 0,
             "texture_violations": [],
             "hero_violations": []

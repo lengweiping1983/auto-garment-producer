@@ -636,6 +636,13 @@ def generate_single_textures_and_hero_assets(args: argparse.Namespace, out_dir: 
         hero_dir.mkdir(parents=True, exist_ok=True)
 
     jobs = []
+    if hero_prompt_file:
+        jobs.append((
+            "透明主图",
+            "hero_motif_1",
+            hero_dir,
+            _neo_generation_cmd(args, hero_dir, hero_prompt_file, negative_prompt=HERO_NEGATIVE_PROMPT, reference_images=refs),
+        ))
     for texture_id in DEFAULT_TEXTURE_IDS:
         work_dir = texture_root / texture_id
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -645,13 +652,6 @@ def generate_single_textures_and_hero_assets(args: argparse.Namespace, out_dir: 
             work_dir,
             _neo_generation_cmd(args, work_dir, prompt_files[texture_id], reference_images=refs),
         ))
-    if hero_prompt_file:
-        jobs.append((
-            "透明主图",
-            "hero_motif_1",
-            hero_dir,
-            _neo_generation_cmd(args, hero_dir, hero_prompt_file, negative_prompt=HERO_NEGATIVE_PROMPT, reference_images=refs),
-        ))
 
     env = os.environ.copy()
     texture_paths = {}
@@ -659,13 +659,14 @@ def generate_single_textures_and_hero_assets(args: argparse.Namespace, out_dir: 
 
     def _run_generation_job(job: tuple[str, str, Path, list[str]]) -> tuple[str, str, Path]:
         label, texture_id, work_dir, cmd = job
+        print(f"[Neo AI] 启动生成任务: {label} ({texture_id})")
         run_step(cmd, env=env)
         generated = latest_collection_board(work_dir)
         return label, texture_id, generated
 
     max_workers = max(1, int(getattr(args, "neo_workers", 4) or 4))
     max_workers = min(max_workers, len(jobs))
-    print(f"[Neo AI] 并行生成 {len(jobs)} 个资产，workers={max_workers}")
+    print(f"[Neo AI] 优先提交透明主图，然后并行提交纹理；资产数={len(jobs)}, workers={max_workers}")
     failures = []
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -774,7 +775,7 @@ def process_single_texture_channel(
     variant_fill_plan = force_fill_plan_to_single_texture(load_json(fill_plan_path), texture_id)
     fill_plan_path.write_text(json.dumps(variant_fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    rendered_dir = variant_dir / "rendered"
+    rendered_dir = variant_dir
     render_cmd = [
         sys.executable,
         str(SKILL_DIR / "scripts" / "渲染裁片.py"),
@@ -827,7 +828,12 @@ def run_single_texture_channel_pipeline(
     texture_root.mkdir(parents=True, exist_ok=True)
     hero_dir.mkdir(parents=True, exist_ok=True)
 
-    generation_jobs = []
+    generation_jobs = [(
+        "透明主图",
+        "hero_motif_1",
+        hero_dir,
+        _neo_generation_cmd(args, hero_dir, hero_prompt_file, negative_prompt=HERO_NEGATIVE_PROMPT, reference_images=refs),
+    )]
     for texture_id in DEFAULT_TEXTURE_IDS:
         work_dir = texture_root / texture_id
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -837,15 +843,10 @@ def run_single_texture_channel_pipeline(
             work_dir,
             _neo_generation_cmd(args, work_dir, prompt_files[texture_id], reference_images=refs),
         ))
-    generation_jobs.append((
-        "透明主图",
-        "hero_motif_1",
-        hero_dir,
-        _neo_generation_cmd(args, hero_dir, hero_prompt_file, negative_prompt=HERO_NEGATIVE_PROMPT, reference_images=refs),
-    ))
 
     def _run_generation_job(job: tuple[str, str, Path, list[str]]) -> tuple[str, str, Path]:
         label, texture_id, work_dir, cmd = job
+        print(f"[Neo AI] 启动生成任务: {label} ({texture_id})")
         run_step(cmd, env=os.environ.copy())
         return label, texture_id, latest_collection_board(work_dir)
 
@@ -861,7 +862,7 @@ def run_single_texture_channel_pipeline(
     neo_workers = min(neo_workers, len(generation_jobs))
     pipeline_workers = max(1, int(getattr(args, "pipeline_workers", 3) or 3))
     pipeline_workers = min(pipeline_workers, len(DEFAULT_TEXTURE_IDS))
-    print(f"[Neo AI] 并行生成 {len(generation_jobs)} 个资产，workers={neo_workers}")
+    print(f"[Neo AI] 优先提交透明主图，然后并行提交纹理；资产数={len(generation_jobs)}, workers={neo_workers}")
     print(f"[纹理通道] 并行后处理 workers={pipeline_workers}")
 
     def _schedule_ready_channels(executor: concurrent.futures.Executor) -> None:
@@ -1372,18 +1373,57 @@ def pieces_asset_hash_for_run(args, pieces_path: Path | None = None) -> str:
     return f"{getattr(args, 'template', '')}:s"
 
 
-def ensure_theme_front_split(args, out_dir: Path, texture_set_path: Path) -> None:
+def resolve_theme_front_source_image(args, out_dir: Path, texture_set_path: Path) -> tuple[str, str]:
+    """Find the best available hero image for front-left/front-right split."""
+    for label, value in (
+        ("AI生成主图", getattr(args, "hero_motif_image", "")),
+        ("用户主题图", getattr(args, "theme_image", "")),
+    ):
+        if value and Path(value).exists():
+            return str(Path(value).resolve()), label
+
+    try:
+        texture_set = load_json(texture_set_path)
+    except Exception:
+        texture_set = {}
+    for motif in texture_set.get("motifs", []):
+        if motif.get("motif_id") == "hero_motif_1" and motif.get("path"):
+            path = Path(motif["path"])
+            if not path.is_absolute():
+                path = Path(texture_set_path).resolve().parent / path
+            if path.exists():
+                return str(path.resolve()), "texture_set hero_motif_1"
+
+    assets_hero = out_dir / "assets" / "hero_motif_1.png"
+    if assets_hero.exists():
+        return str(assets_hero.resolve()), "assets hero_motif_1"
+
+    hero_dir = out_dir / "neo_hero_motif"
+    candidates = []
+    for pattern in ("image_*.png", "collection_board_*.png", "*.png", "*.jpg", "*.jpeg", "*.webp"):
+        candidates.extend(p for p in hero_dir.glob(pattern) if p.is_file())
+    if candidates:
+        newest = max(candidates, key=lambda p: p.stat().st_mtime)
+        return str(newest.resolve()), "neo_hero_motif"
+
+    return "", ""
+
+
+def ensure_theme_front_split(args, out_dir: Path, texture_set_path: Path) -> dict | None:
     """Generate and register front-half motifs, preferring the AI-generated transparent hero."""
-    source_image = getattr(args, "hero_motif_image", "") or getattr(args, "theme_image", "")
-    if not source_image or not create_front_split_assets or not inject_front_split_motifs:
-        return
+    if not create_front_split_assets or not inject_front_split_motifs:
+        return None
+    source_image, source_label = resolve_theme_front_source_image(args, out_dir, texture_set_path)
+    if not source_image:
+        return None
     try:
         split_assets = create_front_split_assets(source_image, out_dir)
         inject_front_split_motifs(texture_set_path, split_assets)
-        source_label = "AI生成主图" if getattr(args, "hero_motif_image", "") else "用户主题图"
         print(f"[主题前片] 已从{source_label}生成并注册切半资产: {split_assets['left']}, {split_assets['right']}")
+        return split_assets
     except Exception as exc:
         print(f"[警告] 主题前片切半资产生成失败，将继续使用普通面料规划: {exc}", file=sys.stderr)
+        return None
 
 
 def _variant_texture_ids(texture_set: dict) -> list[str]:
@@ -1514,8 +1554,11 @@ def render_texture_variants(
     fill_plan_path: Path,
     pieces_path: Path,
     default_rendered_dir: Path,
+    args: argparse.Namespace | None = None,
 ) -> list[dict]:
     """Render one 9-piece garment template per texture candidate."""
+    if args is not None:
+        ensure_theme_front_split(args, out_dir, texture_set_path)
     texture_set = load_json(texture_set_path)
     base_fill_plan = load_json(fill_plan_path)
     variant_ids = _variant_texture_ids(texture_set)
@@ -1533,7 +1576,7 @@ def render_texture_variants(
         variant_fill_plan = force_fill_plan_to_single_texture(base_fill_plan, texture_id)
         variant_fill_plan_path = variant_dir / "piece_fill_plan.json"
         variant_fill_plan_path.write_text(json.dumps(variant_fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
-        variant_rendered_dir = variant_dir / "rendered"
+        variant_rendered_dir = variant_dir
         render_cmd = [
             sys.executable,
             str(SKILL_DIR / "scripts" / "渲染裁片.py"),
@@ -2233,13 +2276,14 @@ def main() -> int:
         texture_set_path=texture_set_path,
         fill_plan_path=out_dir / "piece_fill_plan.json",
         pieces_path=pieces_path,
-        default_rendered_dir=out_dir / "rendered",
+        default_rendered_dir=out_dir / "variants" / "main",
+        args=args,
     )
 
     # Default preview now points to variants/main/rendered (or first variant if main missing)
     main_variant = next((s for s in variant_summaries if s["纹理ID"] == "main"), None)
     default_summary = main_variant or (variant_summaries[0] if variant_summaries else None)
-    default_rendered_dir = Path(default_summary["渲染目录"]) if default_summary else out_dir / "rendered"
+    default_rendered_dir = Path(default_summary["渲染目录"]) if default_summary else out_dir / "variants" / "main"
 
     summary = {
         "单纹理资产": str((out_dir / "neo_textures").resolve()) if not args.texture_set and not args.collection_board else "",

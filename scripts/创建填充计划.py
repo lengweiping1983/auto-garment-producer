@@ -294,6 +294,7 @@ def _largest_rect_in_binary(mask: Image.Image, seam_x: int | None = None) -> tup
 
 def force_theme_front_split_overlays(entries: list[dict], pieces_payload: dict, texture_set: dict, garment_map: dict, pieces_base_dir: Path | None = None) -> list[dict]:
     """Force generated theme halves onto the two front pieces when available."""
+    theme_front_scale_multiplier = 0.70
     motif_by_id = {m.get("motif_id"): m for m in texture_set.get("motifs", [])}
     motif_ids = set(motif_by_id)
     if not {"theme_front_left", "theme_front_right"}.issubset(motif_ids):
@@ -370,9 +371,9 @@ def force_theme_front_split_overlays(entries: list[dict], pieces_payload: dict, 
         # lock, render_motif_layer anchors horizontally to the centre seam.
         offset_y = round(safe_rect["y"] + safe_rect["h"] / 2 - piece_h / 2)
         return {
-            "scale": round(max_h, 3),
-            "max_width_scale": round(max_w, 3),
-            "max_height_scale": round(max_h, 3),
+            "scale": round(max_h * theme_front_scale_multiplier, 3),
+            "max_width_scale": round(max_w * theme_front_scale_multiplier, 3),
+            "max_height_scale": round(max_h * theme_front_scale_multiplier, 3),
             "fit_within_piece": True,
             "offset_y": offset_y,
             "safe_rect": safe_rect,
