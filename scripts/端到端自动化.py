@@ -834,10 +834,15 @@ def write_single_texture_variant_set(texture_set: dict, texture_id: str, variant
         item["approved"] = True
         item["candidate"] = False
         item["role"] = item.get("role") or texture_id
-    # Single-texture previews are production template previews, not hero-placement
-    # mockups. Keep the whole template visually consistent with exactly one fabric.
-    variant_set["motifs"] = []
-    variant_set.pop("theme_front_split", None)
+    # Preserve theme front split motifs so each variant still carries the hero
+    # image on the left/right front pieces. All other motifs are dropped.
+    theme_motifs = [
+        copy.deepcopy(m) for m in texture_set.get("motifs", [])
+        if m.get("motif_id") in {"theme_front_left", "theme_front_right"}
+    ]
+    variant_set["motifs"] = theme_motifs
+    if texture_set.get("theme_front_split"):
+        variant_set["theme_front_split"] = copy.deepcopy(texture_set["theme_front_split"])
     path = variant_dir / "texture_set.json"
     path.write_text(json.dumps(variant_set, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
@@ -866,6 +871,9 @@ def force_fill_plan_to_single_texture(fill_plan: dict, texture_id: str) -> dict:
         if isinstance(layer, dict):
             fill_type = layer.get("fill_type")
             if fill_type == "motif":
+                # Preserve theme front split motifs across all variants
+                if layer.get("motif_id") in {"theme_front_left", "theme_front_right"}:
+                    return layer
                 return None
             if fill_type in {"texture", "solid"} or "texture_id" in layer or "solid_id" in layer:
                 layer["fill_type"] = "texture"
@@ -888,13 +896,15 @@ def force_fill_plan_to_single_texture(fill_plan: dict, texture_id: str) -> dict:
         return layer
 
     for piece in plan.get("pieces", []):
-        if piece.get("fill_type") == "motif":
+        piece_motif_id = piece.get("motif_id") if piece.get("fill_type") == "motif" else None
+        is_theme_split = piece_motif_id in {"theme_front_left", "theme_front_right"}
+        if piece.get("fill_type") == "motif" and not is_theme_split:
             piece.update(_texture_layer("单纹理模板预览移除定位主图，统一使用当前图案纹理"))
         elif piece.get("fill_type") in {"texture", "solid"} or "texture_id" in piece or "solid_id" in piece:
             piece["fill_type"] = "texture"
             piece["texture_id"] = texture_id
             piece.pop("solid_id", None)
-        if not any(isinstance(piece.get(key), dict) for key in ("base", "overlay", "trim")):
+        if not any(isinstance(piece.get(key), dict) for key in ("base", "overlay", "trim")) and not is_theme_split:
             piece["fill_type"] = "texture"
             piece["texture_id"] = texture_id
             piece.pop("solid_id", None)
@@ -1598,7 +1608,9 @@ def main() -> int:
         "裁片模板变体": variant_summaries,
     }
     write_json(out_dir / "automation_summary.json", summary)
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    user_summary = {k: v for k, v in summary.items() if k != "裁片模板变体"}
+    user_summary["裁片模板变体"] = f"已生成 {len(variant_summaries)} 套单纹理变体至 variants/ 目录，不在此处展示"
+    print(json.dumps(user_summary, ensure_ascii=False, indent=2))
     return 0
 
 
