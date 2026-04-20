@@ -114,6 +114,93 @@ class FrontPairRenderingTest(unittest.TestCase):
             self.assertEqual(left_pixel[:3], (5 * 30, 6 * 20, 0))
             self.assertEqual(right_pixel[:3], (6 * 30, 6 * 20, 0))
 
+    def test_inverted_right_front_restores_seam_to_paper_right_edge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            left_mask = Image.new("L", (30, 50), 0)
+            ImageDraw.Draw(left_mask).rectangle((0, 5, 29, 44), fill=255)
+            right_mask = Image.new("L", (30, 50), 0)
+            ImageDraw.Draw(right_mask).rectangle((0, 5, 29, 44), fill=255)
+            left_mask_path = tmp_path / "left_mask.png"
+            right_mask_path = tmp_path / "right_mask.png"
+            left_mask.save(left_mask_path)
+            right_mask.save(right_mask_path)
+
+            texture = Image.new("RGBA", (8, 8), (0, 0, 0, 255))
+            px = texture.load()
+            for x in range(texture.width):
+                for y in range(texture.height):
+                    px[x, y] = (x * 30, y * 20, 0, 255)
+            texture_path = tmp_path / "texture.png"
+            texture.save(texture_path)
+
+            pieces_payload = {
+                "pieces": [
+                    {
+                        "piece_id": "front_left",
+                        "width": 30,
+                        "height": 50,
+                        "source_x": 0,
+                        "source_y": 0,
+                        "mask_path": str(left_mask_path),
+                        "pattern_orientation": 0,
+                    },
+                    {
+                        "piece_id": "front_right",
+                        "width": 30,
+                        "height": 50,
+                        "source_x": 100,
+                        "source_y": 0,
+                        "mask_path": str(right_mask_path),
+                        "pattern_orientation": 180,
+                    },
+                ]
+            }
+            texture_set = {
+                "textures": [{"texture_id": "main", "path": str(texture_path), "approved": True}],
+                "motifs": [],
+            }
+            base = {
+                "fill_type": "texture",
+                "texture_id": "main",
+                "scale": 1,
+                "rotation": 0,
+                "offset_x": 0,
+                "offset_y": 0,
+                "global_front_texture": True,
+            }
+            fill_plan = {
+                "pieces": [
+                    {
+                        "piece_id": "front_left",
+                        "base": dict(base),
+                        "front_pair_seam_locked": True,
+                    },
+                    {
+                        "piece_id": "front_right",
+                        "base": dict(base),
+                        "front_pair_seam_locked": True,
+                    },
+                ]
+            }
+
+            rendered = render_pieces.render_all(
+                pieces_payload,
+                texture_set,
+                fill_plan,
+                tmp_path,
+                tmp_path / "texture_set.json",
+            )
+            by_id = {item["piece_id"]: item for item in rendered}
+            right = Image.open(by_id["front_right"]["output_path"]).convert("RGBA")
+            # The right panel is inverted on the paper. Its normalized left seam
+            # must rotate back onto the paper-space right edge.
+            paper_right_edge = right.getpixel((29, 24))
+            paper_left_edge = right.getpixel((0, 24))
+            self.assertEqual(paper_right_edge[:3], (6 * 30, 1 * 20, 0))
+            self.assertEqual(paper_left_edge[:3], (3 * 30, 1 * 20, 0))
+            self.assertTrue((tmp_path / "front_pair_check.png").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

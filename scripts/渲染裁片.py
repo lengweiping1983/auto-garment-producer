@@ -432,6 +432,25 @@ def _mask_image(piece: dict) -> Image.Image:
     return Image.open(piece["mask_path"]).convert("L")
 
 
+def _front_orientation(piece: dict) -> int:
+    try:
+        return int(float(piece.get("pattern_orientation", 0) or 0)) % 360
+    except Exception:
+        return 0
+
+
+def _normalize_front_image(img: Image.Image, orientation: int) -> Image.Image:
+    if orientation == 180:
+        return img.rotate(180, expand=False)
+    return img
+
+
+def _restore_front_image(img: Image.Image, orientation: int) -> Image.Image:
+    if orientation == 180:
+        return img.rotate(180, expand=False)
+    return img
+
+
 def _apply_mask_image(content: Image.Image, mask: Image.Image) -> Image.Image:
     if content.size != mask.size:
         content = content.resize(mask.size, Image.Resampling.LANCZOS)
@@ -515,8 +534,12 @@ def _seam_span(mask: Image.Image, side: str) -> tuple[int, int]:
 
 
 def _front_pair_layout(left_piece: dict, right_piece: dict) -> dict:
-    left_mask = _mask_image(left_piece)
-    right_mask = _mask_image(right_piece)
+    left_orientation = _front_orientation(left_piece)
+    right_orientation = _front_orientation(right_piece)
+    left_raw_mask = _mask_image(left_piece)
+    right_raw_mask = _mask_image(right_piece)
+    left_mask = _normalize_front_image(left_raw_mask, left_orientation)
+    right_mask = _normalize_front_image(right_raw_mask, right_orientation)
     left_span = _seam_span(left_mask, "right")
     right_span = _seam_span(right_mask, "left")
     left_mid = (left_span[0] + left_span[1]) / 2
@@ -532,6 +555,10 @@ def _front_pair_layout(left_piece: dict, right_piece: dict) -> dict:
     return {
         "left_mask": left_mask,
         "right_mask": right_mask,
+        "left_raw_mask": left_raw_mask,
+        "right_raw_mask": right_raw_mask,
+        "left_orientation": left_orientation,
+        "right_orientation": right_orientation,
         "left_xy": (0, left_y),
         "right_xy": (left_mask.width, right_y),
         "size": (width, height),
@@ -679,9 +706,11 @@ def render_front_pair(
     right_x, right_y = layout["right_xy"]
     left_crop = content.crop((left_x, left_y, left_x + left_piece["width"], left_y + left_piece["height"]))
     right_crop = content.crop((right_x, right_y, right_x + right_piece["width"], right_y + right_piece["height"]))
+    left_crop = _restore_front_image(left_crop, layout["left_orientation"])
+    right_crop = _restore_front_image(right_crop, layout["right_orientation"])
     rendered = {
-        left_id: _apply_mask_image(left_crop, layout["left_mask"]),
-        right_id: _apply_mask_image(right_crop, layout["right_mask"]),
+        left_id: _apply_mask_image(left_crop, layout["left_raw_mask"]),
+        right_id: _apply_mask_image(right_crop, layout["right_raw_mask"]),
     }
     for pid, piece, plan in ((left_id, left_piece, left_plan), (right_id, right_piece, right_plan)):
         trim = plan.get("trim")
