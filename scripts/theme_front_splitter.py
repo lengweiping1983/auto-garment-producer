@@ -184,12 +184,14 @@ def _crop_half_to_seam_alpha(half: Image.Image, seam_side: str) -> Image.Image:
 
 
 def create_front_split_assets(theme_image: str | Path, out_dir: str | Path) -> dict:
-    """Crop the primary subject and split it into left/right front motifs."""
+    """Crop the primary subject and create full-front plus legacy split motifs."""
     out_dir = Path(out_dir)
     assets_dir = out_dir / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
     with Image.open(theme_image) as src:
         subject = _crop_subject(src)
+    full_path = assets_dir / "theme_front_full.png"
+    subject.save(full_path)
     mid = max(1, subject.width // 2)
     overlap = min(8, max(2, round(subject.width * 0.01))) if subject.width > 4 else 0
     left = subject.crop((0, 0, min(subject.width, mid + overlap), subject.height))
@@ -201,6 +203,7 @@ def create_front_split_assets(theme_image: str | Path, out_dir: str | Path) -> d
     left.save(left_path)
     right.save(right_path)
     return {
+        "full": str(full_path.resolve()),
         "left": str(left_path.resolve()),
         "right": str(right_path.resolve()),
         "source": str(Path(theme_image).resolve()),
@@ -217,8 +220,23 @@ def inject_front_split_motifs(texture_set_path: str | Path, split_assets: dict) 
     except json.JSONDecodeError:
         text = text.replace("False", "false").replace("True", "true")
         data = json.loads(text)
-    motifs = [m for m in data.get("motifs", []) if m.get("motif_id") not in {"theme_front_left", "theme_front_right"}]
+    motifs = [
+        m for m in data.get("motifs", [])
+        if m.get("motif_id") not in {"theme_front_full", "theme_front_left", "theme_front_right"}
+    ]
+    full_path = split_assets.get("full") or split_assets.get("source")
     motifs.extend([
+        {
+            "motif_id": "theme_front_full",
+            "texture_id": "theme_front_full",
+            "path": full_path,
+            "role": "front_full_theme",
+            "approved": True,
+            "candidate": False,
+            "prompt": "主题/AI主图主体完整前身画布，程序生成",
+            "model": "deterministic-theme-front-full",
+            "seed": "",
+        },
         {
             "motif_id": "theme_front_left",
             "texture_id": "theme_front_left",

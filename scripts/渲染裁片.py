@@ -428,6 +428,269 @@ def _align_image_size(img: Image.Image, target_w: int, target_h: int) -> Image.I
     return new
 
 
+def _mask_image(piece: dict) -> Image.Image:
+    return Image.open(piece["mask_path"]).convert("L")
+
+
+def _apply_mask_image(content: Image.Image, mask: Image.Image) -> Image.Image:
+    if content.size != mask.size:
+        content = content.resize(mask.size, Image.Resampling.LANCZOS)
+    out = content.convert("RGBA")
+    out.putalpha(mask)
+    return out
+
+
+def _largest_histogram_rect(heights: list[int], row_bottom: int, seam_x: int | None = None) -> tuple[int, int, int, int, int]:
+    best = (0, 0, 0, 0, 0)
+    stack: list[int] = []
+    for idx in range(len(heights) + 1):
+        current = heights[idx] if idx < len(heights) else 0
+        while stack and current < heights[stack[-1]]:
+            top = stack.pop()
+            h = heights[top]
+            left = stack[-1] + 1 if stack else 0
+            w = idx - left
+            if h > 0 and w > 0 and (seam_x is None or left < seam_x < left + w):
+                area = w * h
+                if area > best[0]:
+                    best = (area, left, row_bottom - h + 1, w, h)
+        stack.append(idx)
+    return best
+
+
+def _largest_rect_in_binary(mask: Image.Image, seam_x: int | None = None) -> tuple[int, int, int, int]:
+    binary = mask.convert("L").point(lambda value: 255 if value > 128 else 0)
+    max_side = 420
+    scale = min(1.0, max_side / max(1, max(binary.size)))
+    if scale < 1.0:
+        resized = binary.resize((max(1, round(binary.width * scale)), max(1, round(binary.height * scale))), Image.Resampling.NEAREST)
+        scaled_seam = round(seam_x * scale) if seam_x is not None else None
+    else:
+        resized = binary
+        scaled_seam = seam_x
+    pixels = list(resized.get_flattened_data())
+    heights = [0] * resized.width
+    best = (0, 0, 0, 0, 0)
+    for y in range(resized.height):
+        row = y * resized.width
+        for x in range(resized.width):
+            heights[x] = heights[x] + 1 if pixels[row + x] > 128 else 0
+        current = _largest_histogram_rect(heights, y, scaled_seam)
+        if current[0] > best[0]:
+            best = current
+    if best[0] <= 0:
+        bbox = binary.getbbox()
+        return bbox or (0, 0, binary.width, binary.height)
+    _, x, y, w, h = best
+    if scale < 1.0:
+        return (
+            max(0, round(x / scale)),
+            max(0, round(y / scale)),
+            min(mask.width, round((x + w) / scale)),
+            min(mask.height, round((y + h) / scale)),
+        )
+    return (x, y, x + w, y + h)
+
+
+def _seam_span(mask: Image.Image, side: str) -> tuple[int, int]:
+    """Return y span near the actual front seam edge, not the paper top."""
+    w, h = mask.size
+    depth = max(8, min(64, max(1, w // 6)))
+    if side == "right":
+        xs = range(max(0, w - depth), w)
+    else:
+        xs = range(0, min(w, depth))
+    pixels = mask.load()
+    ys = [
+        y
+        for y in range(h)
+        if any(pixels[x, y] > 128 for x in xs)
+    ]
+    if ys:
+        return min(ys), max(ys) + 1
+    bbox = mask.getbbox()
+    if bbox:
+        return bbox[1], bbox[3]
+    return 0, h
+
+
+def _front_pair_layout(left_piece: dict, right_piece: dict) -> dict:
+    left_mask = _mask_image(left_piece)
+    right_mask = _mask_image(right_piece)
+    left_span = _seam_span(left_mask, "right")
+    right_span = _seam_span(right_mask, "left")
+    left_mid = (left_span[0] + left_span[1]) / 2
+    right_mid = (right_span[0] + right_span[1]) / 2
+    left_y = 0
+    right_y = round(left_mid - right_mid)
+    min_y = min(left_y, right_y)
+    if min_y < 0:
+        left_y -= min_y
+        right_y -= min_y
+    width = left_mask.width + right_mask.width
+    height = max(left_y + left_mask.height, right_y + right_mask.height)
+    return {
+        "left_mask": left_mask,
+        "right_mask": right_mask,
+        "left_xy": (0, left_y),
+        "right_xy": (left_mask.width, right_y),
+        "size": (width, height),
+        "seam_x": left_mask.width,
+        "left_span": left_span,
+        "right_span": right_span,
+    }
+
+
+def _combined_front_mask(layout: dict) -> Image.Image:
+    mask = Image.new("L", layout["size"], 0)
+    mask.paste(layout["left_mask"], layout["left_xy"])
+    mask.paste(layout["right_mask"], layout["right_xy"])
+    return mask
+
+
+def _front_pair_ids(pieces_payload: dict, entries: dict) -> tuple[str, str] | tuple[None, None]:
+    candidates = [
+        pid for pid, plan in entries.items()
+        if plan.get("front_pair_seam_locked")
+        or (isinstance(plan.get("base"), dict) and plan["base"].get("global_front_texture"))
+        or (isinstance(plan.get("overlay"), dict) and plan["overlay"].get("global_front_motif"))
+        or (isinstance(plan.get("overlay"), dict) and plan["overlay"].get("motif_id") in {"theme_front_full", "theme_front_left", "theme_front_right"})
+    ]
+    piece_by_id = {piece["piece_id"]: piece for piece in pieces_payload.get("pieces", [])}
+    candidates = [pid for pid in candidates if pid in piece_by_id]
+    if len(candidates) < 2:
+        return None, None
+
+    def _side_score(pid: str) -> tuple[int, int, str]:
+        plan = entries[pid]
+        overlay = plan.get("overlay") if isinstance(plan.get("overlay"), dict) else {}
+        text = " ".join(str(value) for value in (overlay.get("motif_id"), overlay.get("legacy_split_motif_id"), plan.get("reason", "")))
+        if "theme_front_left" in text or "左前片" in text:
+            side = 0
+        elif "theme_front_right" in text or "右前片" in text:
+            side = 1
+        else:
+            side = 0
+        return side, piece_by_id[pid].get("source_x", 0), pid
+
+    ordered = sorted(candidates[:], key=_side_score)
+    if len(ordered) >= 2:
+        return ordered[0], ordered[1]
+    return None, None
+
+
+def _load_front_motif(overlay: dict, motifs: dict) -> Image.Image | None:
+    motif_id = overlay.get("motif_id")
+    if motif_id in {"theme_front_left", "theme_front_right"} and motifs.get("theme_front_full"):
+        motif_id = "theme_front_full"
+    motif_info = motifs.get(motif_id)
+    if motif_info and motif_id not in {"theme_front_left", "theme_front_right"}:
+        return Image.open(motif_info["path"]).convert("RGBA")
+    left_info = motifs.get("theme_front_left")
+    right_info = motifs.get("theme_front_right")
+    if not left_info or not right_info:
+        return None
+    left = Image.open(left_info["path"]).convert("RGBA")
+    right = Image.open(right_info["path"]).convert("RGBA")
+    height = max(left.height, right.height)
+    full = Image.new("RGBA", (left.width + right.width, height), (0, 0, 0, 0))
+    full.alpha_composite(left, (0, (height - left.height) // 2))
+    full.alpha_composite(right, (left.width, (height - right.height) // 2))
+    return full
+
+
+def _render_front_pair_base(canvas_size: tuple[int, int], base: dict, textures: dict, solids: dict) -> Image.Image:
+    if not isinstance(base, dict):
+        return Image.new("RGBA", canvas_size, (0, 0, 0, 0))
+    if base.get("fill_type") == "solid":
+        solid = solids.get(base.get("solid_id")) or next(iter(solids.values()), {"color": "#6f9a4d"})
+        try:
+            color = ImageColor.getrgb(solid.get("color", "#6f9a4d")) + (255,)
+        except Exception:
+            color = (107, 143, 69, 255)
+        return apply_opacity(Image.new("RGBA", canvas_size, color), float(base.get("opacity", 1) or 1))
+    texture_id = base.get("texture_id")
+    texture_info = textures.get(texture_id)
+    if not texture_info:
+        raise RuntimeError(f"左右前片连续纹理 {texture_id!r} 不可用或缺失。")
+    texture = Image.open(texture_info["path"]).convert("RGBA")
+    pseudo_piece = {"width": canvas_size[0], "height": canvas_size[1]}
+    texture = transform_texture(texture, base, pseudo_piece)
+    return apply_opacity(
+        tile_image(texture, canvas_size, int(base.get("offset_x", 0) or 0), int(base.get("offset_y", 0) or 0)),
+        float(base.get("opacity", 1) or 1),
+    )
+
+
+def _render_front_pair_motif(canvas_size: tuple[int, int], layout: dict, overlay: dict, motifs: dict) -> Image.Image:
+    motif = _load_front_motif(overlay, motifs)
+    content = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
+    if motif is None:
+        return content
+    if overlay.get("mirror_x"):
+        motif = ImageOps.mirror(motif)
+    if overlay.get("mirror_y"):
+        motif = ImageOps.flip(motif)
+    rotation = float(overlay.get("rotation", 0) or 0)
+    if abs(rotation % 360) > 0.001:
+        motif = motif.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
+    combined_mask = _combined_front_mask(layout)
+    safe = _largest_rect_in_binary(combined_mask, seam_x=layout["seam_x"])
+    safe_w = max(1, safe[2] - safe[0])
+    safe_h = max(1, safe[3] - safe[1])
+    multiplier = max(0.05, float(overlay.get("front_pair_scale_multiplier", overlay.get("scale", 0.70)) or 0.70))
+    ratio = min(safe_w / max(1, motif.width), safe_h / max(1, motif.height)) * multiplier
+    motif = motif.resize((max(1, round(motif.width * ratio)), max(1, round(motif.height * ratio))), Image.Resampling.LANCZOS)
+    x = round(safe[0] + (safe_w - motif.width) / 2 + int(overlay.get("offset_x", 0) or 0))
+    y = round(safe[1] + (safe_h - motif.height) / 2 + int(overlay.get("offset_y", 0) or 0))
+    content.alpha_composite(motif, (x, y))
+    return apply_opacity(content, float(overlay.get("opacity", 1) or 1))
+
+
+def render_front_pair(
+    pieces_payload: dict,
+    entries: dict,
+    textures: dict,
+    solids: dict,
+    motifs: dict,
+    out_dir: Path,
+) -> dict[str, Image.Image]:
+    """Render left/right front pieces from one logical sewn-front canvas."""
+    left_id, right_id = _front_pair_ids(pieces_payload, entries)
+    if not left_id or not right_id:
+        return {}
+    piece_by_id = {piece["piece_id"]: piece for piece in pieces_payload.get("pieces", [])}
+    left_piece = piece_by_id[left_id]
+    right_piece = piece_by_id[right_id]
+    left_plan = entries[left_id]
+    right_plan = entries[right_id]
+    layout = _front_pair_layout(left_piece, right_piece)
+    content = _render_front_pair_base(layout["size"], left_plan.get("base") or right_plan.get("base"), textures, solids)
+    overlay = left_plan.get("overlay") if isinstance(left_plan.get("overlay"), dict) else right_plan.get("overlay")
+    if isinstance(overlay, dict) and overlay.get("fill_type") == "motif":
+        content.alpha_composite(_render_front_pair_motif(layout["size"], layout, overlay, motifs))
+
+    combined_mask = _combined_front_mask(layout)
+    check = Image.new("RGBA", layout["size"], (255, 255, 255, 255))
+    check.alpha_composite(_apply_mask_image(content, combined_mask))
+    check.save(out_dir / "front_pair_check.png")
+
+    left_x, left_y = layout["left_xy"]
+    right_x, right_y = layout["right_xy"]
+    left_crop = content.crop((left_x, left_y, left_x + left_piece["width"], left_y + left_piece["height"]))
+    right_crop = content.crop((right_x, right_y, right_x + right_piece["width"], right_y + right_piece["height"]))
+    rendered = {
+        left_id: _apply_mask_image(left_crop, layout["left_mask"]),
+        right_id: _apply_mask_image(right_crop, layout["right_mask"]),
+    }
+    for pid, piece, plan in ((left_id, left_piece, left_plan), (right_id, right_piece, right_plan)):
+        trim = plan.get("trim")
+        if isinstance(trim, dict):
+            trim_image = layer_to_image(piece, trim, textures, solids, motifs)
+            rendered[pid].alpha_composite(_apply_mask_image(trim_image, _mask_image(piece)))
+    return rendered
+
+
 def render_all(pieces_payload: dict, texture_set: dict, fill_plan: dict, out_dir: Path, texture_set_path: Path) -> list[dict]:
     """渲染所有裁片。
 
@@ -455,10 +718,22 @@ def render_all(pieces_payload: dict, texture_set: dict, fill_plan: dict, out_dir
 
     rendered_paths = {}
     rendered = []
+    front_pair_images = render_front_pair(pieces_payload, entries, textures, solids, motifs, out_dir)
+    for piece in pieces_payload.get("pieces", []):
+        pid = piece["piece_id"]
+        image = front_pair_images.get(pid)
+        if image is None:
+            continue
+        output_path = pieces_dir / f"{pid}.png"
+        image.save(output_path)
+        rendered_paths[pid] = output_path
+        rendered.append({"piece_id": pid, "output_path": str(output_path.resolve()), "plan": entries.get(pid)})
 
     # 阶段 1：渲染所有 master pieces（非 slave）
     for piece in pieces_payload.get("pieces", []):
         pid = piece["piece_id"]
+        if pid in front_pair_images:
+            continue
         if pid in slave_map:
             continue
         plan = entries.get(pid)

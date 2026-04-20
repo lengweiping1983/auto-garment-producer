@@ -10,7 +10,7 @@ python3 scripts/端到端自动化.py --theme-image /path/to/theme.png --out /pa
 
 `--out /path/to/output` 会作为任务根目录使用，脚本会自动创建/复用 `output/YYYYMMDD_HHMMSS/`，所有业务产物都写入该任务子目录；显式传入时间戳目录时会直接续跑该目录。
 
-没有现成 `texture_set.json` 或 2x2 看板时，流程调用 Neo AI 并行生成 2x2 面料纹理看板和 1 张完整不裁头的透明主图。有 AI 主图时，程序会裁剪该主图主体区域，保留透明留白后竖向切为左右两半，分别生成 `theme_front_left.png` 和 `theme_front_right.png` 作为可选定位资产。2x2 裁出的 4 个纹理全部分别生成 4 套单纹理 9 裁片模板，直接输出在 `variants/<texture_id>/`。每套变体的 `preview.png` 和 `preview_white.jpg` 只使用当前一张图案纹理，不叠加 motif/主图，以便整套模板保持一致；预览图不作为后续 AI/自动复审输入。
+没有现成 `texture_set.json` 或 2x2 看板时，流程调用 Neo AI 并行生成面料纹理和 1 张完整不裁头的透明主图。有 AI 主图时，程序会裁剪该主图主体区域，生成 `theme_front_full.png` 作为左右前片共享的连续前身主图，同时保留 `theme_front_left.png` 和 `theme_front_right.png` 作为兼容资产。单纹理变体直接输出在 `variants/<texture_id>/`；每套变体的左右前片会从同一张虚拟前身画布裁切，底纹和主图都必须跨中缝对齐，纸样预览中的白色间距不参与对位。
 
 ## 关键目录
 

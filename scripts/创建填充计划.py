@@ -280,7 +280,7 @@ def _largest_rect_in_binary(mask: Image.Image, seam_x: int | None = None) -> tup
         resized = binary
         scaled_seam = seam_x
     w, h = resized.size
-    pixels = list(resized.getdata())
+    pixels = list(resized.get_flattened_data())
     heights = [0] * w
     best = (0, 0, 0, 0, 0)
     for y in range(h):
@@ -304,11 +304,13 @@ def _largest_rect_in_binary(mask: Image.Image, seam_x: int | None = None) -> tup
 
 
 def force_theme_front_split_overlays(entries: list[dict], pieces_payload: dict, texture_set: dict, garment_map: dict, pieces_base_dir: Path | None = None) -> list[dict]:
-    """Force generated theme halves onto the two front pieces when available."""
+    """Force generated theme artwork onto the two front pieces when available."""
     theme_front_scale_multiplier = 0.70
     motif_by_id = {m.get("motif_id"): m for m in texture_set.get("motifs", [])}
     motif_ids = set(motif_by_id)
-    if not {"theme_front_left", "theme_front_right"}.issubset(motif_ids):
+    has_full_front = "theme_front_full" in motif_ids
+    has_split_front = {"theme_front_left", "theme_front_right"}.issubset(motif_ids)
+    if not has_full_front and not has_split_front:
         return entries
     left_id, right_id = find_front_pair_piece_ids(pieces_payload, garment_map)
     if not left_id or not right_id:
@@ -390,6 +392,8 @@ def force_theme_front_split_overlays(entries: list[dict], pieces_payload: dict, 
             "safe_rect": safe_rect,
         }
 
+    global_motif_id = "theme_front_full" if has_full_front else ""
+
     for pid, motif_id, side, anchor, seam_lock in (
         (left_id, "theme_front_left", "左前片", "right", "right"),
         (right_id, "theme_front_right", "右前片", "left", "left"),
@@ -397,28 +401,38 @@ def force_theme_front_split_overlays(entries: list[dict], pieces_payload: dict, 
         entry = by_id.get(pid)
         if not entry:
             continue
+        base = entry.get("base")
+        if isinstance(base, dict):
+            base["global_front_texture"] = True
+            base["front_pair_seam_locked"] = True
         side_key = "left" if motif_id == "theme_front_left" else "right"
-        sizing = _safe_front_overlay_params(piece_by_id.get(pid, {}), motif_id, side_key)
+        render_motif_id = global_motif_id or motif_id
+        sizing_motif_id = motif_id if motif_id in motif_ids else render_motif_id
+        sizing = _safe_front_overlay_params(piece_by_id.get(pid, {}), sizing_motif_id, side_key)
         entry["overlay"] = make_layer(
             "motif",
-            f"用户主题主体切半强制落位到{side}，限制在左右前片合并后的最大内接矩形内",
-            motif_id=motif_id,
-            anchor=anchor,
+            f"用户主题主体按左右前片连续画布强制落位到{side}，底纹与主图跨中缝对齐",
+            motif_id=render_motif_id,
+            legacy_split_motif_id=motif_id,
+            anchor="center" if global_motif_id else anchor,
             scale=sizing["scale"],
             rotation=0,
             opacity=1.0,
             offset_x=0,
-            offset_y=sizing["offset_y"],
-            seam_lock=seam_lock,
+            offset_y=0 if global_motif_id else sizing["offset_y"],
+            seam_lock="front_pair" if global_motif_id else seam_lock,
             max_width_scale=sizing["max_width_scale"],
             max_height_scale=sizing["max_height_scale"],
             fit_within_piece=sizing["fit_within_piece"],
             combined_front_safe_rect=sizing["safe_rect"],
+            global_front_motif=True,
+            front_pair_scale_multiplier=theme_front_scale_multiplier,
         )
+        entry["front_pair_seam_locked"] = True
         entry["garment_role"] = "front_body"
         entry["zone"] = "body"
         entry["theme_front_split_forced"] = True
-        entry["reason"] = (entry.get("reason", "") + f"；{side}使用程序生成的主题半幅").strip("；")
+        entry["reason"] = (entry.get("reason", "") + f"；{side}使用程序生成的连续前身主题图").strip("；")
     return entries
 
 

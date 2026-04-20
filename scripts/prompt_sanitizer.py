@@ -156,6 +156,163 @@ NOISE_WORDS = frozenset({
     "attempt to", "should be", "must be", "needs to", "has to",
 })
 
+# ===== 模糊/糊化风险词（BLUR RISK WORDS）=====
+# 这些词会让 AI 生成磨损、做旧、模糊、低对比度、渐变 wash 等效果，
+# 导致纹理下半部分糊化、出现不相关场景元素或文字痕迹。
+BLUR_RISK_PHRASES = {
+    #  phrase_lower : replacement_or_empty
+    "slightly distressed": "",
+    "distressed": "",
+    "vintage screen-printed cotton": "retro screen-print flat ink",
+    "vintage screen-print cotton": "retro screen-print flat ink",
+    "vintage print texture": "",
+    "vintage texture": "",
+    "vintage stipple shading": "crisp dot pattern",
+    "stipple shading": "crisp dot pattern",
+    "stipple": "crisp dot pattern",
+    "halftone texture": "halftone dots",
+    "halftone print quality": "halftone dots",
+    "halftone shading": "halftone dots",
+    "subtle grain": "",
+    "grain": "",
+    "low contrast": "",
+    "soft fading edges": "clean anti-aliased edges",
+    "fading edges": "clean edges",
+    "gradient ground": "flat color ground",
+    "sunset gradient": "flat warm color",
+    "warm sunset gradient": "flat warm color",
+    "fabric weave appearance": "flat textile surface",
+    "vintage fabric weave": "flat textile surface",
+    "weathered": "",
+    "aged": "",
+    "worn": "",
+    "mottled": "",
+    "faded": "",
+    "sunbleached": "",
+    "tonal atmosphere": "",
+    "atmospheric scene": "",
+    "moody landscape": "",
+    "blurred background": "",
+}
+
+# 单独单词级别的模糊风险词（主要出现在 positive prompt 中会导致糊化）
+BLUR_RISK_WORDS = frozenset({
+    "distressed", "stipple", "blotchy", "hazy", "foggy", "dreamy", "ethereal",
+})
+
+# 这些词在 negative prompt 中是合法的反模糊禁止语，在 positive 中才是风险
+BLUR_RISK_WORDS_POSITIVE_ONLY = frozenset({
+    "vignette", "smudged", "smeared", "muddy",
+})
+
+# 用于 negative prompt 的增强反模糊词
+ANTI_BLUR_NEGATIVE_ADDONS = (
+    "blurry, out of focus, smeared, smudged, vignette, "
+    "distorted, deformed, low quality, jpeg artifacts, grainy"
+)
+
+
+def _is_in_negation_span(lower_text: str, target_word: str, word_index: int) -> bool:
+    """检查目标词是否处于 no/without 引导的否定范围内。
+    
+    支持简单结构：
+    - no xxx
+    - no xxx or yyy
+    - without xxx, yyy, zzz
+    """
+    tokens = lower_text.split()
+    # 找到 target_word 在 tokens 中的位置（近似）
+    # 由于传入的是原始位置，我们重新定位
+    token_words = [re.sub(r"[^a-z0-9-]+", "", t) for t in tokens]
+    try:
+        idx = token_words.index(target_word, max(0, word_index - 3))
+    except ValueError:
+        return False
+    
+    # 向前搜索 no/without，最多回退 15 个词
+    start = max(0, idx - 15)
+    for j in range(idx - 1, start - 1, -1):
+        if j < 0:
+            break
+        t = token_words[j]
+        if t in ("no", "without"):
+            return True
+        # 如果遇到句号、分号或其他分隔词，认为否定范围结束
+        if tokens[j].endswith((".", ";")):
+            break
+        # 如果遇到动词或新的主语，认为范围结束（简化处理）
+        if t in ("is", "are", "has", "have", "create", "generate"):
+            break
+    return False
+
+
+def detect_blur_risks(text: str, prompt_role: str = "positive") -> list[str]:
+    """检测 prompt 中可能导致图像糊化/模糊的词语，返回风险词列表。
+    
+    Args:
+        text: 输入 prompt 文本
+        prompt_role: "positive" 或 "negative". negative prompt 中反模糊禁止语不算风险.
+    
+    自动排除 'no xxx' / 'without xxx' / 'no xxx or yyy' 否定结构中的词。
+    """
+    if not text:
+        return []
+    risks = []
+    lower = text.lower()
+    
+    # 检测短语级别
+    for phrase in BLUR_RISK_PHRASES:
+        if phrase not in lower:
+            continue
+        # 检查该短语的每次出现是否被否定
+        for m in re.finditer(re.escape(phrase), lower):
+            span_start = max(0, m.start() - 40)
+            context = lower[span_start:m.start()]
+            # 如果上下文中有 no/without 且中间没有被句号/分号打断
+            if re.search(r"\b(no|without)\b[^.;]*$", context):
+                continue
+            risks.append(phrase)
+            break
+    
+    # 检测单词级别
+    words = re.findall(r"[a-zA-Z-]+", lower)
+    for i, word in enumerate(words):
+        # 基础风险词
+        if word in BLUR_RISK_WORDS and word not in risks:
+            if _is_in_negation_span(lower, word, i):
+                continue
+            risks.append(word)
+        # positive-only 风险词
+        if prompt_role == "positive" and word in BLUR_RISK_WORDS_POSITIVE_ONLY and word not in risks:
+            if _is_in_negation_span(lower, word, i):
+                continue
+            risks.append(word)
+    return risks
+
+
+def sanitize_blur_risks(text: str) -> str:
+    """清理 prompt 中的模糊风险词，替换为安全表达或直接删除。"""
+    if not text:
+        return text
+    out = text
+    # 按长度降序，避免短词先匹配导致长词匹配失败
+    for phrase in sorted(BLUR_RISK_PHRASES.keys(), key=len, reverse=True):
+        replacement = BLUR_RISK_PHRASES[phrase]
+        # 使用大小写不敏感的正则替换，保留原大小写风格
+        def _repl(m: re.Match) -> str:
+            orig = m.group(0)
+            if not replacement:
+                return ""
+            return _token_case_like(orig, replacement)
+        # 匹配边界或空格前后的短语
+        pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+        out = pattern.sub(_repl, out)
+    # 清理多余空格和标点
+    out = re.sub(r"\s+", " ", out)
+    out = re.sub(r"\s+([,.;:!?])", r"\1", out)
+    out = re.sub(r"([,.;:!?]){2,}", r"\1", out)
+    return out.strip(" ,;")
+
 
 def _get_stop_words(domain: str = "generic") -> frozenset:
     """根据领域返回对应的停用词集合。"""

@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from PIL import Image
@@ -32,6 +33,7 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 NEO_AI_SCRIPT = SKILL_DIR.parent / "neo-ai" / "scripts" / "generate_texture_collection_board.py"
 NEO_UPLOAD_SCRIPT = SKILL_DIR.parent / "neo-ai" / "scripts" / "upload_oss.py"
 DEFAULT_TEXTURE_IDS = ("main", "secondary", "accent_light")
+GENERATION_STATUS_FILE = "request_status.json"
 HERO_NEGATIVE_PROMPT = (
     "text, labels, captions, titles, typography, words, letters, signage, logo, watermark, "
     "plain light box, colored background box, filled rectangle, background art, scenery, landscape, environment, "
@@ -82,6 +84,10 @@ def file_sha256(path: str | Path) -> str:
         for chunk in iter(lambda: f.read(8192), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def text_sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def files_sha256(paths: list[str | Path]) -> list[str]:
@@ -340,6 +346,315 @@ def run_step_after_launch(
     if check and rc:
         raise subprocess.CalledProcessError(rc, cmd)
     return subprocess.CompletedProcess(cmd, rc)
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now().isoformat()
+
+
+def _cmd_option_value(cmd: list[str], option: str, default: str = "") -> str:
+    try:
+        idx = cmd.index(option)
+    except ValueError:
+        return default
+    if idx + 1 >= len(cmd):
+        return default
+    return str(cmd[idx + 1])
+
+
+def _cmd_option_values(cmd: list[str], option: str) -> list[str]:
+    values = []
+    for idx, item in enumerate(cmd):
+        if item == option and idx + 1 < len(cmd):
+            values.append(str(cmd[idx + 1]))
+    return values
+
+
+def _redact_cmd(cmd: list[str]) -> list[str]:
+    redacted = []
+    skip_next = False
+    for idx, item in enumerate(cmd):
+        if skip_next:
+            redacted.append("<redacted>")
+            skip_next = False
+            continue
+        redacted.append(str(item))
+        if item in {"--token", "--access-token"}:
+            skip_next = True
+    return redacted
+
+
+def _prompt_text_from_cmd(cmd: list[str]) -> str:
+    prompt_file = _cmd_option_value(cmd, "--prompt-file")
+    if prompt_file and Path(prompt_file).exists():
+        return Path(prompt_file).read_text(encoding="utf-8").strip()
+    return _cmd_option_value(cmd, "--prompt")
+
+
+def _generation_identity(texture_id: str, cmd: list[str]) -> dict:
+    prompt_file = _cmd_option_value(cmd, "--prompt-file")
+    prompt_text = _prompt_text_from_cmd(cmd)
+    negative_prompt = _cmd_option_value(cmd, "--negative-prompt")
+    return {
+        "texture_id": texture_id,
+        "prompt_sha256": text_sha256(prompt_text) if prompt_text else "",
+        "prompt_file": str(Path(prompt_file).resolve()) if prompt_file else "",
+        "reference_images": _cmd_option_values(cmd, "--reference-image"),
+        "model": _cmd_option_value(cmd, "--model"),
+        "size": _cmd_option_value(cmd, "--size"),
+        "output_format": _cmd_option_value(cmd, "--output-format", "png"),
+        "num_images": _cmd_option_value(cmd, "--num-images", "1"),
+        "negative_prompt_sha256": text_sha256(negative_prompt) if negative_prompt else "",
+    }
+
+
+def _status_path(work_dir: Path) -> Path:
+    return work_dir / GENERATION_STATUS_FILE
+
+
+def _write_generation_status(
+    work_dir: Path,
+    texture_id: str,
+    status: str,
+    cmd: list[str],
+    *,
+    attempt: int = 0,
+    max_attempts: int = 1,
+    task_code: str = "",
+    error: str = "",
+    generated_image: str = "",
+    final_asset: str = "",
+    extra: dict | None = None,
+) -> None:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    previous = {}
+    path = _status_path(work_dir)
+    if path.exists():
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            previous = {}
+    payload = {
+        **previous,
+        "request_id": "neo_generation_request_v1",
+        "texture_id": texture_id,
+        "status": status,
+        "attempt": attempt or previous.get("attempt", 0),
+        "max_attempts": max_attempts or previous.get("max_attempts", 1),
+        "command": _redact_cmd(cmd),
+        "identity": _generation_identity(texture_id, cmd),
+        "updated_at": _now_iso(),
+    }
+    if status == "pending":
+        payload.setdefault("created_at", _now_iso())
+        payload["started_at"] = _now_iso()
+        payload.pop("error", None)
+    if status == "submitted":
+        payload["submitted_at"] = _now_iso()
+    if status in {"success", "failed", "downloaded"}:
+        payload["finished_at"] = _now_iso()
+    if task_code:
+        payload["task_code"] = task_code
+    if generated_image:
+        payload["generated_image"] = generated_image
+    if final_asset:
+        payload["final_asset"] = final_asset
+    if error:
+        payload["error"] = error
+    if extra:
+        payload.update(extra)
+    write_json(path, payload)
+
+
+def _metadata_matches_identity(metadata: dict, expected_identity: dict) -> bool:
+    prompt = metadata.get("prompt", "")
+    expected_prompt_hash = expected_identity.get("prompt_sha256", "")
+    if expected_prompt_hash and text_sha256(prompt.strip()) != expected_prompt_hash:
+        return False
+    expected_negative_hash = expected_identity.get("negative_prompt_sha256", "")
+    if expected_negative_hash and text_sha256(str(metadata.get("negative_prompt", "")).strip()) != expected_negative_hash:
+        return False
+    if str(metadata.get("model", "")) != str(expected_identity.get("model", "")):
+        return False
+    if str(metadata.get("size", "")) != str(expected_identity.get("size", "")):
+        return False
+    expected_refs = expected_identity.get("reference_images", []) or []
+    actual_refs = metadata.get("reference_images", []) or []
+    if actual_refs != expected_refs:
+        return False
+    return True
+
+
+def _status_matches_identity(status: dict, expected_identity: dict) -> bool:
+    identity = status.get("identity") or {}
+    keys = ("prompt_sha256", "reference_images", "model", "size", "output_format", "num_images", "negative_prompt_sha256")
+    return all(identity.get(key) == expected_identity.get(key) for key in keys)
+
+
+def _existing_generation_matches(work_dir: Path, final_asset: Path, texture_id: str, cmd: list[str]) -> bool:
+    if not final_asset.exists():
+        return False
+    expected_identity = _generation_identity(texture_id, cmd)
+    status_path = _status_path(work_dir)
+    if status_path.exists():
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            if status.get("status") == "success" and _status_matches_identity(status, expected_identity):
+                return True
+        except Exception:
+            pass
+    metadata_path = work_dir / "metadata.json"
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            return _metadata_matches_identity(metadata, expected_identity)
+        except Exception:
+            return False
+    return False
+
+
+def _load_existing_reference_images(out_dir: Path) -> list[str]:
+    path = out_dir / "neo_reference_images.json"
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    refs = payload.get("reference_images", [])
+    if not isinstance(refs, list):
+        return []
+    urls = []
+    for item in refs:
+        if isinstance(item, dict) and item.get("url"):
+            urls.append(str(item["url"]))
+        elif isinstance(item, str):
+            urls.append(item)
+    return urls
+
+
+def _generation_retry_count(texture_id: str) -> int:
+    if texture_id == "main":
+        return 2
+    if texture_id in {"secondary", "accent_light", "hero_motif_1"}:
+        return 1
+    return 0
+
+
+def _run_neo_generation_with_status(
+    label: str,
+    texture_id: str,
+    work_dir: Path,
+    cmd: list[str],
+    *,
+    env: dict | None = None,
+    retries: int = 0,
+    on_launch=None,
+) -> Path:
+    """Run one Neo generation command, recording status and retrying failures."""
+    max_attempts = retries + 1
+    last_error = ""
+    for attempt in range(1, max_attempts + 1):
+        _write_generation_status(
+            work_dir,
+            texture_id,
+            "pending",
+            cmd,
+            attempt=attempt,
+            max_attempts=max_attempts,
+        )
+        print(f"[Neo AI] 启动生成任务: {label} ({texture_id}) attempt={attempt}/{max_attempts}")
+        print("运行:", " ".join(_redact_cmd(cmd)))
+        task_code = ""
+        output_tail: list[str] = []
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        if on_launch:
+            on_launch()
+            on_launch = None
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            print(line, end="")
+            output_tail.append(line.rstrip())
+            output_tail = output_tail[-40:]
+            match = re.search(r"\bTask:\s*(\S+)", line)
+            if match and not task_code:
+                task_code = match.group(1)
+                _write_generation_status(
+                    work_dir,
+                    texture_id,
+                    "submitted",
+                    cmd,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    task_code=task_code,
+                )
+        proc.stdout.close()
+        rc = proc.wait()
+        if rc == 0:
+            try:
+                generated = latest_collection_board(work_dir)
+                try:
+                    metadata = json.loads((work_dir / "metadata.json").read_text(encoding="utf-8"))
+                    task_code = task_code or metadata.get("task_code", "")
+                except Exception:
+                    pass
+                _write_generation_status(
+                    work_dir,
+                    texture_id,
+                    "downloaded",
+                    cmd,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    task_code=task_code,
+                    generated_image=str(generated.resolve()),
+                )
+                return generated
+            except Exception as exc:
+                last_error = str(exc)
+        else:
+            last_error = f"exit code {rc}; tail=" + " | ".join(output_tail[-8:])
+        if attempt < max_attempts:
+            _write_generation_status(
+                work_dir,
+                texture_id,
+                "failed",
+                cmd,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                task_code=task_code,
+                error=last_error,
+            )
+            print(f"[Neo AI] {label} 失败，准备重试: {last_error}", file=sys.stderr)
+            time.sleep(min(2 * attempt, 6))
+
+    _write_generation_status(
+        work_dir,
+        texture_id,
+        "failed",
+        cmd,
+        attempt=max_attempts,
+        max_attempts=max_attempts,
+        error=last_error,
+    )
+    raise RuntimeError(last_error or f"{label} 生成失败")
+
+
+def _mark_generation_success(work_dir: Path, texture_id: str, cmd: list[str], final_asset: Path, generated_image: Path | None = None) -> None:
+    _write_generation_status(
+        work_dir,
+        texture_id,
+        "success",
+        cmd,
+        final_asset=str(final_asset.resolve()),
+        generated_image=str(generated_image.resolve()) if generated_image else "",
+    )
 
 
 def latest_collection_board(output_dir: Path) -> Path:
@@ -760,12 +1075,19 @@ def generate_single_textures_and_hero_assets(args: argparse.Namespace, out_dir: 
         label, texture_id, work_dir, cmd = job
         if texture_id != "hero_motif_1":
             hero_started.wait()
-        print(f"[Neo AI] 启动生成任务: {label} ({texture_id})")
+        retries = _generation_retry_count(texture_id)
         if texture_id == "hero_motif_1":
-            run_step_after_launch(cmd, env=env, on_launch=hero_started.set)
+            generated = _run_neo_generation_with_status(
+                label,
+                texture_id,
+                work_dir,
+                cmd,
+                env=env,
+                retries=retries,
+                on_launch=hero_started.set,
+            )
         else:
-            run_step(cmd, env=env)
-        generated = latest_collection_board(work_dir)
+            generated = _run_neo_generation_with_status(label, texture_id, work_dir, cmd, env=env, retries=retries)
         return label, texture_id, generated
 
     max_workers = max(1, int(getattr(args, "neo_workers", 4) or 4))
@@ -792,11 +1114,13 @@ def generate_single_textures_and_hero_assets(args: argparse.Namespace, out_dir: 
         if not generated:
             raise RuntimeError(f"Neo AI 并行生成缺少输出: {texture_id}")
         texture_paths[texture_id] = _copy_generated_image(generated, texture_root / f"{texture_id}.png").resolve()
+        _mark_generation_success(texture_root / texture_id, texture_id, next(cmd for _, tid, _, cmd in jobs if tid == texture_id), texture_paths[texture_id], generated)
         print(f"[单纹理] {texture_id}: {texture_paths[texture_id]}")
 
     generated_hero = by_texture_id.get("hero_motif_1")
     if generated_hero:
         hero_path = generated_hero.resolve()
+        _mark_generation_success(hero_dir, "hero_motif_1", next(cmd for _, tid, _, cmd in jobs if tid == "hero_motif_1"), hero_path, generated_hero)
         print(f"[透明主图] {hero_path}")
     return texture_paths, hero_path
 
@@ -954,12 +1278,27 @@ def run_single_texture_channel_pipeline(
         label, texture_id, work_dir, cmd = job
         if texture_id != "hero_motif_1":
             hero_started.wait()
-        print(f"[Neo AI] 启动生成任务: {label} ({texture_id})")
+        retries = _generation_retry_count(texture_id)
         if texture_id == "hero_motif_1":
-            run_step_after_launch(cmd, env=os.environ.copy(), on_launch=hero_started.set)
+            generated = _run_neo_generation_with_status(
+                label,
+                texture_id,
+                work_dir,
+                cmd,
+                env=os.environ.copy(),
+                retries=retries,
+                on_launch=hero_started.set,
+            )
         else:
-            run_step(cmd, env=os.environ.copy())
-        return label, texture_id, latest_collection_board(work_dir)
+            generated = _run_neo_generation_with_status(
+                label,
+                texture_id,
+                work_dir,
+                cmd,
+                env=os.environ.copy(),
+                retries=retries,
+            )
+        return label, texture_id, generated
 
     hero_motif_path: Path | None = None
     split_assets: dict | None = None
@@ -968,6 +1307,7 @@ def run_single_texture_channel_pipeline(
     variant_summaries: list[dict] = []
     channel_futures: dict[concurrent.futures.Future, str] = {}
     generation_failures: list[tuple[str, str, Exception]] = []
+    generation_cmds = {texture_id: cmd for _, texture_id, _, cmd in generation_jobs}
 
     neo_workers = max(1, int(getattr(args, "neo_workers", 4) or 4))
     neo_workers = min(neo_workers, len(generation_jobs))
@@ -1010,14 +1350,16 @@ def run_single_texture_channel_pipeline(
                 _, _, generated = future.result()
                 if texture_id == "hero_motif_1":
                     hero_motif_path = generated.resolve()
+                    _mark_generation_success(hero_dir, texture_id, generation_cmds[texture_id], hero_motif_path, generated)
                     args.hero_motif_image = str(hero_motif_path)
                     if not create_front_split_assets:
-                        raise RuntimeError("theme_front_splitter 不可用，无法生成主题前片切半资产。")
+                        raise RuntimeError("theme_front_splitter 不可用，无法生成主题前片连续资产。")
                     split_assets = create_front_split_assets(hero_motif_path, out_dir)
                     print(f"[透明主图] {hero_motif_path}")
-                    print(f"[主题前片] 已生成切半资产: {split_assets['left']}, {split_assets['right']}")
+                    print(f"[主题前片] 已生成完整前身与兼容切半资产: {split_assets.get('full', '')}, {split_assets['left']}, {split_assets['right']}")
                 else:
                     texture_path = _copy_generated_image(generated, texture_root / f"{texture_id}.png").resolve()
+                    _mark_generation_success(texture_root / texture_id, texture_id, generation_cmds[texture_id], texture_path, generated)
                     ready_textures[texture_id] = texture_path
                     print(f"[单纹理] {texture_id}: {texture_path}")
                 _schedule_ready_channels(pipeline_executor)
@@ -1055,6 +1397,12 @@ def run_single_texture_channel_pipeline(
     success_summaries = [item for item in variant_summaries if item.get("status") == "success"]
     if not success_summaries:
         raise RuntimeError("三通道流水线没有成功生成任何纹理变体。")
+    if not any(item.get("status") == "success" and item.get("纹理ID") == "main" for item in variant_summaries):
+        main_error = next(
+            (item.get("error", "") for item in variant_summaries if item.get("纹理ID") == "main"),
+            "main 纹理未生成",
+        )
+        raise RuntimeError(f"main 纹理是必需资产，生成失败，不能使用 secondary/accent_light 作为默认结果: {main_error}")
 
     success_paths = {item["纹理ID"]: Path(item["纹理源图"]) for item in success_summaries}
     root_texture_set_path = write_single_texture_set(
@@ -1100,13 +1448,13 @@ def run_ready_single_texture_channel_pipeline(
 ) -> tuple[Path, Path, list[dict], dict]:
     """Run per-texture downstream channels for already available assets."""
     if not create_front_split_assets:
-        raise RuntimeError("theme_front_splitter 不可用，无法生成主题前片切半资产。")
+        raise RuntimeError("theme_front_splitter 不可用，无法生成主题前片连续资产。")
     args.hero_motif_image = str(hero_motif_path)
     split_assets = create_front_split_assets(hero_motif_path, out_dir)
     pipeline_workers = max(1, int(getattr(args, "pipeline_workers", 3) or 3))
     pipeline_workers = min(pipeline_workers, len(DEFAULT_TEXTURE_IDS))
     print(f"[纹理通道] 复用已生成资产，并行后处理 workers={pipeline_workers}")
-    print(f"[主题前片] 已生成切半资产: {split_assets['left']}, {split_assets['right']}")
+    print(f"[主题前片] 已生成完整前身与兼容切半资产: {split_assets.get('full', '')}, {split_assets['left']}, {split_assets['right']}")
 
     variant_summaries = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=pipeline_workers) as executor:
@@ -1144,6 +1492,12 @@ def run_ready_single_texture_channel_pipeline(
     success_summaries = [item for item in variant_summaries if item.get("status") == "success"]
     if not success_summaries:
         raise RuntimeError("三通道流水线没有成功生成任何纹理变体。")
+    if not any(item.get("status") == "success" and item.get("纹理ID") == "main" for item in variant_summaries):
+        main_error = next(
+            (item.get("error", "") for item in variant_summaries if item.get("纹理ID") == "main"),
+            "main 纹理未生成",
+        )
+        raise RuntimeError(f"main 纹理是必需资产，生成失败，不能使用 secondary/accent_light 作为默认结果: {main_error}")
 
     root_texture_set_path = write_single_texture_set(
         out_dir,
@@ -1530,10 +1884,10 @@ def ensure_theme_front_split(args, out_dir: Path, texture_set_path: Path) -> dic
     try:
         split_assets = create_front_split_assets(source_image, out_dir)
         inject_front_split_motifs(texture_set_path, split_assets)
-        print(f"[主题前片] 已从{source_label}生成并注册切半资产: {split_assets['left']}, {split_assets['right']}")
+        print(f"[主题前片] 已从{source_label}生成并注册完整前身与兼容切半资产: {split_assets.get('full', '')}, {split_assets['left']}, {split_assets['right']}")
         return split_assets
     except Exception as exc:
-        print(f"[警告] 主题前片切半资产生成失败，将继续使用普通面料规划: {exc}", file=sys.stderr)
+        print(f"[警告] 主题前片连续资产生成失败，将继续使用普通面料规划: {exc}", file=sys.stderr)
         return None
 
 
@@ -1563,11 +1917,11 @@ def write_single_texture_variant_set(texture_set: dict, texture_id: str, variant
         item["approved"] = True
         item["candidate"] = False
         item["role"] = item.get("role") or texture_id
-    # Preserve theme front split motifs so each variant still carries the hero
-    # image on the left/right front pieces. All other motifs are dropped.
+    # Preserve theme front motifs so each variant still carries a seam-locked
+    # full-front hero image. All other motifs are dropped.
     theme_motifs = [
         copy.deepcopy(m) for m in texture_set.get("motifs", [])
-        if m.get("motif_id") in {"theme_front_left", "theme_front_right"}
+        if m.get("motif_id") in {"theme_front_full", "theme_front_left", "theme_front_right"}
     ]
     variant_set["motifs"] = theme_motifs
     if texture_set.get("theme_front_split"):
@@ -1600,8 +1954,8 @@ def force_fill_plan_to_single_texture(fill_plan: dict, texture_id: str) -> dict:
         if isinstance(layer, dict):
             fill_type = layer.get("fill_type")
             if fill_type == "motif":
-                # Preserve theme front split motifs across all variants
-                if layer.get("motif_id") in {"theme_front_left", "theme_front_right"}:
+                # Preserve theme front motifs across all variants
+                if layer.get("motif_id") in {"theme_front_full", "theme_front_left", "theme_front_right"}:
                     return layer
                 return None
             if fill_type in {"texture", "solid"} or "texture_id" in layer or "solid_id" in layer:
@@ -1626,7 +1980,7 @@ def force_fill_plan_to_single_texture(fill_plan: dict, texture_id: str) -> dict:
 
     for piece in plan.get("pieces", []):
         piece_motif_id = piece.get("motif_id") if piece.get("fill_type") == "motif" else None
-        is_theme_split = piece_motif_id in {"theme_front_left", "theme_front_right"}
+        is_theme_split = piece_motif_id in {"theme_front_full", "theme_front_left", "theme_front_right"}
         if piece.get("fill_type") == "motif" and not is_theme_split:
             piece.update(_texture_layer("单纹理模板预览移除定位主图，统一使用当前图案纹理"))
         elif piece.get("fill_type") in {"texture", "solid"} or "texture_id" in piece or "solid_id" in piece:
@@ -2272,11 +2626,32 @@ def main() -> int:
             existing_heroes = sorted(hero_dir.glob("collection_board_*.png")) + sorted(hero_dir.glob("collection_board_*.jpg"))
             texture_root = out_dir / "neo_textures"
             expected_textures = {tid: (texture_root / f"{tid}.png").resolve() for tid in DEFAULT_TEXTURE_IDS}
-            existing_single_textures = all(path.exists() for path in expected_textures.values())
-            if existing_single_textures and existing_heroes:
+            existing_refs = _load_existing_reference_images(out_dir)
+            existing_hero_path = existing_heroes[-1].resolve() if existing_heroes else None
+            expected_cmds = {
+                tid: _neo_generation_cmd(args, texture_root / tid, args.texture_prompt_files[tid], reference_images=existing_refs)
+                for tid in DEFAULT_TEXTURE_IDS
+                if args.texture_prompt_files.get(tid)
+            }
+            expected_hero_cmd = (
+                _neo_generation_cmd(args, hero_dir, args.hero_prompt_file, negative_prompt=HERO_NEGATIVE_PROMPT, reference_images=existing_refs)
+                if getattr(args, "hero_prompt_file", "") else []
+            )
+            reusable_textures = {
+                tid: _existing_generation_matches(texture_root / tid, expected_textures[tid], tid, expected_cmds.get(tid, []))
+                for tid in DEFAULT_TEXTURE_IDS
+                if expected_cmds.get(tid)
+            }
+            reusable_hero = bool(
+                existing_hero_path
+                and expected_hero_cmd
+                and _existing_generation_matches(hero_dir, existing_hero_path, "hero_motif_1", expected_hero_cmd)
+            )
+            existing_single_textures = all(reusable_textures.get(tid, False) for tid in DEFAULT_TEXTURE_IDS)
+            if existing_single_textures and reusable_hero and existing_hero_path:
                 texture_paths = expected_textures
-                hero_motif_path = existing_heroes[-1].resolve()
-                print(f"[资产复用] 已存在3张单纹理，跳过重新生成: {texture_root}")
+                hero_motif_path = existing_hero_path
+                print(f"[资产复用] 已存在3张单纹理且请求身份匹配，跳过重新生成: {texture_root}")
                 print(f"[资产复用] 已存在AI生成透明主图，跳过重新生成: {hero_motif_path}")
                 if hero_motif_path:
                     hero_motif_path = hero_motif_path.resolve()
@@ -2293,6 +2668,11 @@ def main() -> int:
                     prompt_map=prompt_map,
                 )
             else:
+                if any(path.exists() for path in expected_textures.values()) or existing_heroes:
+                    invalid = [tid for tid in DEFAULT_TEXTURE_IDS if not reusable_textures.get(tid, False)]
+                    if not reusable_hero:
+                        invalid.append("hero_motif_1")
+                    print(f"[资产复用] 已有资产与本次请求不匹配或不完整，将重新生成: {', '.join(invalid)}")
                 prompt_map = load_texture_prompt_map(out_dir)
                 texture_set_path, hero_motif_path, pipeline_variant_summaries, pipeline_default_summary = run_single_texture_channel_pipeline(
                     args=args,

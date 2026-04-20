@@ -18,6 +18,7 @@ TEXTURE_NEGATIVE_EN = (
     "no abstract wash, no plain texture, no paper grain only, no gradient, no empty background, no tonal atmosphere only, no blurred background, "
     "no folds, no wrinkles, no draping, no creases, no shadows, no 3D fabric photography, no light variation across surface, "
     "no gradient backgrounds inside individual panels, no photographic realism, no vector flatness, no digital gradient, "
+    "blurry, out of focus, smeared, smudged, vignette, distorted, deformed, low quality, jpeg artifacts, grainy, "
     + FRONT_EFFECT_NEGATIVE_EN
 )
 
@@ -29,7 +30,8 @@ HERO_NEGATIVE_EN = (
     "gradient wash fade to transparent, colored fringe on edge, halo effect around subject, "
     "full illustration scene, poster composition, sticker sheet, garment mockup, fashion model, mannequin, "
     "person wearing garment, product photo, lookbook, ground shadow, vignette, "
-    "botanical backdrop, foliage behind subject, painted wash behind subject, garden background, meadow background"
+    "botanical backdrop, foliage behind subject, painted wash behind subject, garden background, meadow background, "
+    "blurry, out of focus, smeared, smudged, distorted, deformed, low quality, jpeg artifacts, grainy"
 )
 
 # 保留 BOARD_NEGATIVE_EN 以兼容旧调用方
@@ -67,7 +69,7 @@ def compact_style_line(style: dict | None) -> str:
         f"{style.get('overall_impression', 'Elegant commercial textile collection')}. "
         f"{style.get('mood', 'Quiet and wearable')}. "
         f"{style.get('medium', 'Watercolor')}. "
-        "Low contrast, wearable, cohesive fashion print suite."
+        "Wearable, cohesive fashion print suite."
     )
 
 
@@ -126,7 +128,10 @@ def build_family_contract_text(style: dict | None = None, palette: dict | None =
     )
     parts.append(family_negative)
 
-    return " ".join(parts)
+    result = " ".join(parts)
+    # 最后过一遍模糊风险词清理
+    from prompt_sanitizer import sanitize_blur_risks
+    return sanitize_blur_risks(result)
 
 
 def build_texture_2x2_board_prompt_en(panel_prompts: dict, style: dict | None = None) -> str:
@@ -139,7 +144,7 @@ def build_texture_2x2_board_prompt_en(panel_prompts: dict, style: dict | None = 
         "Create one square commercial textile texture board with three coordinated fabric swatches. No text anywhere.",
         f"Art direction: {compact_style_line(style)}",
         "All 3 swatches are seamless tileable fabric repeats only.",
-        "All 3 swatches must look like one coherent textile family: same palette, same paper grain, same brush language, same saturation range.",
+        "All 3 swatches must look like one coherent textile family: same palette, same brush language, same saturation range.",
         "Do not mix separate visual worlds such as warm beige line-art mushrooms with green watercolor meadow panels unless the palette and brush style are fully unified.",
         "Every swatch must look like a fabric swatch, not a painting, scene, mockup, sticker sheet, or placement motif.",
         "No large figurative subject, complete scene, landscape, scenery, environment, animal, character, mushroom, or flower bouquet as a full-body hero texture.",
@@ -154,7 +159,9 @@ def build_texture_2x2_board_prompt_en(panel_prompts: dict, style: dict | None = 
         BOARD_NEGATIVE_EN + ".",
         "All 3 swatches must be usable seamless fabric repeats.",
     ])
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    from prompt_sanitizer import sanitize_blur_risks
+    return sanitize_blur_risks(result)
 
 
 def build_single_texture_prompt_en(
@@ -189,7 +196,9 @@ def build_single_texture_prompt_en(
         TEXTURE_NEGATIVE_EN + ".",
         "Required output: one seamless tileable fabric texture only, full square artwork, no gutters, no labels, no text, no garment, no model.",
     ]
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    from prompt_sanitizer import sanitize_blur_risks
+    return sanitize_blur_risks(result)
 
 
 def build_transparent_hero_prompt_en(
@@ -246,7 +255,9 @@ def build_transparent_hero_prompt_en(
         "Leave balanced empty transparent pixels around the subject so it can be split vertically across left and right front garment pieces."
     )
     lines.append(HERO_NEGATIVE_EN + ".")
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    from prompt_sanitizer import sanitize_blur_risks
+    return sanitize_blur_risks(result)
 
 
 def build_collection_board_prompt_en(panel_prompts: dict, style: dict | None = None) -> str:
