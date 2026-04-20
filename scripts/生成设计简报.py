@@ -21,7 +21,13 @@ except Exception:
     def sanitize_prompts_in_dict(data, keys=("prompt",), domain="generic"):
         return data
 
-from prompt_blocks import build_texture_2x2_board_prompt_en, FRONT_EFFECT_NEGATIVE_EN
+from prompt_blocks import (
+    build_texture_2x2_board_prompt_en,
+    FRONT_EFFECT_NEGATIVE_EN,
+    TEXTURE_NEGATIVE_EN,
+    HERO_NEGATIVE_EN,
+    build_family_contract_text,
+)
 
 
 def rgb_to_hex(rgb: tuple[int, int, int]) -> str:
@@ -184,6 +190,8 @@ def _generate_from_visual_elements(visual: dict, ve_path: Path, out_dir: Path, u
         design_dna=visual.get("design_dna", {}),
         single_texture_derivation=visual.get("single_texture_derivation", {}),
         hero_texture_fusion_plan=visual.get("hero_texture_fusion_plan", ""),
+        texture_micro_structure=visual.get("texture_micro_structure", {}),
+        hero_edge_contract=visual.get("hero_edge_contract", {}),
     )
 
 
@@ -206,6 +214,8 @@ def _generate_outputs(
     design_dna: dict = None,
     single_texture_derivation: dict = None,
     hero_texture_fusion_plan: str = "",
+    texture_micro_structure: dict = None,
+    hero_edge_contract: dict = None,
 ) -> dict:
     """生成所有设计输出文件的核心逻辑。"""
     # 统一 palette 格式
@@ -232,6 +242,8 @@ def _generate_outputs(
     reference_fidelity = reference_fidelity or {}
     design_dna = design_dna or {}
     single_texture_derivation = single_texture_derivation or {}
+    texture_micro_structure = texture_micro_structure or {}
+    hero_edge_contract = hero_edge_contract or {}
     if not theme_to_piece_strategy:
         theme_to_piece_strategy = {
             "base_atmosphere": "大身只继承主题色彩、笔触和氛围，保持低噪可穿，不直接复制主体或完整场景。",
@@ -314,22 +326,18 @@ def _generate_outputs(
         "hero_texture_fusion_plan": hero_texture_fusion_plan,
     }
 
+    # 构建家族契约文本，供后续注入每张单纹理提示词
+    family_contract = build_family_contract_text(
+        style=style_details,
+        palette=palette if isinstance(palette, dict) else style_profile.get("palette", {}),
+        design_dna=design_dna,
+    )
+
     def _make_prompt(texture_id: str, purpose: str, prompt_text: str, panel: str = "", role: str = "") -> dict:
         if role == "placement_motif":
-            negative_prompt = (
-                "text, labels, captions, titles, typography, words, letters, logo, watermark, "
-                "full landscape, poster, sticker, harsh black outline, dense confetti, neon colors, muddy colors, "
-                "plain light box, colored background box, filled rectangular background, background scene, scenery, "
-                "checkerboard transparency preview, fake transparency grid, "
-                "garment mockup, fashion model, mannequin, person wearing garment, product photo, lookbook, "
-                "semi-transparent full-image patch"
-            )
+            negative_prompt = HERO_NEGATIVE_EN
         else:
-            negative_prompt = (
-                "animals, characters, faces, people, text, labels, captions, titles, typography, words, "
-                "letters, logo, watermark, house, full landscape, poster, sticker, harsh black outline, "
-                "dense confetti, neon colors, muddy colors, " + FRONT_EFFECT_NEGATIVE_EN
-            )
+            negative_prompt = TEXTURE_NEGATIVE_EN
         item = {
             "texture_id": texture_id,
             "purpose": purpose,
@@ -412,6 +420,48 @@ def _generate_outputs(
     hero_guard = f"{hero_source_guard}, {motif_guard}, no garden, no meadow, no landscape, no environment, no foliage behind subject, no botanical backdrop, no painted wash behind subject, no rectangular composition, no full illustration scene, no vignette, no ground shadow"
     hero_motif_1_prompt = _force_transparent_motif_prompt(gp.get("hero_motif_1", gp.get("hero_motif", f"isolated foreground hero motif only, centered subject, transparent PNG cutout with real alpha background, {hero_source_guard}, empty transparent pixels around the subject, soft clean edges, balanced negative space, {medium} hand-painted placement print element, {hero_guard}, no text")), "hero_motif_1")
 
+    # 融入 hero_edge_contract 的精确约束
+    if hero_edge_contract:
+        min_margin = hero_edge_contract.get("min_margin_ratio", 0.30)
+        fade = hero_edge_contract.get("edge_fade_pixels", "")
+        alpha_behavior = hero_edge_contract.get("required_alpha_behavior", "")
+        forbidden = hero_edge_contract.get("forbidden_alpha_patterns", [])
+        edge_bits = []
+        edge_bits.append(f"minimum {int(min_margin * 100)}% transparent margin around subject")
+        if fade:
+            edge_bits.append(f"edge fade: {fade}")
+        if alpha_behavior:
+            edge_bits.append(f"alpha behavior: {alpha_behavior}")
+        if forbidden:
+            edge_bits.append(f"forbidden: {', '.join(forbidden)}")
+        hero_motif_1_prompt = f"{hero_motif_1_prompt}, edge contract: {', '.join(edge_bits)}"
+
+    def _inject_micro_structure(prompt_text: str, texture_id: str, micro: dict) -> str:
+        """将微观结构参数注入提示词，减少 AI 对密度/尺度的自由发挥。"""
+        if not micro or texture_id not in micro:
+            return prompt_text
+        info = micro.get(texture_id, {})
+        parts = []
+        scale = info.get("motif_scale_relative", "")
+        if scale:
+            parts.append(f"motif scale: {scale}")
+        count = info.get("motif_count_per_tile", "")
+        if count:
+            parts.append(f"density: {count}")
+        ns = info.get("negative_space_ratio", "")
+        if ns:
+            parts.append(f"negative space: {ns}")
+        desc = info.get("repeat_unit_description", "")
+        if desc:
+            parts.append(f"repeat unit: {desc}")
+        mix = info.get("element_type_mix", {})
+        if mix:
+            mix_str = ", ".join(f"{k} {int(v*100)}%" for k, v in mix.items())
+            parts.append(f"element mix: {mix_str}")
+        if not parts:
+            return prompt_text
+        return f"{prompt_text}, micro-structure contract: {', '.join(parts)}"
+
     def _inject_palette_constraints(prompt_text: str, texture_id: str, palette: dict) -> str:
         """为提示词追加具体的 hex 颜色硬约束，减少 AI 生成时的颜色偏差。"""
         if not palette:
@@ -460,20 +510,23 @@ def _generate_outputs(
             context += f"Shared design DNA: {'; '.join(dna_bits)}. "
         return f"{context}{prompt_text}"
 
-    # 构建 3 张单纹理 + 独立主图提示词并注入 palette 约束
+    # 构建 3 张单纹理 + 独立主图提示词，依次注入微观结构、颜色硬约束、参考上下文
     palette = style_profile.get("palette", {})
     _prompts = [
-        ("main", "可穿大身裁片", _reference_context("main", main_prompt), "single_texture", "base_texture"),
-        ("secondary", "协调大副裁片", _reference_context("secondary", secondary_prompt), "single_texture", "base_texture"),
-        ("accent_light", "小面板与受控点缀", _reference_context("accent_light", accent_prompt), "single_texture", "accent_texture"),
+        ("main", "可穿大身裁片", _reference_context("main", _inject_micro_structure(main_prompt, "main", texture_micro_structure)), "single_texture", "base_texture"),
+        ("secondary", "协调大副裁片", _reference_context("secondary", _inject_micro_structure(secondary_prompt, "secondary", texture_micro_structure)), "single_texture", "base_texture"),
+        ("accent_light", "小面板与受控点缀", _reference_context("accent_light", _inject_micro_structure(accent_prompt, "accent_light", texture_micro_structure)), "single_texture", "accent_texture"),
         ("hero_motif_1", "AI生成主图透明定位图案", hero_motif_1_prompt, "single_hero", "placement_motif"),
     ]
-    prompts = [_make_prompt(tid, purpose, sanitize_prompt(_inject_palette_constraints(ptext, tid, palette), domain="fashion"), panel=panel, role=role)
-               for tid, purpose, ptext, panel, role in _prompts]
+    prompts = [
+        _make_prompt(tid, purpose, sanitize_prompt(_inject_palette_constraints(ptext, tid, palette), domain="fashion"), panel=panel, role=role)
+        for tid, purpose, ptext, panel, role in _prompts
+    ]
 
     texture_prompts = {
         "style_id": style_id,
         "generation_owner": "neo_ai",
+        "family_contract": family_contract,
         "prompts": prompts,
     }
     # 过滤所有 prompt 中的停用词和禁用词

@@ -114,6 +114,35 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
             "accent_light": "从参考图提炼轻量点缀元素，小尺度 repeat",
             "forbidden_full_body_elements": ["不得进入满版纹理的完整主体/场景/文字/logo"]
         },
+        "texture_micro_structure": {
+            "main": {
+                "motif_scale_relative": "最小重复元素占 tile 宽度的 3-8%",
+                "motif_count_per_tile": "每 tile 可见元素 12-20 个",
+                "negative_space_ratio": "负空间占比 45-55%",
+                "repeat_unit_description": "具体写出最小重复单元里有什么（如 tiny 3-petal flowers + single leaf clusters + occasional dot），不得空泛",
+                "element_type_mix": {"botanical": 0.6, "geometric_dot": 0.3, "organic_line": 0.1}
+            },
+            "secondary": {
+                "motif_scale_relative": "协调元素占 tile 宽度的 2-6%",
+                "motif_count_per_tile": "每 tile 可见元素 15-25 个",
+                "negative_space_ratio": "负空间占比 50-60%",
+                "repeat_unit_description": "具体写出协调 repeat 结构（如 lattice + small leaf + dot rhythm）",
+                "element_type_mix": {"botanical": 0.4, "geometric": 0.4, "organic_line": 0.2}
+            },
+            "accent_light": {
+                "motif_scale_relative": "点缀元素占 tile 宽度的 1-4%",
+                "motif_count_per_tile": "每 tile 可见元素 20-40 个",
+                "negative_space_ratio": "负空间占比 60-75%",
+                "repeat_unit_description": "具体写出极小规模点缀（如 scattered tiny dots + micro leaf）",
+                "element_type_mix": {"botanical": 0.3, "geometric_dot": 0.5, "organic_line": 0.2}
+            }
+        },
+        "hero_edge_contract": {
+            "min_margin_ratio": 0.30,
+            "edge_fade_pixels": "2-6px soft anti-aliased edge only, no gradient halo beyond 6px",
+            "forbidden_alpha_patterns": ["gradient wash fade to transparent", "semi-transparent halo around subject", "colored fringe on edge", "feathered edge wider than 8px"],
+            "required_alpha_behavior": "hard binary alpha inside subject silhouette, single-pixel soft anti-alias at boundary, pure transparent outside, no intermediate gray-alpha band"
+        },
         "hero_texture_fusion_plan": "透明主图与三张纹理如何共享色彩、笔触、边缘处理和元素呼应",
         "fabric_hints": {"has_nap": False, "nap_confidence": 0.0, "nap_direction": "", "reason": ""},
         "source_images": [{"index": 1, "path": str(theme_paths[0].resolve()) if theme_paths else "", "role": "primary"}],
@@ -127,10 +156,17 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
             "do_not_use_as_full_body_texture": ["不适合大面积满版的具象元素"]
         },
         "generated_prompts": {
-            "main": "英文 seamless tileable visible repeat pattern prompt，必须有具体小元素/botanical/geometric/line repeat 结构，稳定密度，不得是 abstract wash / plain texture / paper grain only / gradient / empty background / tonal atmosphere only / blurred background",
-            "secondary": "英文 coordinating seamless tileable visible repeat pattern prompt，必须有具体小元素/lattice/linework/leaves/dots/geometric repeat 结构，稳定密度，不得是 abstract wash / plain texture / paper grain only / gradient / empty background / tonal atmosphere only",
-            "accent_light": "英文 small-scale accent repeat prompt",
-            "hero_motif_1": "英文 isolated foreground hero motif only as transparent PNG cutout with real alpha background, preserve and recreate the primary subject from the user's reference image as much as possible, people/faces/characters/animals/products/icons/objects are allowed if they are the main content, keep its recognizable silhouette/colors/pose/key details, complete uncropped subject with full head and hair visible, generous transparent margin above and around the subject, no background, no checkerboard transparency preview, no fake transparency grid, no garden, no foliage behind subject, no full illustration scene, no colored box"
+            "main": "英文 seamless tileable visible repeat pattern prompt。必须：1) 写出具体小元素名称（botanical/geometric/line/dot）；2) 包含 motif_scale_relative 估计（如 elements are 3-8% of tile width）；3) 包含 density_estimate（如 12-20 elements per tile）；4) 包含 negative_space_ratio（如 45-55% breathing room）；5) 不得是 abstract wash / plain texture / paper grain only / gradient / empty background / tonal atmosphere only / blurred background / scene / landscape",
+            "secondary": "英文 coordinating seamless tileable visible repeat pattern prompt。必须：1) 写出协调 repeat 结构（lattice/linework/leaves/dots/geometric）；2) 包含 motif_scale_relative 和 density_estimate；3) 包含 negative_space_ratio；4) 与 main 共享 palette 和 brush language；5) 不得是 abstract wash / plain texture / paper grain only / gradient / empty background / tonal atmosphere only",
+            "accent_light": "英文 small-scale accent repeat prompt。必须：1) 极小规模元素；2) 高密度点缀但负空间充足；3) 与 main/secondary 共享 palette 和 brush language；4) 不得喧宾夺主",
+            "hero_motif_1": "英文 isolated foreground hero motif only as transparent PNG cutout with real alpha background。结构要求：先写主体观察段（覆盖 identity/pose/expression/hair/clothing/props/accessories/composition/art_style_details 全部9维），再接透明格式约束。必须：1) preserve and recreate the primary subject from reference image；2) complete uncropped subject, full head and hair visible；3) 主体边界到图像边缘至少 30% 留白（min_margin_ratio 0.30）；4) 边缘仅 2-6px 软抗锯齿，禁止 gradient halo / semi-transparent halo / colored fringe；5) alpha 内部为硬二值，边界单像素软过渡，外部纯透明；6) no background, no checkerboard preview, no fake grid, no colored box, no plain light box, no scenery, no garden, no foliage, no painted wash, no vignette, no ground shadow"
+        },
+        "prompt_quality_check": {
+            "texture_passed": false,
+            "hero_passed": false,
+            "rewrite_count": 0,
+            "texture_violations": [],
+            "hero_violations": []
         }
     }
     lines = [
@@ -205,7 +241,35 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "- generated_prompts.hero_motif_1 必须是前景主体 cutout，不得写 scene、garden、meadow、landscape、environment、foliage behind subject、botanical backdrop、painted wash、vignette、rectangular composition 或 full illustration scene",
         "- generated_prompts.main 必须是低密度 visible repeat pattern，淡底、可见但安静；不得写 abstract wash、plain color wash、plain texture、paper grain only、gradient、blurred background、empty texture 或 tonal atmosphere only",
         "- 纹理格负向逻辑必须覆盖 no text, no watermark, no logo, no faces；但 hero_motif_1 不得禁止 people/faces/characters/animals，因为用户图片主要内容可能包含这些主体",
+        "- texture_micro_structure 必须对 main/secondary/accent_light 分别给出具体数值估计，不得空泛",
+        "- hero_edge_contract 必须给出 min_margin_ratio、edge_fade_pixels、forbidden_alpha_patterns、required_alpha_behavior 四项",
         "- 不要返回任何解释文字，只返回 JSON",
+        "",
+        "===== 输出前自检（必须逐条完成） =====",
+        "在输出 JSON 之前，对 generated_prompts 的每一条提示词执行以下自检。若有任何一条不满足，重写该提示词直到满足，并记录 rewrite_count 和 violations。",
+        "",
+        "[纹理提示词自检清单 — main/secondary/accent_light]",
+        "□ 是否明确写出最小重复单元的具体视觉元素名称（如 tiny meadow flowers, small leaves, dots, lattice lines）？",
+        "□ 是否包含 motif_scale_relative 估计（如 elements are 3-8% of tile width）？",
+        "□ 是否包含 density_estimate（如 12-20 visible elements per tile）？",
+        "□ 是否包含 negative_space_ratio（如 45-55% breathing room）？",
+        "□ 是否禁止了 abstract wash / plain texture / paper grain only / gradient / empty background / tonal atmosphere only / blurred background / scene / landscape / environment？",
+        "□ 是否没有直接写出 S/A 级具象主体名称（如 mushroom, rabbit, full flower bouquet, character）？",
+        "□ 是否与 texture_micro_structure 和 design_dna 中描述的 palette/brushwork/linework 一致？",
+        "□ 是否包含 'Use reference image 1 as source for palette, brush language, material feel, small supporting motifs, and user intent'？",
+        "",
+        "[Hero 提示词自检清单 — hero_motif_1]",
+        "□ 主体描述段是否覆盖了 subject_identity / pose_action / expression / hair / clothing / props / accessories / composition / art_style_details 全部 9 个维度？",
+        "□ 是否明确 preserve and recreate the primary subject from the user's reference image as much as possible？",
+        "□ 是否包含 transparent PNG cutout + real alpha background + no background？",
+        "□ 是否包含主体边界到图像边缘至少 30% 留白（min_margin_ratio ≥ 0.30）？",
+        "□ 是否包含边缘仅 2-6px 软抗锯齿，禁止 gradient halo / semi-transparent halo / colored fringe？",
+        "□ 是否包含 alpha 内部硬二值、边界单像素软过渡、外部纯透明？",
+        "□ 是否明确 no checkerboard transparency preview / no fake transparency grid / no colored box / no plain light box？",
+        "□ 是否没有写 scene / garden / meadow / landscape / environment / foliage behind subject / botanical backdrop / painted wash / vignette / ground shadow？",
+        "□ 是否没有禁止 people/faces/characters/animals（这些是用户参考图的主体，允许作为 hero）？",
+        "",
+        "自检完成后，在 prompt_quality_check 中记录 passed 状态和 violations 列表。",
     ]
     return "\n".join(lines)
 

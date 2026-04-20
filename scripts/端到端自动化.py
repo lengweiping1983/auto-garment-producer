@@ -347,11 +347,13 @@ def _build_generation_prompts_from_visual_elements(out_dir: Path, visual_element
         prompts[p.get("texture_id", "")] = p.get("prompt", "")
 
     style = ve.get("style", {})
+    family_contract = tp.get("family_contract", "")
+    edge_contract = ve.get("hero_edge_contract", {})
     texture_prompts = {
-        texture_id: build_single_texture_prompt_en(texture_id, prompts.get(texture_id, ""), style)
+        texture_id: build_single_texture_prompt_en(texture_id, prompts.get(texture_id, ""), style, family_contract)
         for texture_id in DEFAULT_TEXTURE_IDS
     }
-    hero_prompt = build_transparent_hero_prompt_en(prompts.get("hero_motif_1", ""), style)
+    hero_prompt = build_transparent_hero_prompt_en(prompts.get("hero_motif_1", ""), style, edge_contract)
     return texture_prompts, hero_prompt
 
 
