@@ -336,10 +336,15 @@ def render_motif_layer(piece: dict, layer: dict, motif_info: dict, underlay: Ima
     if layer.get("mirror_y"):
         motif = ImageOps.flip(motif)
     scale = max(0.05, float(layer.get("scale", 1) or 1))
-    target_max_w = max(1, round(piece["width"] * scale))
-    target_max_h = max(1, round(piece["height"] * scale))
+    width_scale = max(0.05, float(layer.get("max_width_scale", scale) or scale))
+    height_scale = max(0.05, float(layer.get("max_height_scale", scale) or scale))
+    target_max_w = max(1, round(piece["width"] * width_scale))
+    target_max_h = max(1, round(piece["height"] * height_scale))
     if layer.get("seam_lock"):
-        ratio = target_max_h / max(1, motif.height)
+        if layer.get("fit_within_piece"):
+            ratio = min(target_max_w / max(1, motif.width), target_max_h / max(1, motif.height))
+        else:
+            ratio = target_max_h / max(1, motif.height)
     else:
         ratio = min(target_max_w / max(1, motif.width), target_max_h / max(1, motif.height))
     motif = motif.resize((max(1, round(motif.width * ratio)), max(1, round(motif.height * ratio))), Image.Resampling.LANCZOS)

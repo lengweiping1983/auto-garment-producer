@@ -32,15 +32,15 @@ PANEL_DEFAULTS_EN = {
     "main": "seamless tileable visible repeat pattern with concrete small botanical or geometric motifs on pale ground, stable low-to-medium density, clearly repeatable elements, commercial apparel base fabric, no abstract wash, no plain texture, no paper grain only, no gradient, no empty background, no tonal atmosphere only, no blurred background, no scene, no landscape, no text",
     "secondary": "seamless tileable coordinating visible repeat pattern with concrete small motifs, lattice, linework, leaves, dots, or controlled geometric elements, stable repeat structure on light ground, same palette, no abstract wash, no plain texture, no paper grain only, no gradient, no empty background, no tonal atmosphere only, no scene, no text",
     "accent_light": "tiny scattered small-scale pattern on light ground, controlled density, no text",
-    "accent_mid": "soft geometric or organic lattice on pale ground, same palette, seamless tileable texture, no text",
     "hero_motif_1": "isolated foreground hero motif only, centered complete subject, transparent PNG cutout, real alpha background, preserve and recreate the primary subject from the user's reference image as much as possible, keep the recognizable silhouette, color identity, pose, proportions, and key visual details, full head and hair visible, uncropped subject, generous transparent margin above and around the subject, no background, no checkerboard transparency preview, no background art, no scenery, no garden, no foliage behind subject, no botanical backdrop, no painted wash, no rectangular composition, no full illustration scene, no vignette, no ground shadow, no text",
 }
+
+SINGLE_TEXTURE_IDS_EN = ("main", "secondary", "accent_light")
 
 TEXTURE_2X2_POSITIONS_EN = [
     ("Top-left", "main"),
     ("Top-right", "secondary"),
     ("Bottom-left", "accent_light"),
-    ("Bottom-right", "accent_mid"),
 ]
 
 
@@ -55,26 +55,52 @@ def compact_style_line(style: dict | None) -> str:
 
 
 def build_texture_2x2_board_prompt_en(panel_prompts: dict, style: dict | None = None) -> str:
-    """Build the final English 2x2 texture-board prompt."""
+    """Build a legacy grouped texture-board prompt.
+
+    The default pipeline now generates single textures independently. This
+    helper remains for compatibility with callers that still provide boards.
+    """
     lines = [
-        "Create one square 2x2 commercial textile texture board with thin white gutters. No text anywhere.",
+        "Create one square commercial textile texture board with three coordinated fabric swatches. No text anywhere.",
         f"Art direction: {compact_style_line(style)}",
-        "All 4 panels are seamless tileable fabric repeats only, arranged as equal square swatches.",
-        "All 4 panels must look like one coherent textile family: same palette, same paper grain, same brush language, same saturation range.",
+        "All 3 swatches are seamless tileable fabric repeats only.",
+        "All 3 swatches must look like one coherent textile family: same palette, same paper grain, same brush language, same saturation range.",
         "Do not mix separate visual worlds such as warm beige line-art mushrooms with green watercolor meadow panels unless the palette and brush style are fully unified.",
-        "Every panel must look like a fabric swatch, not a painting, scene, mockup, sticker sheet, or placement motif.",
+        "Every swatch must look like a fabric swatch, not a painting, scene, mockup, sticker sheet, or placement motif.",
         "No large figurative subject, complete scene, landscape, scenery, environment, animal, character, mushroom, or flower bouquet as a full-body hero texture.",
-        "Top-left and Top-right must be concrete visible repeat patterns like the bottom row: clear repeated elements, stable density, and cuttable textile structure.",
-        "Top-left and Top-right must not be abstract waves, gradient wash, paper grain only, plain texture, tonal atmosphere, empty background, blurred background, or blank fabric.",
+        "Each swatch must be a concrete visible repeat pattern with clear repeated elements, stable density, and cuttable textile structure.",
+        "Swatches must not be abstract waves, gradient wash, paper grain only, plain texture, tonal atmosphere, empty background, blurred background, or blank fabric.",
     ]
     for label, panel_id in TEXTURE_2X2_POSITIONS_EN:
         prompt = panel_prompts.get(panel_id) or PANEL_DEFAULTS_EN[panel_id]
         lines.append(f"{label}: {prompt}")
     lines.extend([
-        "All panels share one palette, fabric texture, brush language, and commercial apparel mood.",
+        "All swatches share one palette, fabric texture, brush language, and commercial apparel mood.",
         BOARD_NEGATIVE_EN + ".",
-        "All 4 panels must be usable seamless fabric repeats.",
+        "All 3 swatches must be usable seamless fabric repeats.",
     ])
+    return "\n".join(lines)
+
+
+def build_single_texture_prompt_en(texture_id: str, texture_prompt: str, style: dict | None = None) -> str:
+    """Build the final English prompt for one standalone textile texture."""
+    prompt = texture_prompt or PANEL_DEFAULTS_EN.get(texture_id, PANEL_DEFAULTS_EN["main"])
+    role_line = {
+        "main": "Main fabric: quiet low-to-medium density repeat for large body pieces.",
+        "secondary": "Secondary fabric: coordinating repeat for sleeves, back body, or supporting pieces.",
+        "accent_light": "Light accent fabric: small-scale repeat for controlled visual variation.",
+    }.get(texture_id, "Commercial apparel fabric repeat.")
+    lines = [
+        "Create one standalone square seamless tileable textile repeat, not a board and not a mockup.",
+        f"Texture role: {role_line}",
+        "Use reference image 1 as the source for palette, brush language, material feel, small supporting motifs, and the user's theme intent.",
+        "Do not copy the complete hero subject, complete scene, face, animal, character, product, logo, or large foreground object into the repeat.",
+        "The repeat must feel designed for the same garment system as the transparent hero motif: same color family, same line quality, same saturation range, same textile mood.",
+        f"Art direction: {compact_style_line(style)}",
+        prompt,
+        BOARD_NEGATIVE_EN + ".",
+        "Required output: one seamless tileable fabric texture only, full square artwork, no gutters, no labels, no text, no garment, no model.",
+    ]
     return "\n".join(lines)
 
 

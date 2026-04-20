@@ -236,9 +236,66 @@ def find_front_pair_piece_ids(pieces_payload: dict, garment_map: dict) -> tuple[
     return None, None
 
 
-def force_theme_front_split_overlays(entries: list[dict], pieces_payload: dict, texture_set: dict, garment_map: dict) -> list[dict]:
+def _largest_histogram_rect(heights: list[int], row_bottom: int, seam_x: int | None = None) -> tuple[int, int, int, int, int]:
+    """Largest rectangle in a histogram. Returns score, x, y, w, h."""
+    best = (0, 0, 0, 0, 0)
+    stack: list[int] = []
+    for idx in range(len(heights) + 1):
+        current = heights[idx] if idx < len(heights) else 0
+        while stack and current < heights[stack[-1]]:
+            top = stack.pop()
+            h = heights[top]
+            left = stack[-1] + 1 if stack else 0
+            w = idx - left
+            if h > 0 and w > 0:
+                crosses_seam = seam_x is None or (left < seam_x < left + w)
+                if crosses_seam:
+                    area = w * h
+                    if area > best[0]:
+                        best = (area, left, row_bottom - h + 1, w, h)
+        stack.append(idx)
+    return best
+
+
+def _largest_rect_in_binary(mask: Image.Image, seam_x: int | None = None) -> tuple[int, int, int, int]:
+    """Find the largest all-white axis-aligned rectangle in a binary mask."""
+    binary = mask.convert("L").point(lambda value: 255 if value > 128 else 0)
+    max_side = 420
+    scale = min(1.0, max_side / max(1, max(binary.size)))
+    if scale < 1.0:
+        resized = binary.resize((max(1, round(binary.width * scale)), max(1, round(binary.height * scale))), Image.Resampling.NEAREST)
+        scaled_seam = round(seam_x * scale) if seam_x is not None else None
+    else:
+        resized = binary
+        scaled_seam = seam_x
+    w, h = resized.size
+    pixels = list(resized.get_flattened_data())
+    heights = [0] * w
+    best = (0, 0, 0, 0, 0)
+    for y in range(h):
+        row = y * w
+        for x in range(w):
+            heights[x] = heights[x] + 1 if pixels[row + x] > 128 else 0
+        current = _largest_histogram_rect(heights, y, scaled_seam)
+        if current[0] > best[0]:
+            best = current
+    if best[0] <= 0:
+        return (0, 0, mask.width, mask.height)
+    _, x, y, rw, rh = best
+    if scale < 1.0:
+        return (
+            max(0, round(x / scale)),
+            max(0, round(y / scale)),
+            min(mask.width, round((x + rw) / scale)),
+            min(mask.height, round((y + rh) / scale)),
+        )
+    return (x, y, x + rw, y + rh)
+
+
+def force_theme_front_split_overlays(entries: list[dict], pieces_payload: dict, texture_set: dict, garment_map: dict, pieces_base_dir: Path | None = None) -> list[dict]:
     """Force generated theme halves onto the two front pieces when available."""
-    motif_ids = {m.get("motif_id") for m in texture_set.get("motifs", [])}
+    motif_by_id = {m.get("motif_id"): m for m in texture_set.get("motifs", [])}
+    motif_ids = set(motif_by_id)
     if not {"theme_front_left", "theme_front_right"}.issubset(motif_ids):
         return entries
     left_id, right_id = find_front_pair_piece_ids(pieces_payload, garment_map)
@@ -246,6 +303,81 @@ def force_theme_front_split_overlays(entries: list[dict], pieces_payload: dict, 
         return entries
 
     by_id = {e.get("piece_id"): e for e in entries}
+    piece_by_id = {p.get("piece_id"): p for p in pieces_payload.get("pieces", [])}
+    left_piece = piece_by_id.get(left_id, {})
+    right_piece = piece_by_id.get(right_id, {})
+
+    def _resolve_mask_path(piece: dict) -> Path | None:
+        value = piece.get("mask_path")
+        if not value:
+            return None
+        path = Path(value)
+        if path.is_absolute():
+            return path
+        if pieces_base_dir:
+            return (pieces_base_dir / path).resolve()
+        return path.resolve()
+
+    def _front_safe_rect() -> dict:
+        left_mask_path = _resolve_mask_path(left_piece)
+        right_mask_path = _resolve_mask_path(right_piece)
+        if not left_mask_path or not right_mask_path or not left_mask_path.exists() or not right_mask_path.exists():
+            lw = max(1, int(left_piece.get("width", 1) or 1))
+            lh = max(1, int(left_piece.get("height", 1) or 1))
+            rw = max(1, int(right_piece.get("width", 1) or 1))
+            rh = max(1, int(right_piece.get("height", 1) or 1))
+            return {"x": round(lw * 0.10), "y": round(max(lh, rh) * 0.10), "w": round((lw + rw) * 0.80), "h": round(max(lh, rh) * 0.76), "seam_x": lw}
+        left_mask = Image.open(left_mask_path).convert("L")
+        right_mask = Image.open(right_mask_path).convert("L")
+        if right_mask.height != left_mask.height:
+            right_mask = right_mask.resize((right_mask.width, left_mask.height), Image.Resampling.NEAREST)
+        combined = Image.new("L", (left_mask.width + right_mask.width, max(left_mask.height, right_mask.height)), 0)
+        combined.paste(left_mask, (0, 0))
+        combined.paste(right_mask, (left_mask.width, 0))
+        seam_x = left_mask.width
+        x0, y0, x1, y1 = _largest_rect_in_binary(combined, seam_x=seam_x)
+        return {"x": x0, "y": y0, "w": max(1, x1 - x0), "h": max(1, y1 - y0), "seam_x": seam_x}
+
+    safe_rect = _front_safe_rect()
+
+    def _motif_size(motif_id: str) -> tuple[int, int]:
+        info = motif_by_id.get(motif_id) or {}
+        path = info.get("path")
+        if not path:
+            return 1, 1
+        try:
+            with Image.open(path) as img:
+                return img.size
+        except Exception:
+            return 1, 1
+
+    def _safe_front_overlay_params(piece: dict, motif_id: str, side_key: str) -> dict:
+        """Fit a split hero half inside the combined-front largest inner rectangle."""
+        motif_w, motif_h = _motif_size(motif_id)
+        piece_w = max(1, int(piece.get("width", 1) or 1))
+        piece_h = max(1, int(piece.get("height", 1) or 1))
+        seam_x = safe_rect["seam_x"]
+        rect_left = safe_rect["x"]
+        rect_right = safe_rect["x"] + safe_rect["w"]
+        if side_key == "left":
+            available_w = max(1, seam_x - rect_left)
+        else:
+            available_w = max(1, rect_right - seam_x)
+        safety = 0.965
+        max_w = max(0.08, min(0.96, (available_w / piece_w) * safety))
+        max_h = max(0.08, min(0.92, (safe_rect["h"] / piece_h) * safety))
+        # Keep the motif centered vertically in the safe rectangle. With seam
+        # lock, render_motif_layer anchors horizontally to the centre seam.
+        offset_y = round(safe_rect["y"] + safe_rect["h"] / 2 - piece_h / 2)
+        return {
+            "scale": round(max_h, 3),
+            "max_width_scale": round(max_w, 3),
+            "max_height_scale": round(max_h, 3),
+            "fit_within_piece": True,
+            "offset_y": offset_y,
+            "safe_rect": safe_rect,
+        }
+
     for pid, motif_id, side, anchor, seam_lock in (
         (left_id, "theme_front_left", "左前片", "right", "right"),
         (right_id, "theme_front_right", "右前片", "left", "left"),
@@ -253,17 +385,23 @@ def force_theme_front_split_overlays(entries: list[dict], pieces_payload: dict, 
         entry = by_id.get(pid)
         if not entry:
             continue
+        side_key = "left" if motif_id == "theme_front_left" else "right"
+        sizing = _safe_front_overlay_params(piece_by_id.get(pid, {}), motif_id, side_key)
         entry["overlay"] = make_layer(
             "motif",
-            f"用户主题主体切半强制落位到{side}",
+            f"用户主题主体切半强制落位到{side}，限制在左右前片合并后的最大内接矩形内",
             motif_id=motif_id,
             anchor=anchor,
-            scale=0.98,
+            scale=sizing["scale"],
             rotation=0,
             opacity=1.0,
             offset_x=0,
-            offset_y=0,
+            offset_y=sizing["offset_y"],
             seam_lock=seam_lock,
+            max_width_scale=sizing["max_width_scale"],
+            max_height_scale=sizing["max_height_scale"],
+            fit_within_piece=sizing["fit_within_piece"],
+            combined_front_safe_rect=sizing["safe_rect"],
         )
         entry["garment_role"] = "front_body"
         entry["zone"] = "body"
@@ -280,7 +418,7 @@ def build_rule_plan(pieces_payload: dict, texture_set: dict, garment_map: dict, 
     if not texture_ids:
         raise RuntimeError("没有可用面料可用于艺术指导填充计划。")
 
-    # 注意：默认 2x2 texture_id 为 main/secondary/accent_light/accent_mid；
+    # 注意：默认单纹理 texture_id 为 main/secondary/accent_light；
     # dark_base 仅作为兼容旧 texture_set 的可选回退。
     main_id = choose(texture_ids, ["main", "base", "secondary", "accent_light", "dark_base"])
     secondary_id = choose(texture_ids, ["secondary", "main", "accent_light", "accent_mid", "dark_base"])
@@ -1310,7 +1448,7 @@ def main() -> int:
 
     # 阶段 2：程序修正
     entries, fix_issues = enforce_validation(entries, pieces_payload, texture_set, garment_map, motif_geometries, brief)
-    entries = force_theme_front_split_overlays(entries, pieces_payload, texture_set, garment_map)
+    entries = force_theme_front_split_overlays(entries, pieces_payload, texture_set, garment_map, Path(args.pieces).resolve().parent)
 
     # 重新组装 art_direction
     hero_ids = [e["piece_id"] for e in entries if (e.get("overlay") or {}).get("fill_type") == "motif"]

@@ -2,8 +2,8 @@
 """
 端到端自动化：
 
-1. 生成或接收 Neo AI 2×2 面料纹理看板，并独立生成透明主图。
-2. 裁剪为面料资产。
+1. 生成或接收 Neo AI 单纹理面料资产，并独立生成透明主图。
+2. 组装面料资产。
 3. 构建面料组合.json。
 4. 复用固定模板裁片和部位映射。
 5. 构建填充计划。
@@ -17,6 +17,8 @@ import datetime
 import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +28,8 @@ from PIL import Image
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 NEO_AI_SCRIPT = SKILL_DIR.parent / "neo-ai" / "scripts" / "generate_texture_collection_board.py"
+NEO_UPLOAD_SCRIPT = SKILL_DIR.parent / "neo-ai" / "scripts" / "upload_oss.py"
+DEFAULT_TEXTURE_IDS = ("main", "secondary", "accent_light")
 HERO_NEGATIVE_PROMPT = (
     "text, labels, captions, titles, typography, words, letters, signage, logo, watermark, "
     "plain light box, colored background box, filled rectangle, background art, scenery, landscape, environment, "
@@ -36,7 +40,7 @@ HERO_NEGATIVE_PROMPT = (
 
 # 导入模板加载器
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
-from prompt_blocks import build_texture_2x2_board_prompt_en, build_transparent_hero_prompt_en
+from prompt_blocks import build_single_texture_prompt_en, build_texture_2x2_board_prompt_en, build_transparent_hero_prompt_en
 try:
     from template_loader import (
         normalize_piece_asset_paths,
@@ -313,18 +317,18 @@ def latest_collection_board(output_dir: Path) -> Path:
     return candidates[-1]
 
 
-def _build_generation_prompts_from_visual_elements(out_dir: Path, visual_elements_path: Path = None) -> tuple[str, str]:
-    """基于视觉分析结果构造 2×2 纹理看板 prompt 与独立透明主图 prompt。"""
+def _build_generation_prompts_from_visual_elements(out_dir: Path, visual_elements_path: Path = None) -> tuple[dict[str, str], str]:
+    """基于视觉分析结果构造三张单纹理 prompt 与独立透明主图 prompt。"""
     texture_prompts_path = out_dir / "texture_prompts.json"
     visual_path = visual_elements_path or (out_dir / "visual_elements.json")
     if not texture_prompts_path.exists() or not visual_path.exists():
-        return "", ""
+        return {}, ""
 
     try:
         tp = json.loads(texture_prompts_path.read_text(encoding="utf-8"))
         ve = json.loads(visual_path.read_text(encoding="utf-8"))
     except Exception:
-        return "", ""
+        return {}, ""
 
     # 按 texture_id 索引所有提示词
     prompts = {}
@@ -332,15 +336,18 @@ def _build_generation_prompts_from_visual_elements(out_dir: Path, visual_element
         prompts[p.get("texture_id", "")] = p.get("prompt", "")
 
     style = ve.get("style", {})
-    texture_prompt = build_texture_2x2_board_prompt_en(prompts, style)
+    texture_prompts = {
+        texture_id: build_single_texture_prompt_en(texture_id, prompts.get(texture_id, ""), style)
+        for texture_id in DEFAULT_TEXTURE_IDS
+    }
     hero_prompt = build_transparent_hero_prompt_en(prompts.get("hero_motif_1", ""), style)
-    return texture_prompt, hero_prompt
+    return texture_prompts, hero_prompt
 
 
 def _build_collection_prompt_from_visual_elements(out_dir: Path, visual_elements_path: Path = None) -> str:
-    """Compatibility wrapper: return the 2×2 texture-board prompt."""
-    texture_prompt, _ = _build_generation_prompts_from_visual_elements(out_dir, visual_elements_path)
-    return texture_prompt
+    """Compatibility wrapper: return a legacy grouped texture prompt."""
+    texture_prompts, _ = _build_generation_prompts_from_visual_elements(out_dir, visual_elements_path)
+    return build_texture_2x2_board_prompt_en(texture_prompts, {})
 
 
 def validate_board_colors(board_path: Path, palette: dict, threshold: int = 80) -> list[dict]:
@@ -360,7 +367,6 @@ def validate_board_colors(board_path: Path, palette: dict, threshold: int = 80) 
         "main": (0, 0, div_x1, div_y1),
         "secondary": (div_x1, 0, w, div_y1),
         "accent_light": (0, div_y1, div_x1, h),
-        "accent_mid": (div_x1, div_y1, w, h),
     }
 
     def _hex_to_rgb(hex_str):
@@ -374,7 +380,6 @@ def validate_board_colors(board_path: Path, palette: dict, threshold: int = 80) 
         "main": palette.get("primary", []),
         "secondary": palette.get("secondary", []),
         "accent_light": palette.get("accent", []) or palette.get("primary", []),
-        "accent_mid": palette.get("secondary", []),
     }
 
     for tid, box in panels.items():
@@ -403,7 +408,13 @@ def validate_board_colors(board_path: Path, palette: dict, threshold: int = 80) 
     return warnings
 
 
-def _neo_generation_cmd(args: argparse.Namespace, output_dir: Path, prompt_file: str = "", negative_prompt: str = "") -> list[str]:
+def _neo_generation_cmd(
+    args: argparse.Namespace,
+    output_dir: Path,
+    prompt_file: str = "",
+    negative_prompt: str = "",
+    reference_images: list[str] | None = None,
+) -> list[str]:
     cmd = [
         sys.executable,
         str(NEO_AI_SCRIPT),
@@ -420,6 +431,8 @@ def _neo_generation_cmd(args: argparse.Namespace, output_dir: Path, prompt_file:
         cmd.extend(["--prompt-file", prompt_file])
     if negative_prompt:
         cmd.extend(["--negative-prompt", negative_prompt])
+    for ref in reference_images or []:
+        cmd.extend(["--reference-image", ref])
     if args.num_images:
         cmd.extend(["--num-images", args.num_images])
     if args.token:
@@ -428,7 +441,7 @@ def _neo_generation_cmd(args: argparse.Namespace, output_dir: Path, prompt_file:
 
 
 def generate_board(args: argparse.Namespace, out_dir: Path, prompt_file: str = "", subdir: str = "neo_texture_board", negative_prompt: str = "") -> Path:
-    """调用 Neo AI 生成图片。默认生成 2x2 纹理看板。"""
+    """调用 Neo AI 生成单张图片。保留给旧看板入口和透明主图复用。"""
     board_dir = out_dir / subdir
     board_dir.mkdir(parents=True, exist_ok=True)
     cmd = _neo_generation_cmd(args, board_dir, prompt_file or getattr(args, "texture_prompt_file", "") or getattr(args, "prompt_file", ""), negative_prompt=negative_prompt)
@@ -437,8 +450,114 @@ def generate_board(args: argparse.Namespace, out_dir: Path, prompt_file: str = "
     return latest_collection_board(board_dir)
 
 
+def _token_for_neo(args: argparse.Namespace) -> str:
+    return args.token or os.environ.get("NEODOMAIN_ACCESS_TOKEN", "")
+
+
+def _upload_reference_images_for_neo(args: argparse.Namespace, out_dir: Path) -> list[str]:
+    """Upload local theme images to OSS and return URLs for Neo AI imageUrls."""
+    refs = []
+    token = _token_for_neo(args)
+    theme_images = [p for p in (getattr(args, "theme_images", []) or []) if p]
+    if theme_images and not token:
+        raise RuntimeError("需要 NEODOMAIN_ACCESS_TOKEN 或 --token 才能上传主题图并作为 Neo AI 参考图。")
+    if theme_images and not NEO_UPLOAD_SCRIPT.exists():
+        raise RuntimeError(f"Neo AI 上传脚本不存在: {NEO_UPLOAD_SCRIPT}")
+    if not token:
+        return refs
+    for path_text in theme_images:
+        if not path_text:
+            continue
+        if re.match(r"^https?://", str(path_text)):
+            refs.append(str(path_text))
+            continue
+        path = Path(path_text)
+        if not path.exists():
+            raise RuntimeError(f"Neo AI 参考图不存在，无法上传: {path}")
+        cmd = [sys.executable, str(NEO_UPLOAD_SCRIPT), str(path)]
+        if args.token:
+            cmd.extend(["--token", args.token])
+        print("运行:", " ".join(cmd))
+        proc = subprocess.run(cmd, check=True, text=True, capture_output=True, env=os.environ.copy())
+        print(proc.stdout.strip())
+        match = re.search(r"https?://\S+", proc.stdout)
+        if not match:
+            raise RuntimeError(f"Neo AI 参考图上传成功但未找到 URL: {path}")
+        refs.append(match.group(0).strip())
+    if refs:
+        payload = {
+            "reference_images": [
+                {"index": idx + 1, "url": url, "role": "primary" if idx == 0 else "reference"}
+                for idx, url in enumerate(refs)
+            ]
+        }
+        write_json(out_dir / "neo_reference_images.json", payload)
+    return refs
+
+
+def _copy_generated_image(src: Path, dest: Path) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    return dest
+
+
+def write_single_texture_set(
+    out_dir: Path,
+    texture_paths: dict[str, Path],
+    palette: dict | None = None,
+    prompt_map: dict[str, str] | None = None,
+) -> Path:
+    """Write texture_set.json directly from the three standalone Neo AI textures."""
+    prompt_map = prompt_map or {}
+    palette = palette or {}
+    secondary_img = Image.open(texture_paths.get("secondary") or next(iter(texture_paths.values())))
+    accent_img = Image.open(texture_paths.get("accent_light") or next(iter(texture_paths.values())))
+    quiet_solid = quiet_solid_from_image(accent_img, palette=palette, target_role="trim")
+    moss_color = quiet_solid_from_image(secondary_img, palette=palette, target_role="secondary")
+    warm_ivory = "#f3f1df"
+    if palette and palette.get("primary"):
+        from PIL import ImageColor
+        def _brightness(hex_str):
+            try:
+                r, g, b = ImageColor.getrgb(hex_str)
+                return r + g + b
+            except Exception:
+                return 0
+        warm_ivory = max(palette["primary"], key=_brightness)
+
+    textures = []
+    for texture_id in DEFAULT_TEXTURE_IDS:
+        path = texture_paths.get(texture_id)
+        if not path:
+            raise RuntimeError(f"缺少单纹理资产: {texture_id}")
+        textures.append({
+            "texture_id": texture_id,
+            "path": str(path.resolve()),
+            "role": texture_id,
+            "approved": True,
+            "candidate": False,
+            "prompt": prompt_map.get(texture_id, f"Neo AI 单纹理生成：{texture_id}"),
+            "model": "neo-ai",
+            "seed": "",
+        })
+
+    texture_set = {
+        "texture_set_id": f"{out_dir.name}_neo_ai_single_texture_set",
+        "locked": False,
+        "source_mode": "single_textures",
+        "textures": textures,
+        "motifs": [],
+        "solids": [
+            {"solid_id": "quiet_solid", "color": quiet_solid, "approved": True, "candidate": False},
+            {"solid_id": "quiet_moss", "color": moss_color, "approved": True, "candidate": False},
+            {"solid_id": "warm_ivory", "color": warm_ivory, "approved": True, "candidate": False},
+        ],
+    }
+    return write_json(out_dir / "texture_set.json", texture_set)
+
+
 def generate_texture_and_hero_assets(args: argparse.Namespace, out_dir: Path) -> tuple[Path, Path | None]:
-    """并行调用 Neo AI：2x2 纹理看板 + 独立透明主图。"""
+    """旧入口：并行调用 Neo AI 生成看板 + 独立透明主图。"""
     texture_dir = out_dir / "neo_texture_board"
     hero_dir = out_dir / "neo_hero_motif"
     texture_dir.mkdir(parents=True, exist_ok=True)
@@ -448,7 +567,7 @@ def generate_texture_and_hero_assets(args: argparse.Namespace, out_dir: Path) ->
     hero_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     jobs = [
-        ("2x2纹理看板", texture_dir, _neo_generation_cmd(args, texture_dir, getattr(args, "texture_prompt_file", "") or getattr(args, "prompt_file", ""))),
+        ("旧纹理看板", texture_dir, _neo_generation_cmd(args, texture_dir, getattr(args, "texture_prompt_file", "") or getattr(args, "prompt_file", ""))),
         ("透明主图", hero_dir, _neo_generation_cmd(args, hero_dir, hero_prompt_file, negative_prompt=HERO_NEGATIVE_PROMPT)),
     ]
     processes = []
@@ -464,6 +583,64 @@ def generate_texture_and_hero_assets(args: argparse.Namespace, out_dir: Path) ->
         details = ", ".join(f"{label} rc={rc}" for label, rc in failures)
         raise RuntimeError(f"Neo AI 并行生成失败: {details}")
     return latest_collection_board(texture_dir), latest_collection_board(hero_dir)
+
+
+def generate_single_textures_and_hero_assets(args: argparse.Namespace, out_dir: Path) -> tuple[dict[str, Path], Path | None]:
+    """串行调用 Neo AI：三张独立单纹理 + 独立透明主图。
+
+    Reference images are uploaded once, then reused for every generation job.
+    Keep the Neo AI submissions sequential so the image pipeline behaves like a
+    single worker queue instead of four simultaneous generation workers.
+    """
+    prompt_files = getattr(args, "texture_prompt_files", {}) or {}
+    if not prompt_files:
+        prompt_file = getattr(args, "texture_prompt_file", "") or getattr(args, "prompt_file", "")
+        if prompt_file:
+            prompt_files = {texture_id: prompt_file for texture_id in DEFAULT_TEXTURE_IDS}
+    missing = [texture_id for texture_id in DEFAULT_TEXTURE_IDS if texture_id not in prompt_files]
+    if missing:
+        raise RuntimeError(f"缺少单纹理提示词文件: {', '.join(missing)}")
+
+    refs = _upload_reference_images_for_neo(args, out_dir)
+    texture_root = out_dir / "neo_textures"
+    hero_dir = out_dir / "neo_hero_motif"
+    texture_root.mkdir(parents=True, exist_ok=True)
+    hero_prompt_file = getattr(args, "hero_prompt_file", "")
+    if hero_prompt_file:
+        hero_dir.mkdir(parents=True, exist_ok=True)
+
+    jobs = []
+    for texture_id in DEFAULT_TEXTURE_IDS:
+        work_dir = texture_root / texture_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        jobs.append((
+            f"单纹理 {texture_id}",
+            texture_id,
+            work_dir,
+            _neo_generation_cmd(args, work_dir, prompt_files[texture_id], reference_images=refs),
+        ))
+    if hero_prompt_file:
+        jobs.append((
+            "透明主图",
+            "hero_motif_1",
+            hero_dir,
+            _neo_generation_cmd(args, hero_dir, hero_prompt_file, negative_prompt=HERO_NEGATIVE_PROMPT, reference_images=refs),
+        ))
+
+    env = os.environ.copy()
+    texture_paths = {}
+    hero_path = None
+    for label, texture_id, work_dir, cmd in jobs:
+        print("运行:", " ".join(cmd))
+        run_step(cmd, env=env)
+        generated = latest_collection_board(work_dir)
+        if texture_id == "hero_motif_1":
+            hero_path = generated.resolve()
+            print(f"[透明主图] {hero_path}")
+        else:
+            texture_paths[texture_id] = _copy_generated_image(generated, texture_root / f"{texture_id}.png").resolve()
+            print(f"[单纹理] {texture_id}: {texture_paths[texture_id]}")
+    return texture_paths, hero_path
 
 
 def mirror_tile(image: Image.Image) -> Image.Image:
@@ -657,7 +834,7 @@ def clean_internal_text_strip(image: Image.Image, min_strip_height: int = 5, dif
 
 
 def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_tiles: bool, palette: dict = None) -> Path:
-    """将 2×2 面料看板裁剪为四种纹理资产，并生成面料组合.json。
+    """将旧看板裁剪为三种纹理资产，并生成面料组合.json。
     支持智能分隔带检测，自动扩大安全边距，并清理面板内部文字。"""
     assets_dir = out_dir / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -679,7 +856,6 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
         "main": (effective_inset, effective_inset, div_x1 - effective_inset, div_y1 - effective_inset),
         "secondary": (div_x1 + effective_inset, effective_inset, width - effective_inset, div_y1 - effective_inset),
         "accent_light": (effective_inset, div_y1 + effective_inset, div_x1 - effective_inset, height - effective_inset),
-        "accent_mid": (div_x1 + effective_inset, div_y1 + effective_inset, width - effective_inset, height - effective_inset),
     }
 
     paths = {}
@@ -692,7 +868,7 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
         crop.convert("RGB").save(path)
         paths[asset_id] = path
 
-    quiet_solid = quiet_solid_from_image(Image.open(paths["accent_mid"]), palette=palette, target_role="trim")
+    quiet_solid = quiet_solid_from_image(Image.open(paths["accent_light"]), palette=palette, target_role="trim")
     moss_color = quiet_solid_from_image(Image.open(paths["secondary"]), palette=palette, target_role="secondary")
 
     # warm_ivory 从 palette primary 中最亮颜色派生，不再硬编码
@@ -744,16 +920,6 @@ def crop_collection_board(board_path: Path, out_dir: Path, inset: int, repair_ti
                 "approved": True,
                 "candidate": False,
                 "prompt": f"从 {source_name} 2×2 面料看板裁剪：浅色点缀纹理",
-                "model": source_name,
-                "seed": "",
-            },
-            {
-                "texture_id": "accent_mid",
-                "path": str(paths["accent_mid"].resolve()),
-                "role": "accent_mid",
-                "approved": True,
-                "candidate": False,
-                "prompt": f"从 {source_name} 2×2 面料看板裁剪：中调点缀纹理",
                 "model": source_name,
                 "seed": "",
             },
@@ -809,7 +975,7 @@ def ensure_theme_front_split(args, out_dir: Path, texture_set_path: Path) -> Non
 
 
 def _variant_texture_ids(texture_set: dict) -> list[str]:
-    preferred = ["main", "secondary", "accent_light", "accent_mid"]
+    preferred = ["main", "secondary", "accent_light"]
     available = [
         item.get("texture_id")
         for item in texture_set.get("textures", [])
@@ -1142,6 +1308,7 @@ def main() -> int:
     args.no_tile_repair = False
     args.prompt_file = ""
     args.texture_prompt_file = ""
+    args.texture_prompt_files = {}
     args.hero_prompt_file = ""
     args.hero_motif_image = ""
     if args.mode == "fast":
@@ -1451,13 +1618,19 @@ def main() -> int:
         run_step(brief_cmd)
         if not args.prompt_file:
             ve_path_obj = Path(args.visual_elements) if args.visual_elements else None
-            texture_prompt, hero_prompt = _build_generation_prompts_from_visual_elements(out_dir, ve_path_obj)
-            if texture_prompt:
-                prompt_path = out_dir / "generated_texture_2x2_prompt.txt"
-                prompt_path.write_text(texture_prompt, encoding="utf-8")
-                args.prompt_file = str(prompt_path)
-                args.texture_prompt_file = str(prompt_path)
-                print(f"[视觉提取] 已基于视觉分析自动生成2x2纹理看板提示词: {prompt_path}")
+            texture_prompts, hero_prompt = _build_generation_prompts_from_visual_elements(out_dir, ve_path_obj)
+            if texture_prompts:
+                prompt_files = {}
+                prompt_dir = out_dir / "generated_texture_prompts"
+                prompt_dir.mkdir(parents=True, exist_ok=True)
+                for texture_id, prompt_text in texture_prompts.items():
+                    prompt_path = prompt_dir / f"{texture_id}.txt"
+                    prompt_path.write_text(prompt_text, encoding="utf-8")
+                    prompt_files[texture_id] = str(prompt_path)
+                args.texture_prompt_files = prompt_files
+                args.texture_prompt_file = prompt_files.get("main", "")
+                args.prompt_file = args.texture_prompt_file
+                print(f"[视觉提取] 已基于视觉分析自动生成3张单纹理提示词: {prompt_dir}")
             if hero_prompt:
                 hero_prompt_path = out_dir / "generated_hero_prompt.txt"
                 hero_prompt_path.write_text(hero_prompt, encoding="utf-8")
@@ -1480,6 +1653,7 @@ def main() -> int:
     # Neo AI 单源模式
     # ============================================================
     hero_motif_path = None
+    board_path = None
     if args.texture_set:
         texture_set_path = Path(args.texture_set)
         if not texture_set_path.is_absolute():
@@ -1508,29 +1682,46 @@ def main() -> int:
                         negative_prompt=HERO_NEGATIVE_PROMPT,
                     ).resolve()
         else:
-            texture_dir = out_dir / "neo_texture_board"
             hero_dir = out_dir / "neo_hero_motif"
-            existing_boards = sorted(texture_dir.glob("collection_board_*.png")) + sorted(texture_dir.glob("collection_board_*.jpg"))
             existing_heroes = sorted(hero_dir.glob("collection_board_*.png")) + sorted(hero_dir.glob("collection_board_*.jpg"))
-            if existing_boards and existing_heroes:
-                board_path = existing_boards[-1].resolve()
+            texture_root = out_dir / "neo_textures"
+            expected_textures = {tid: (texture_root / f"{tid}.png").resolve() for tid in DEFAULT_TEXTURE_IDS}
+            existing_single_textures = all(path.exists() for path in expected_textures.values())
+            if existing_single_textures and existing_heroes:
+                texture_paths = expected_textures
                 hero_motif_path = existing_heroes[-1].resolve()
-                print(f"[资产复用] 已存在面料看板，跳过重新生成: {board_path}")
+                print(f"[资产复用] 已存在3张单纹理，跳过重新生成: {texture_root}")
                 print(f"[资产复用] 已存在AI生成透明主图，跳过重新生成: {hero_motif_path}")
             else:
-                board_path, hero_motif_path = generate_texture_and_hero_assets(args, out_dir)
-                board_path = board_path.resolve()
-                if hero_motif_path:
-                    hero_motif_path = hero_motif_path.resolve()
-        if not board_path.exists():
-            raise RuntimeError(f"面料看板未找到: {board_path}")
-        print(f"使用面料看板: {board_path}")
+                texture_paths, hero_motif_path = generate_single_textures_and_hero_assets(args, out_dir)
+            if hero_motif_path:
+                hero_motif_path = hero_motif_path.resolve()
+            prompt_map = {}
+            texture_prompts_path = out_dir / "texture_prompts.json"
+            if texture_prompts_path.exists():
+                try:
+                    data = json.loads(texture_prompts_path.read_text(encoding="utf-8"))
+                    prompt_map = {
+                        item.get("texture_id", ""): item.get("prompt", "")
+                        for item in data.get("prompts", [])
+                        if item.get("texture_id") in DEFAULT_TEXTURE_IDS
+                    }
+                except Exception:
+                    prompt_map = {}
+            texture_set_path = write_single_texture_set(out_dir, texture_paths, palette=palette, prompt_map=prompt_map)
+        if args.collection_board:
+            if not board_path or not board_path.exists():
+                raise RuntimeError(f"面料看板未找到: {board_path}")
+            print(f"使用面料看板: {board_path}")
+            texture_set_path = crop_collection_board(board_path, out_dir, args.crop_inset, not args.no_tile_repair, palette=palette)
+        else:
+            print(f"使用3张单纹理面料资产: {texture_set_path}")
         if hero_motif_path:
             args.hero_motif_image = str(hero_motif_path)
             print(f"使用AI生成透明主图: {hero_motif_path}")
 
-    # 看板颜色协调性校验
-    if palette and not args.texture_set:
+    # 旧看板入口的颜色协调性提示；默认单纹理路径不做看板校验。
+    if palette and (not args.texture_set) and args.collection_board:
         color_warnings = validate_board_colors(board_path, palette)
         if color_warnings:
             print("[颜色提示] 以下面板颜色与 palette 偏差较大：")
@@ -1542,8 +1733,6 @@ def main() -> int:
         else:
             print("[颜色提示] 所有面板颜色与 palette 协调。")
 
-    if not args.texture_set:
-        texture_set_path = crop_collection_board(board_path, out_dir, args.crop_inset, not args.no_tile_repair, palette=palette)
     print("[模板复用] 使用模板库 garment_map。")
 
     # ============================================================
@@ -1594,8 +1783,8 @@ def main() -> int:
     default_rendered_dir = Path(default_summary["渲染目录"]) if default_summary else out_dir / "rendered"
 
     summary = {
-        "面料看板": str(board_path),
-        "2x2纹理看板": str(board_path),
+        "单纹理资产": str((out_dir / "neo_textures").resolve()) if not args.texture_set and not args.collection_board else "",
+        "面料看板": str(board_path) if board_path else "",
         "AI生成透明主图": str(hero_motif_path) if hero_motif_path else "",
         "面料组合": str(texture_set_path.resolve()),
         "裁片清单": str(pieces_path.resolve()),
@@ -1609,7 +1798,7 @@ def main() -> int:
     }
     write_json(out_dir / "automation_summary.json", summary)
     user_summary = {k: v for k, v in summary.items() if k != "裁片模板变体"}
-    user_summary["裁片模板变体"] = f"已生成 {len(variant_summaries)} 套单纹理变体至 variants/ 目录，不在此处展示"
+    user_summary["裁片模板变体"] = f"已生成 {len(variant_summaries)} 套单纹理结果至 variants/ 目录，不在此处展示"
     print(json.dumps(user_summary, ensure_ascii=False, indent=2))
     return 0
 

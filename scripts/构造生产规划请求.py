@@ -202,7 +202,7 @@ def build_production_plan_prompt(
         "  - 程序会在渲染时自动应用 pattern_orientation 补偿，你的 rotation 值是在此基础上的增量。",
         "",
         "===== Step 2: 填充决策 =====",
-        "基于 Step 1 的部位识别结果制定裁片结构、分层和主图 overlay 计划。纹理选择由后续程序按 2x2 裁格自动生成 4 套单纹理变体，不需要你挑选具体纹理。",
+        "基于 Step 1 的部位识别结果制定裁片结构、分层和主图 overlay 计划。默认主题图流程会生成 main、secondary、accent_light 三套单纹理变体，不需要你挑选具体纹理。",
         "",
         "--- 可用面料资产 ---",
     ])
@@ -226,7 +226,7 @@ def build_production_plan_prompt(
         "",
         "--- 填充规则 ---",
         "  " + "；".join(COMMERCIAL_FILL_RULES_ZH) + "。",
-        "  不要在不同纹理之间做择优选择；程序会对 2x2 裁出的每个纹理分别生成一套完整裁片。",
+        "  不要在不同纹理之间做择优选择；程序会对每个 approved 单纹理分别生成一套完整裁片。",
         "  蘑菇、动物、角色、花丛、完整场景等具象元素不得作为大面积满版 body texture，除非用户明确要求；它们只能作为 1 个 hero motif 或小面积 accent。",
         "  禁止半透明整张主题图贴片；motif overlay 必须是干净定位图案，只允许用于 1 个 hero 裁片。",
         "  纹理方向自主决定；可声明 intentional_asymmetry: true 保留有意不对称。",

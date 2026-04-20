@@ -180,6 +180,10 @@ def _generate_from_visual_elements(visual: dict, ve_path: Path, out_dir: Path, u
         fabric_hints=visual.get("fabric_hints", {}),
         fusion_strategy=visual.get("fusion_strategy", {}),
         theme_to_piece_strategy=visual.get("theme_to_piece_strategy", {}),
+        reference_fidelity=visual.get("reference_fidelity", {}),
+        design_dna=visual.get("design_dna", {}),
+        single_texture_derivation=visual.get("single_texture_derivation", {}),
+        hero_texture_fusion_plan=visual.get("hero_texture_fusion_plan", ""),
     )
 
 
@@ -198,6 +202,10 @@ def _generate_outputs(
     fabric_hints: dict = None,
     fusion_strategy: dict = None,
     theme_to_piece_strategy: dict = None,
+    reference_fidelity: dict = None,
+    design_dna: dict = None,
+    single_texture_derivation: dict = None,
+    hero_texture_fusion_plan: str = "",
 ) -> dict:
     """生成所有设计输出文件的核心逻辑。"""
     # 统一 palette 格式
@@ -221,6 +229,9 @@ def _generate_outputs(
     theme_images = theme_images or []
     fusion_strategy = fusion_strategy or {}
     theme_to_piece_strategy = theme_to_piece_strategy or {}
+    reference_fidelity = reference_fidelity or {}
+    design_dna = design_dna or {}
+    single_texture_derivation = single_texture_derivation or {}
     if not theme_to_piece_strategy:
         theme_to_piece_strategy = {
             "base_atmosphere": "大身只继承主题色彩、笔触和氛围，保持低噪可穿，不直接复制主体或完整场景。",
@@ -256,6 +267,10 @@ def _generate_outputs(
         "theme_images": theme_images,
         "fusion_strategy": fusion_strategy,
         "theme_to_piece_strategy": theme_to_piece_strategy,
+        "reference_fidelity": reference_fidelity,
+        "design_dna": design_dna,
+        "single_texture_derivation": single_texture_derivation,
+        "hero_texture_fusion_plan": hero_texture_fusion_plan,
         "user_prompt": user_prompt,
         "wearability_notes": [
             "只保留一个明确的卖点概念",
@@ -293,6 +308,10 @@ def _generate_outputs(
         "style_details": style_details or {},
         "fusion_strategy": fusion_strategy,
         "theme_to_piece_strategy": theme_to_piece_strategy,
+        "reference_fidelity": reference_fidelity,
+        "design_dna": design_dna,
+        "single_texture_derivation": single_texture_derivation,
+        "hero_texture_fusion_plan": hero_texture_fusion_plan,
     }
 
     def _make_prompt(texture_id: str, purpose: str, prompt_text: str, panel: str = "", role: str = "") -> dict:
@@ -323,7 +342,7 @@ def _generate_outputs(
             item["role"] = role
         return item
 
-    # 构建 5 条提示词：4 条 2x2 纹理看板提示词 + 1 条独立透明主图提示词。
+    # 构建 4 条提示词：3 条独立单纹理提示词 + 1 条独立透明主图提示词。
     # 优先使用 generated_prompts；否则基于 motifs 生成模板提示词。
     gp = generated_prompts or {}
     motif_str = ", ".join(motifs[:3]) if motifs else "theme elements"
@@ -339,9 +358,8 @@ def _generate_outputs(
     main_prompt = gp.get("main", f"seamless tileable visible repeat pattern on pale ground, concrete small botanical or geometric motifs inspired by {motif_str}, stable low-to-medium density, clear repeated elements, commercial apparel base fabric, abundant breathing room, same {medium} brush style, no abstract wash, no plain texture, no paper grain only, no gradient, no empty background, no tonal atmosphere only, no blurred background, no figurative subject, no flower bouquet, no landscape scene, no environment, no scenery, {base_guard}, no text")
     secondary_prompt = gp.get("secondary", f"seamless tileable coordinating visible repeat pattern, soft light ground with concrete small motifs, lattice, linework, leaves, dots, or controlled geometric elements inspired by {motif_str}, medium density but airy, same {medium} brush style, stable repeat structure, no standalone scene, no environment, no abstract wash, no plain texture, no paper grain only, no gradient, no empty background, no tonal atmosphere only, {base_guard}, no text")
 
-    # Row 2 — Mid-scale accent textures（全部走 gp.get，无硬编码）
+    # Accent texture（全部走 gp.get，无硬编码）
     accent_prompt = gp.get("accent_light", gp.get("accent", f"seamless tileable small-scale accent pattern, tiny scattered elements inspired by {motif_str}, very small scale repeating, charming but controlled density, same palette and brush as main panel, no standalone scene, no text"))
-    accent_mid_prompt = gp.get("accent_mid", f"seamless tileable soft geometric or organic lattice on pale ground, same {mood} palette, same {medium} hand-painted brush language, low noise, seamless tileable texture for secondary panels, no style shift, no text")
 
     def _force_transparent_motif_prompt(prompt_text: str, motif_id: str = "") -> str:
         required = (
@@ -410,8 +428,6 @@ def _generate_outputs(
         elif texture_id == "accent_light" and (accent or primary):
             c = accent[0] if accent else primary[0]
             constraints.append(f"scattered accent elements must use {c} tones only")
-        elif texture_id == "accent_mid" and secondary:
-            constraints.append(f"lattice lines must use {secondary[0]} tones, pale ground stays within {primary[0] if primary else 'light'} family")
         elif texture_id == "hero_motif_1" and primary:
             bg = primary[0] if primary else "#ffffff"
             fg = accent[0] if accent else (secondary[0] if secondary else bg)
@@ -421,13 +437,35 @@ def _generate_outputs(
             return f"{prompt_text}, color constraint: {', '.join(constraints)}"
         return prompt_text
 
-    # 构建 2x2 纹理看板 + 独立主图提示词并注入 palette 约束
+    def _reference_context(texture_id: str, prompt_text: str) -> str:
+        dna_bits = []
+        if design_dna:
+            for key in ("fusion_rule", "linework", "brushwork", "material_feel", "negative_space"):
+                value = design_dna.get(key)
+                if value:
+                    dna_bits.append(f"{key}: {value}")
+            motifs_from_dna = design_dna.get("motif_vocabulary")
+            if motifs_from_dna:
+                dna_bits.append(f"motif vocabulary: {', '.join(str(v) for v in motifs_from_dna[:8])}")
+        derivation = ""
+        if isinstance(single_texture_derivation, dict):
+            derivation = single_texture_derivation.get(texture_id, "")
+        context = (
+            "Use reference image 1 as the source for palette, brush language, material feel, small supporting motifs, and user intent; "
+            "the texture must coordinate organically with hero_motif_1 and must not look pasted from a different artwork. "
+        )
+        if derivation:
+            context += f"Texture derivation from reference image: {derivation}. "
+        if dna_bits:
+            context += f"Shared design DNA: {'; '.join(dna_bits)}. "
+        return f"{context}{prompt_text}"
+
+    # 构建 3 张单纹理 + 独立主图提示词并注入 palette 约束
     palette = style_profile.get("palette", {})
     _prompts = [
-        ("main", "可穿大身裁片", main_prompt, "top_left", "base_texture"),
-        ("secondary", "协调大副裁片", secondary_prompt, "top_right", "base_texture"),
-        ("accent_light", "小面板与受控点缀", accent_prompt, "bottom_left", "accent_texture"),
-        ("accent_mid", "中格几何/有机格子", accent_mid_prompt, "bottom_right", "accent_texture"),
+        ("main", "可穿大身裁片", _reference_context("main", main_prompt), "single_texture", "base_texture"),
+        ("secondary", "协调大副裁片", _reference_context("secondary", secondary_prompt), "single_texture", "base_texture"),
+        ("accent_light", "小面板与受控点缀", _reference_context("accent_light", accent_prompt), "single_texture", "accent_texture"),
         ("hero_motif_1", "AI生成主图透明定位图案", hero_motif_1_prompt, "single_hero", "placement_motif"),
     ]
     prompts = [_make_prompt(tid, purpose, sanitize_prompt(_inject_palette_constraints(ptext, tid, palette), domain="fashion"), panel=panel, role=role)
