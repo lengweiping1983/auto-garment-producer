@@ -82,6 +82,17 @@ def files_sha256(paths: list[str | Path]) -> list[str]:
     return [file_sha256(path) for path in paths]
 
 
+def _flat_pixels(image: Image.Image):
+    """Return a flat pixel iterator across Pillow versions.
+
+    Pillow 12+ recommends get_flattened_data(); older versions only expose
+    getdata(). Keep the compatibility fallback in one place.
+    """
+    if hasattr(image, "get_flattened_data"):
+        return image.get_flattened_data()
+    return image.getdata()
+
+
 def dict_sha256(data: dict) -> str:
     """计算字典的确定性 SHA256 哈希。"""
     canonical = json.dumps(data, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
@@ -497,7 +508,8 @@ def _upload_reference_images_for_neo(args: argparse.Namespace, out_dir: Path) ->
 
 def _copy_generated_image(src: Path, dest: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dest)
+    with Image.open(src) as image:
+        mirror_tile(image).convert("RGB").save(dest)
     return dest
 
 
@@ -663,7 +675,7 @@ def detect_grid_gaps(board: Image.Image, div_x1: int, div_y1: int, strip_width: 
     y0 = max(0, div_y1 - strip_width)
     y1 = min(height, div_y1 + strip_width)
     h_strip = gray.crop((0, y0, width, y1))
-    h_pixels = list(h_strip.get_flattened_data())
+    h_pixels = list(_flat_pixels(h_strip))
     strip_w = h_strip.width
     row_diffs = []
     for y in range(h_strip.height):
@@ -676,7 +688,7 @@ def detect_grid_gaps(board: Image.Image, div_x1: int, div_y1: int, strip_width: 
     x0 = max(0, div_x1 - strip_width)
     x1 = min(width, div_x1 + strip_width)
     v_strip = gray.crop((x0, 0, x1, height))
-    v_pixels = list(v_strip.get_flattened_data())
+    v_pixels = list(_flat_pixels(v_strip))
     strip_h = v_strip.height
     col_diffs = []
     for x in range(v_strip.width):
@@ -705,10 +717,7 @@ def quiet_solid_from_image(image: Image.Image, palette: dict = None, target_role
     sample = image.convert("RGB").resize((160, 160), Image.Resampling.LANCZOS)
     quantized = sample.quantize(colors=8, method=Image.Quantize.MEDIANCUT)
     palette_raw = quantized.getpalette() or []
-    if hasattr(quantized, "get_flattened_data"):
-        used = Counter(quantized.get_flattened_data())
-    else:
-        used = Counter(quantized.getdata())
+    used = Counter(_flat_pixels(quantized))
 
     dominant_colors = []
     for index, _ in used.most_common(4):
@@ -771,7 +780,7 @@ def clean_internal_text_strip(image: Image.Image, min_strip_height: int = 5, dif
     """
     gray = image.convert("L")
     width, height = gray.size
-    pixels = list(gray.get_flattened_data())
+    pixels = list(_flat_pixels(gray))
 
     row_diffs = []
     for y in range(height):
