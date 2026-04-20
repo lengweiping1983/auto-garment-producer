@@ -43,6 +43,10 @@ HERO_NEGATIVE_PROMPT = (
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 from prompt_blocks import build_single_texture_prompt_en, build_texture_2x2_board_prompt_en, build_transparent_hero_prompt_en
 try:
+    from prompt_sanitizer import sanitize_prompt_with_report
+except Exception:
+    sanitize_prompt_with_report = None
+try:
     from template_loader import (
         normalize_piece_asset_paths,
         relative_json_metadata_path,
@@ -334,6 +338,63 @@ def latest_collection_board(output_dir: Path) -> Path:
     return candidates[-1]
 
 
+def _sanitize_generation_prompt(
+    prompt_text: str,
+    *,
+    texture_id: str,
+    out_dir: Path,
+    report_items: list[dict],
+    prompt_role: str = "final",
+) -> str:
+    """Final preflight rewrite before a prompt is sent to Neo AI."""
+    if not sanitize_prompt_with_report:
+        return prompt_text
+    report = sanitize_prompt_with_report(prompt_text, domain="fashion", prompt_role=prompt_role)
+    if report.removed or report.replacements or report.warnings:
+        payload = report.to_dict()
+        payload["texture_id"] = texture_id
+        report_items.append(payload)
+    return report.sanitized_text
+
+
+def _write_prompt_sanitization_report(out_dir: Path, report_items: list[dict]) -> None:
+    if not report_items:
+        return
+    report_path = out_dir / "prompt_sanitization_report.json"
+    payload = {
+        "report_id": "prompt_sanitization_v1",
+        "purpose": "记录最终提交给 Neo AI 前被安全改写或移除的提示词片段。",
+        "items": report_items,
+    }
+    write_json(report_path, payload)
+    print(f"[提示词安全] 已写入违禁词/敏感词处理报告: {report_path}")
+
+
+def _sanitize_prompt_file_for_neo(prompt_file: str, output_dir: Path, texture_id: str = "neo_prompt") -> str:
+    """Sanitize externally supplied prompt files at the Neo boundary."""
+    if not prompt_file or not sanitize_prompt_with_report:
+        return prompt_file
+    src = Path(prompt_file)
+    if not src.exists() or not src.is_file():
+        return prompt_file
+    text = src.read_text(encoding="utf-8")
+    report_items: list[dict] = []
+    sanitized = _sanitize_generation_prompt(
+        text,
+        texture_id=texture_id,
+        out_dir=output_dir,
+        report_items=report_items,
+        prompt_role="final",
+    )
+    if sanitized == text:
+        return prompt_file
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dest = output_dir / f"{src.stem}.sanitized{src.suffix or '.txt'}"
+    dest.write_text(sanitized, encoding="utf-8")
+    _write_prompt_sanitization_report(output_dir, report_items)
+    return str(dest)
+
+
 def _build_generation_prompts_from_visual_elements(out_dir: Path, visual_elements_path: Path = None) -> tuple[dict[str, str], str]:
     """基于视觉分析结果构造三张单纹理 prompt 与独立透明主图 prompt。"""
     texture_prompts_path = out_dir / "texture_prompts.json"
@@ -439,6 +500,14 @@ def _neo_generation_cmd(
     negative_prompt: str = "",
     reference_images: list[str] | None = None,
 ) -> list[str]:
+    safe_prompt_file = _sanitize_prompt_file_for_neo(prompt_file, output_dir, texture_id=output_dir.name)
+    safe_negative_prompt = negative_prompt
+    if negative_prompt and sanitize_prompt_with_report:
+        safe_negative_prompt = sanitize_prompt_with_report(
+            negative_prompt,
+            domain="fashion",
+            prompt_role="negative",
+        ).sanitized_text
     cmd = [
         sys.executable,
         str(NEO_AI_SCRIPT),
@@ -451,10 +520,10 @@ def _neo_generation_cmd(
         "--output-dir",
         str(output_dir),
     ]
-    if prompt_file:
-        cmd.extend(["--prompt-file", prompt_file])
-    if negative_prompt:
-        cmd.extend(["--negative-prompt", negative_prompt])
+    if safe_prompt_file:
+        cmd.extend(["--prompt-file", safe_prompt_file])
+    if safe_negative_prompt:
+        cmd.extend(["--negative-prompt", safe_negative_prompt])
     for ref in reference_images or []:
         cmd.extend(["--reference-image", ref])
     if args.num_images:
@@ -2086,11 +2155,19 @@ def main() -> int:
         if not args.prompt_file:
             ve_path_obj = Path(args.visual_elements) if args.visual_elements else None
             texture_prompts, hero_prompt = _build_generation_prompts_from_visual_elements(out_dir, ve_path_obj)
+            prompt_sanitization_report = []
             if texture_prompts:
                 prompt_files = {}
                 prompt_dir = out_dir / "generated_texture_prompts"
                 prompt_dir.mkdir(parents=True, exist_ok=True)
                 for texture_id, prompt_text in texture_prompts.items():
+                    prompt_text = _sanitize_generation_prompt(
+                        prompt_text,
+                        texture_id=texture_id,
+                        out_dir=out_dir,
+                        report_items=prompt_sanitization_report,
+                        prompt_role="final",
+                    )
                     prompt_path = prompt_dir / f"{texture_id}.txt"
                     prompt_path.write_text(prompt_text, encoding="utf-8")
                     prompt_files[texture_id] = str(prompt_path)
@@ -2099,10 +2176,18 @@ def main() -> int:
                 args.prompt_file = args.texture_prompt_file
                 print(f"[视觉提取] 已基于视觉分析自动生成3张单纹理提示词: {prompt_dir}")
             if hero_prompt:
+                hero_prompt = _sanitize_generation_prompt(
+                    hero_prompt,
+                    texture_id="hero_motif_1",
+                    out_dir=out_dir,
+                    report_items=prompt_sanitization_report,
+                    prompt_role="final",
+                )
                 hero_prompt_path = out_dir / "generated_hero_prompt.txt"
                 hero_prompt_path.write_text(hero_prompt, encoding="utf-8")
                 args.hero_prompt_file = str(hero_prompt_path)
                 print(f"[视觉提取] 已基于视觉分析自动生成透明主图提示词: {hero_prompt_path}")
+            _write_prompt_sanitization_report(out_dir, prompt_sanitization_report)
 
     # ============================================================
     # 尝试读取 palette（供颜色提示和纯色提取使用）

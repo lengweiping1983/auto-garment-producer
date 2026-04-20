@@ -566,8 +566,8 @@ def _generate_outputs(
         "family_contract": family_contract,
         "prompts": prompts,
     }
-    # 过滤所有 prompt 中的停用词和禁用词
-    texture_prompts = sanitize_prompts_in_dict(texture_prompts, domain="fashion")
+    # 过滤所有正向/负向 prompt 中的停用词和可能触发生图安全过滤的词
+    texture_prompts = sanitize_prompts_in_dict(texture_prompts, keys=("prompt", "negative_prompt"), domain="fashion")
 
     outputs = {
         "商业设计简报": str(write_json(out_dir / "commercial_design_brief.json", brief).resolve()),
