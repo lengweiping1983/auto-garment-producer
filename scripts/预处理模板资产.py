@@ -36,7 +36,12 @@ def rel(path: Path, base: Path) -> str:
 
 
 def load_json(path: Path) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        text = text.replace("False", "false").replace("True", "true")
+        return json.loads(text)
 
 
 def save_kimi_jpeg(src: Path, dst: Path, max_size: int) -> dict:

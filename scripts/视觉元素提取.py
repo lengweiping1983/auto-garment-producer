@@ -150,7 +150,7 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "fusion_strategy": {"primary_reference": 1, "hero_subject_source": [1], "palette_sources": [1], "style_sources": [1], "strategy_note": ""},
         "theme_to_piece_strategy": {
             "base_atmosphere": "大身低噪底纹如何继承主题色彩/氛围，不直接复制主体",
-            "hero_motif": "唯一主卖点元素，建议放置在前片/指定 hero 裁片",
+            "hero_motif": "组合主卖点元素，建议放置在前片/指定 hero 裁片；如果 dominant_objects 中有多个 S/A 级 hero_motif，必须组合保留，不要三选一",
             "accent_details": "小花、叶片、蘑菇等只作小面积点缀",
             "quiet_zones": "袖片、后片、领口、窄条等需要安静处理的区域",
             "do_not_use_as_full_body_texture": ["不适合大面积满版的具象元素"]
@@ -184,7 +184,7 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "5. fabric_hints: 判断 has_nap；若 true，nap_direction 必填 vertical/horizontal。关键词含 corduroy/velvet/fleece/suede/plush/毛呢/法兰绒等。",
         "6. theme_to_piece_strategy: 把主题工程化拆成 base_atmosphere、hero_motif、accent_details、quiet_zones；明确哪些具象元素不得作为大身满版纹理。",
         "7. reference_fidelity/design_dna/single_texture_derivation/hero_texture_fusion_plan: 先明确主图必须保留什么、纹理从图片中提炼什么，以及主图和纹理如何像同一套设计。",
-        "8. generated_prompts: 只生成英文 main/secondary/accent_light/hero_motif_1 共4条提示词；前3条 texture 要 seamless tileable、low noise 且有明确 visible repeat 结构，必须包含从参考图提炼的小型元素、植物、几何、线条、散点或格纹等可裁剪图案，不得是空泛底纹；hero_motif_1 必须尽可能包含并复现用户参考图中的主要内容/核心主体（人物、脸、角色、动物、商品、图标、物体都允许作为主图主体），保留可识别轮廓、色彩、姿态和关键细节，必须完整不裁切，头部和头发完整可见，主体上方和四周保留透明留白，且必须是 isolated foreground、transparent PNG cutout、real alpha background、no background、no checkerboard transparency preview、no fake transparency grid、no colored box。",
+        "8. generated_prompts: 只生成英文 main/secondary/accent_light/hero_motif_1 共4条提示词；前3条 texture 要 seamless tileable、low noise 且有明确 visible repeat 结构，必须包含从参考图提炼的小型元素、植物、几何、线条、散点或格纹等可裁剪图案，不得是空泛底纹；hero_motif_1 必须尽可能包含并复现用户参考图中的主要内容/核心主体（人物、脸、角色、动物、商品、图标、物体都允许作为主图主体）。如果 dominant_objects 中有多个 S/A 级且 suggested_usage=hero_motif 的主体，hero_motif_1 必须把它们组合成一个 cohesive foreground placement graphic，而不是只选一个；保留每个主体的可识别轮廓、色彩、姿态和关键细节，必须完整不裁切，头部和头发完整可见，主体上方和四周保留透明留白，且必须是 isolated foreground、transparent PNG cutout、real alpha background、no background、no checkerboard transparency preview、no fake transparency grid、no colored box。",
         "",
         "===== hero_motif_1 主体描述必须覆盖的细节维度 =====",
         "写 hero_motif_1 时，不能只用一句话概括。必须像视觉观察报告一样逐条写出以下维度，确保 Neo AI 能精确复刻而非凭想象替代：",
@@ -235,7 +235,7 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "- generated_prompts.main 和 generated_prompts.secondary 必须明确 concrete visible repeat pattern、small motif repeat、botanical/geometric/line/scattered repeat 等具体图案结构，不得写 abstract wash、plain texture、paper grain only、gradient、empty background、tonal atmosphere only",
         "- generated_prompts 不得包含 accent_mid；默认只生成 main、secondary、accent_light 三张单纹理和 hero_motif_1 透明主图",
         "- 每张 texture prompt 必须写明 use reference image 1 as source for palette, brush language, material feel, small supporting motifs, and user intent；同时禁止复制完整主体/完整场景到满版纹理",
-        "- generated_prompts.hero_motif_1 必须明确 preserve and recreate the primary subject from the user's reference image as much as possible，包含用户图片中的主要内容/核心主体，人物、脸、角色、动物、商品、图标、物体都允许作为透明主图主体，保留可识别轮廓、色彩、姿态和关键特征，并要求 complete uncropped subject、full head and hair visible、generous transparent margin above and around the subject",
+        "- generated_prompts.hero_motif_1 必须明确 preserve and recreate the primary subject(s) from the user's reference image as much as possible，包含用户图片中的主要内容/核心主体。若有多个 S/A 级 hero_motif 主体，必须组合保留全部主体，不得三选一；人物、脸、角色、动物、商品、图标、物体都允许作为透明主图主体，保留可识别轮廓、色彩、姿态和关键特征，并要求 complete uncropped subject(s)、full head and hair visible、generous transparent margin above and around the subject group",
         "- generated_prompts.hero_motif_1 的主体描述段不能只有一句话概括，必须覆盖：subject_identity、pose_action、expression、hair、clothing、props、accessories、composition、art_style_details 等维度，具体细节直接来自参考图观察，不得编造",
         "- generated_prompts.hero_motif_1 必须明确 isolated foreground motif only, transparent PNG cutout, real alpha background, no background, no checkerboard transparency preview, no fake transparency grid, no colored rectangle, no plain light box",
         "- generated_prompts.hero_motif_1 必须是前景主体 cutout，不得写 scene、garden、meadow、landscape、environment、foliage behind subject、botanical backdrop、painted wash、vignette、rectangular composition 或 full illustration scene",

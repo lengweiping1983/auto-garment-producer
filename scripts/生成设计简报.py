@@ -131,30 +131,44 @@ def main() -> int:
     return 0
 
 
-def _enrich_hero_prompt_from_dominant_objects(visual_dict: dict, base_hero_prompt: str) -> str:
-    """Extract the most important S/A grade hero-suitable subject description and prepend it."""
+def _collect_hero_subjects(visual_dict: dict) -> list[tuple[int, float, str, str]]:
+    """Return S/A grade hero-suitable subjects sorted by visual importance."""
     dominant = visual_dict.get("dominant_objects", [])
     candidates = []
     for obj in dominant:
         grade = obj.get("grade", "").upper()
         usage = obj.get("suggested_usage", "")
         if grade in ("S", "A") and usage == "hero_motif":
+            name = obj.get("name", "").strip()
             desc = obj.get("description", "").strip()
-            # Use canvas_ratio from geometry as importance score; fallback to grade priority
+            form_type = obj.get("geometry", {}).get("form_type", "").strip()
             geo = obj.get("geometry", {})
             ratio = geo.get("canvas_ratio", 0)
             grade_score = 2 if grade == "S" else 1
             if desc:
-                candidates.append((grade_score, ratio, desc))
+                label = f"{name}: {desc}" if name else desc
+                if form_type:
+                    label = f"{label} Form type: {form_type}."
+                candidates.append((grade_score, ratio, label, name or desc))
+    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return candidates
+
+
+def _enrich_hero_prompt_from_dominant_objects(visual_dict: dict, base_hero_prompt: str) -> str:
+    """Extract all S/A grade hero-suitable subjects and prepend a composite brief."""
+    candidates = _collect_hero_subjects(visual_dict)
     if not candidates:
         return base_hero_prompt
-    # Sort by grade (S before A), then by canvas_ratio (larger first)
-    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    # Take top 2 at most to avoid conflicting subjects
-    top_descriptions = [c[2] for c in candidates[:2]]
-    subject_detail = "; ".join(top_descriptions)
+    subject_detail = "; ".join(c[2] for c in candidates)
+    composition_rule = (
+        "Composite hero requirement: include every listed hero subject in one cohesive foreground apparel placement graphic. "
+        "Preserve the recognizable relative roles from the reference image, keep each subject complete and readable, "
+        "arrange them as a balanced compact group suitable for splitting across left and right front garment pieces, "
+        "and simplify only minor background clutter. Do not omit any listed hero subject; do not reduce the hero graphic to only one subject. "
+        "If the base prompt gives extra detail for one subject, use that as detail for that subject while still drawing the full composite group."
+    )
     # Prepend the visual-fact paragraph so Neo AI sees "what to draw" first
-    return f"Subject visual facts from reference image: {subject_detail}. {base_hero_prompt}"
+    return f"Subject visual facts from reference image: {subject_detail}. {composition_rule} {base_hero_prompt}"
 
 
 def _generate_from_visual_elements(visual: dict, ve_path: Path, out_dir: Path, user_prompt: str, garment_type: str, season: str) -> dict:
@@ -165,6 +179,16 @@ def _generate_from_visual_elements(visual: dict, ve_path: Path, out_dir: Path, u
     motifs = visual.get("dominant_objects", []) + visual.get("supporting_elements", [])
     motif_labels = [m["name"] for m in motifs if "name" in m]
     style_id = f"{ve_path.stem.lower().replace(' ', '_')}_commercial_v1"
+    theme_strategy = visual.get("theme_to_piece_strategy", {})
+    hero_subjects = _collect_hero_subjects(visual)
+    if isinstance(theme_strategy, dict) and len(hero_subjects) > 1:
+        theme_strategy = dict(theme_strategy)
+        subject_names = [c[3] for c in hero_subjects]
+        theme_strategy["hero_motif"] = (
+            "组合主卖点定位图案：保留并组合 "
+            + "、".join(subject_names)
+            + "，形成一个可前片定位的透明主图，不做三选一。"
+        )
 
     # Enrich hero_motif_1 with dominant_objects descriptions before passing down
     raw_hero = prompts.get("hero_motif_1", "")
@@ -185,7 +209,7 @@ def _generate_from_visual_elements(visual: dict, ve_path: Path, out_dir: Path, u
         generated_prompts=prompts,
         fabric_hints=visual.get("fabric_hints", {}),
         fusion_strategy=visual.get("fusion_strategy", {}),
-        theme_to_piece_strategy=visual.get("theme_to_piece_strategy", {}),
+        theme_to_piece_strategy=theme_strategy,
         reference_fidelity=visual.get("reference_fidelity", {}),
         design_dna=visual.get("design_dna", {}),
         single_texture_derivation=visual.get("single_texture_derivation", {}),
@@ -232,7 +256,15 @@ def _generate_outputs(
         accent = flat_palette[7:8]
         dark = flat_palette[-2:] if len(flat_palette) >= 2 else flat_palette
 
-    hero_selling_point = motifs[0] if motifs else "主题核心元素"
+    hero_strategy = ""
+    if isinstance(theme_to_piece_strategy, dict):
+        hero_strategy = str(theme_to_piece_strategy.get("hero_motif", "")).strip()
+    if hero_strategy:
+        hero_selling_point = hero_strategy
+    elif len(motifs) > 1:
+        hero_selling_point = "组合主题主图：" + "、".join(motifs[:4])
+    else:
+        hero_selling_point = motifs[0] if motifs else "主题核心元素"
 
     # 从 visual_elements 读取面料工艺推断
     fabric_hints = fabric_hints or {}
@@ -247,7 +279,7 @@ def _generate_outputs(
     if not theme_to_piece_strategy:
         theme_to_piece_strategy = {
             "base_atmosphere": "大身只继承主题色彩、笔触和氛围，保持低噪可穿，不直接复制主体或完整场景。",
-            "hero_motif": f"只选择一个主卖点元素作为定位图案：{hero_selling_point}",
+            "hero_motif": f"将核心主对象组合成一个清晰定位图案：{hero_selling_point}",
             "accent_details": "辅助元素只用于小面积点缀、局部细节或 secondary/accent 面板。",
             "quiet_zones": "袖片、后片、领口、下摆、窄条保持安静，优先低噪底纹或纯色。",
             "do_not_use_as_full_body_texture": [m for m in motifs[:4] if m],
@@ -285,7 +317,7 @@ def _generate_outputs(
         "hero_texture_fusion_plan": hero_texture_fusion_plan,
         "user_prompt": user_prompt,
         "wearability_notes": [
-            "只保留一个明确的卖点概念",
+            "保留一个明确的组合卖点概念",
             "大面板使用低噪纹理",
             "饰边和窄条保持安静",
             "图案是简化的成衣定位，而非故事裁剪",

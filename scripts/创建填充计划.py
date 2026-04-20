@@ -18,7 +18,13 @@ from PIL import Image
 
 
 def load_json(path: str | Path) -> dict:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    text = Path(path).read_text(encoding="utf-8")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # 兼容 Python 风格的 True/False 布尔值
+        text = text.replace("False", "false").replace("True", "true")
+        return json.loads(text)
 
 
 def approved_ids(texture_set: dict, key: str, id_key: str, fallback_key: str = "role") -> list[str]:
@@ -269,7 +275,7 @@ def _largest_rect_in_binary(mask: Image.Image, seam_x: int | None = None) -> tup
         resized = binary
         scaled_seam = seam_x
     w, h = resized.size
-    pixels = list(resized.get_flattened_data())
+    pixels = list(resized.getdata())
     heights = [0] * w
     best = (0, 0, 0, 0, 0)
     for y in range(h):

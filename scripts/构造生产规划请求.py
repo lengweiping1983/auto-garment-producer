@@ -30,7 +30,12 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 
 
 def load_json(path: str | Path) -> dict:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    text = Path(path).read_text(encoding="utf-8")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        text = text.replace("False", "false").replace("True", "true")
+        return json.loads(text)
 
 
 def _load_visual_motif_geometries(visual_elements: dict) -> dict:
