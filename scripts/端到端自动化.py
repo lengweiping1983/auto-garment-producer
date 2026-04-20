@@ -22,6 +22,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from PIL import Image
@@ -323,6 +324,22 @@ def write_json(path: Path, payload: dict) -> Path:
 def run_step(cmd: list[str], env: dict | None = None, check: bool = True) -> subprocess.CompletedProcess:
     print("运行:", " ".join(cmd))
     return subprocess.run(cmd, check=check, env=env)
+
+
+def run_step_after_launch(
+    cmd: list[str],
+    env: dict | None = None,
+    check: bool = True,
+    on_launch=None,
+) -> subprocess.CompletedProcess:
+    print("运行:", " ".join(cmd))
+    proc = subprocess.Popen(cmd, env=env)
+    if on_launch:
+        on_launch()
+    rc = proc.wait()
+    if check and rc:
+        raise subprocess.CalledProcessError(rc, cmd)
+    return subprocess.CompletedProcess(cmd, rc)
 
 
 def latest_collection_board(output_dir: Path) -> Path:
@@ -672,8 +689,8 @@ def generate_texture_and_hero_assets(args: argparse.Namespace, out_dir: Path) ->
     hero_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     jobs = [
-        ("旧纹理看板", texture_dir, _neo_generation_cmd(args, texture_dir, getattr(args, "texture_prompt_file", "") or getattr(args, "prompt_file", ""))),
         ("透明主图", hero_dir, _neo_generation_cmd(args, hero_dir, hero_prompt_file, negative_prompt=HERO_NEGATIVE_PROMPT)),
+        ("旧纹理看板", texture_dir, _neo_generation_cmd(args, texture_dir, getattr(args, "texture_prompt_file", "") or getattr(args, "prompt_file", ""))),
     ]
     processes = []
     for label, _, cmd in jobs:
@@ -735,11 +752,19 @@ def generate_single_textures_and_hero_assets(args: argparse.Namespace, out_dir: 
     env = os.environ.copy()
     texture_paths = {}
     hero_path = None
+    hero_started = threading.Event()
+    if not hero_prompt_file:
+        hero_started.set()
 
     def _run_generation_job(job: tuple[str, str, Path, list[str]]) -> tuple[str, str, Path]:
         label, texture_id, work_dir, cmd = job
+        if texture_id != "hero_motif_1":
+            hero_started.wait()
         print(f"[Neo AI] 启动生成任务: {label} ({texture_id})")
-        run_step(cmd, env=env)
+        if texture_id == "hero_motif_1":
+            run_step_after_launch(cmd, env=env, on_launch=hero_started.set)
+        else:
+            run_step(cmd, env=env)
         generated = latest_collection_board(work_dir)
         return label, texture_id, generated
 
@@ -923,10 +948,17 @@ def run_single_texture_channel_pipeline(
             _neo_generation_cmd(args, work_dir, prompt_files[texture_id], reference_images=refs),
         ))
 
+    hero_started = threading.Event()
+
     def _run_generation_job(job: tuple[str, str, Path, list[str]]) -> tuple[str, str, Path]:
         label, texture_id, work_dir, cmd = job
+        if texture_id != "hero_motif_1":
+            hero_started.wait()
         print(f"[Neo AI] 启动生成任务: {label} ({texture_id})")
-        run_step(cmd, env=os.environ.copy())
+        if texture_id == "hero_motif_1":
+            run_step_after_launch(cmd, env=os.environ.copy(), on_launch=hero_started.set)
+        else:
+            run_step(cmd, env=os.environ.copy())
         return label, texture_id, latest_collection_board(work_dir)
 
     hero_motif_path: Path | None = None

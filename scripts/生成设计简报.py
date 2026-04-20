@@ -547,13 +547,13 @@ def _generate_outputs(
             context += f"Shared design DNA: {'; '.join(dna_bits)}. "
         return f"{context}{prompt_text}"
 
-    # 构建 3 张单纹理 + 独立主图提示词，依次注入微观结构、颜色硬约束、参考上下文
+    # 构建独立主图 + 3 张单纹理提示词。主图放在第一位，确保下游按清单顺序提交时先发主图。
     palette = style_profile.get("palette", {})
     _prompts = [
+        ("hero_motif_1", "AI生成主图透明定位图案", hero_motif_1_prompt, "single_hero", "placement_motif"),
         ("main", "可穿大身裁片", _reference_context("main", _inject_micro_structure(main_prompt, "main", texture_micro_structure)), "single_texture", "base_texture"),
         ("secondary", "协调大副裁片", _reference_context("secondary", _inject_micro_structure(secondary_prompt, "secondary", texture_micro_structure)), "single_texture", "base_texture"),
         ("accent_light", "小面板与受控点缀", _reference_context("accent_light", _inject_micro_structure(accent_prompt, "accent_light", texture_micro_structure)), "single_texture", "accent_texture"),
-        ("hero_motif_1", "AI生成主图透明定位图案", hero_motif_1_prompt, "single_hero", "placement_motif"),
     ]
     prompts = [
         _make_prompt(tid, purpose, sanitize_prompt(_inject_palette_constraints(ptext, tid, palette), domain="fashion"), panel=panel, role=role)
