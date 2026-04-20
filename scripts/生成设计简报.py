@@ -101,7 +101,12 @@ def main() -> int:
         ve_path = Path(args.visual_elements)
         if ve_path.exists():
             print(f"[生成设计简报] 使用视觉元素分析: {ve_path}")
-            visual = json.loads(ve_path.read_text(encoding="utf-8"))
+            ve_text = ve_path.read_text(encoding="utf-8")
+            try:
+                visual = json.loads(ve_text)
+            except json.JSONDecodeError:
+                ve_text = ve_text.replace("False", "false").replace("True", "true")
+                visual = json.loads(ve_text)
             outputs = _generate_from_visual_elements(visual, ve_path, out_dir, args.user_prompt, args.garment_type, args.season)
             print(json.dumps(outputs, ensure_ascii=False, indent=2))
             return 0

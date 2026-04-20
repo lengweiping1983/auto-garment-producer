@@ -211,7 +211,12 @@ def create_front_split_assets(theme_image: str | Path, out_dir: str | Path) -> d
 def inject_front_split_motifs(texture_set_path: str | Path, split_assets: dict) -> Path:
     """Register generated front motifs in texture_set.json."""
     path = Path(texture_set_path)
-    data = json.loads(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        text = text.replace("False", "false").replace("True", "true")
+        data = json.loads(text)
     motifs = [m for m in data.get("motifs", []) if m.get("motif_id") not in {"theme_front_left", "theme_front_right"}]
     motifs.extend([
         {

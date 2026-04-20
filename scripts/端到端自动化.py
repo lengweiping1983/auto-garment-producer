@@ -302,7 +302,12 @@ def build_production_context(
 
 
 def load_json(path: str | Path) -> dict:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    text = Path(path).read_text(encoding="utf-8")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        text = text.replace("False", "false").replace("True", "true")
+        return json.loads(text)
 
 
 def write_json(path: Path, payload: dict) -> Path:
@@ -338,7 +343,12 @@ def _build_generation_prompts_from_visual_elements(out_dir: Path, visual_element
 
     try:
         tp = json.loads(texture_prompts_path.read_text(encoding="utf-8"))
-        ve = json.loads(visual_path.read_text(encoding="utf-8"))
+        ve_text = visual_path.read_text(encoding="utf-8")
+        try:
+            ve = json.loads(ve_text)
+        except json.JSONDecodeError:
+            ve_text = ve_text.replace("False", "false").replace("True", "true")
+            ve = json.loads(ve_text)
     except Exception:
         return {}, ""
 

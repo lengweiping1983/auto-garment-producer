@@ -67,7 +67,12 @@ def load_motif_geometries(visual_elements_path: Path) -> dict:
     if not visual_elements_path.exists():
         return {}
     try:
-        data = json.loads(visual_elements_path.read_text(encoding="utf-8"))
+        ve_text = visual_elements_path.read_text(encoding="utf-8")
+        try:
+            data = json.loads(ve_text)
+        except json.JSONDecodeError:
+            ve_text = ve_text.replace("False", "false").replace("True", "true")
+            data = json.loads(ve_text)
     except Exception:
         return {}
     geometries = {}
