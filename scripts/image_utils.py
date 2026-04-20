@@ -2,11 +2,10 @@
 """图像工具函数：缩略图、Kimi payload 预算等。"""
 import hashlib
 import json
-import math
 from pathlib import Path
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image
 except Exception:
     Image = None
 
@@ -116,92 +115,6 @@ def ensure_thumbnail(
         return src
 
 
-def make_contact_sheet(
-    items: list[dict],
-    out_path: str | Path,
-    *,
-    cell_size: int = 192,
-    provider: str = "kimi",
-    title: str = "texture assets",
-) -> dict:
-    """把多张资产图拼成一张 Kimi 友好的 contact sheet。
-
-    items: [{"id": "main_a", "path": "...", "role": "..."}]
-    返回包含 sheet_path、items 映射和尺寸的 dict。
-    """
-    out = Path(out_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    if Image is None or not items:
-        return {"sheet_path": "", "items": [], "image_count": 0}
-
-    prepared = []
-    for idx, item in enumerate(items, 1):
-        path = Path(item.get("path", ""))
-        if not path.exists():
-            continue
-        prepared.append({
-            "index": idx,
-            "asset_id": item.get("id", f"asset_{idx:02d}"),
-            "role": item.get("role", ""),
-            "path": str(path.resolve()),
-        })
-    if not prepared:
-        return {"sheet_path": "", "items": [], "image_count": 0}
-
-    cols = min(6, max(1, math.ceil(math.sqrt(len(prepared)))))
-    rows = math.ceil(len(prepared) / cols)
-    label_h = 34
-    pad = 8
-    header_h = 30
-    sheet_w = cols * cell_size + (cols + 1) * pad
-    sheet_h = header_h + rows * (cell_size + label_h) + (rows + 1) * pad
-    sheet = Image.new("RGB", (sheet_w, sheet_h), (248, 248, 244))
-    draw = ImageDraw.Draw(sheet)
-    font = ImageFont.load_default()
-    draw.text((pad, 8), title[:100], fill=(40, 40, 40), font=font)
-
-    for i, item in enumerate(prepared):
-        row, col = divmod(i, cols)
-        x = pad + col * (cell_size + pad)
-        y = header_h + pad + row * (cell_size + label_h + pad)
-        try:
-            with Image.open(item["path"]) as im:
-                rgb = _flatten_for_kimi(im)
-                rgb.thumbnail((cell_size, cell_size), Image.LANCZOS)
-                bg = Image.new("RGB", (cell_size, cell_size), (255, 255, 255))
-                bg.paste(rgb, ((cell_size - rgb.width) // 2, (cell_size - rgb.height) // 2))
-                sheet.paste(bg, (x, y))
-        except Exception:
-            draw.rectangle((x, y, x + cell_size, y + cell_size), outline=(180, 0, 0))
-        label = f"{item['index']:02d} {item['asset_id']} {item['role']}".strip()
-        draw.text((x, y + cell_size + 4), label[:42], fill=(20, 20, 20), font=font)
-
-    quality = 82
-    current_sheet = sheet
-    while True:
-        current_sheet.save(out, quality=quality, optimize=True, progressive=True)
-        if out.stat().st_size <= KIMI_SINGLE_IMAGE_BUDGET_BYTES:
-            break
-        if quality > 54:
-            quality -= 8
-            continue
-        if max(current_sheet.size) <= 720:
-            break
-        scale = 0.86
-        current_sheet = current_sheet.resize(
-            (max(1, int(current_sheet.width * scale)), max(1, int(current_sheet.height * scale))),
-            Image.Resampling.LANCZOS,
-        )
-
-    return {
-        "sheet_path": str(out.resolve()),
-        "items": prepared,
-        "image_count": len(prepared),
-        "cell_size": cell_size,
-        "bytes": out.stat().st_size,
-    }
-
-
 def estimate_payload_budget(
     prompt_path: str | Path | None = None,
     image_paths: list[str | Path] | None = None,
@@ -256,7 +169,7 @@ def print_payload_budget_warning(budget: dict) -> None:
     largest = budget.get("largest_image") or {}
     print(json.dumps({
         "Kimi请求体超预算": True,
-        "说明": "不要直接调用 Kimi；请先压缩图片、使用 contact sheet 或减少图片数量，避免 nginx 413。",
+        "说明": "不要直接调用 Kimi；请先压缩图片或减少图片数量，避免 nginx 413。",
         "estimated_total_bytes": budget.get("estimated_total_bytes"),
         "image_count": budget.get("image_count"),
         "largest_image": largest.get("path"),

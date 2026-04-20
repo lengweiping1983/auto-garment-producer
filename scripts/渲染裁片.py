@@ -4,10 +4,9 @@
 """
 import argparse
 import json
-import math
 from pathlib import Path
 
-from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageColor, ImageOps
 
 try:
     from template_loader import normalize_piece_asset_paths
@@ -339,7 +338,10 @@ def render_motif_layer(piece: dict, layer: dict, motif_info: dict, underlay: Ima
     scale = max(0.05, float(layer.get("scale", 1) or 1))
     target_max_w = max(1, round(piece["width"] * scale))
     target_max_h = max(1, round(piece["height"] * scale))
-    ratio = min(target_max_w / max(1, motif.width), target_max_h / max(1, motif.height))
+    if layer.get("seam_lock"):
+        ratio = target_max_h / max(1, motif.height)
+    else:
+        ratio = min(target_max_w / max(1, motif.width), target_max_h / max(1, motif.height))
     motif = motif.resize((max(1, round(motif.width * ratio)), max(1, round(motif.height * ratio))), Image.Resampling.LANCZOS)
     rotation = float(layer.get("rotation", 0) or 0)
     # 补偿裁片在 pattern 中的方向（倒置裁片需额外旋转 motif）
@@ -513,32 +515,6 @@ def compose_preview(pieces_payload: dict, rendered: list[dict], out_path: Path) 
     return out_path
 
 
-def write_contact_sheet(rendered: list[dict], out_path: Path) -> Path:
-    """生成裁片联络单（缩略图合集）。"""
-    thumbs = []
-    for item in rendered:
-        with Image.open(item["output_path"]).convert("RGBA") as img:
-            bg = Image.new("RGBA", img.size, (245, 245, 245, 255))
-            bg.alpha_composite(img)
-            bg.thumbnail((300, 300), Image.Resampling.LANCZOS)
-            thumbs.append((Path(item["output_path"]).name, bg.convert("RGB")))
-    cols, cell_w, cell_h = 3, 360, 360
-    rows = math.ceil(len(thumbs) / cols)
-    sheet = Image.new("RGB", (cols * cell_w, rows * cell_h), "white")
-    draw = ImageDraw.Draw(sheet)
-    try:
-        font = ImageFont.truetype("Arial.ttf", 20)
-    except Exception:
-        font = ImageFont.load_default()
-    for index, (name, img) in enumerate(thumbs):
-        x = (index % cols) * cell_w + (cell_w - img.width) // 2
-        y = (index // cols) * cell_h + 25
-        sheet.paste(img, (x, y))
-        draw.text(((index % cols) * cell_w + 24, (index // cols) * cell_h + cell_h - 42), name, fill=(30, 30, 30), font=font)
-    sheet.save(out_path, quality=95)
-    return out_path
-
-
 def write_manifest(texture_set: dict, fill_plan: dict, rendered: list[dict], preview_path: Path, out_path: Path) -> Path:
     """写入填充清单。"""
     manifest_dir = out_path.parent.resolve()
@@ -600,11 +576,9 @@ def main() -> int:
 
     preview = compose_preview(pieces_payload, rendered, out_dir / "preview.png")
 
-    sheet = write_contact_sheet(rendered, out_dir / "piece_contact_sheet.jpg")
-
     manifest = write_manifest(texture_set, fill_plan, rendered, preview, out_dir / "texture_fill_manifest.json")
     print(json.dumps(
-        {"裁片数量": len(rendered), "预览图": str(preview.resolve()), "联络单": str(sheet.resolve()), "清单": str(manifest.resolve())},
+        {"裁片数量": len(rendered), "预览图": str(preview.resolve()), "白底预览图": str(preview.with_name("preview_white.jpg").resolve()), "清单": str(manifest.resolve())},
         ensure_ascii=False,
     ))
     return 0

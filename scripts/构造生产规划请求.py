@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from image_utils import ensure_thumbnail, make_contact_sheet, estimate_payload_budget, print_payload_budget_warning
+from image_utils import ensure_thumbnail, estimate_payload_budget, print_payload_budget_warning
 from prompt_blocks import COMMERCIAL_FILL_RULES_ZH, STRICT_JSON_ONLY_ZH
 try:
     from template_loader import normalize_piece_asset_paths, relative_json_metadata_path, template_kimi_preview_for_pieces
@@ -52,7 +52,6 @@ def build_production_plan_prompt(
     visual_elements: dict | None,
     garment_map: dict | None,
     piece_overview_path: str,
-    texture_thumbnail_paths: list[str],
 ) -> str:
     """构造合并后的生产规划 prompt。"""
     pieces = pieces_payload.get("pieces", [])
@@ -123,13 +122,6 @@ def build_production_plan_prompt(
                 json.dumps(garment_map, ensure_ascii=False, indent=2),
                 "",
             ])
-
-    if texture_thumbnail_paths:
-        lines.append("【必看 2】面料资产 Contact Sheet / 缩略图（必须查看后再分配）：")
-        for tp in texture_thumbnail_paths:
-            lines.append(f"  - {tp}")
-        lines.append("  如果这是 contact sheet，请按图中编号和下方 asset id 列表对应选择资产；不要要求上传单张原图。")
-        lines.append("")
 
     lines.extend([
         "===== 服装类型指导 =====",
@@ -210,12 +202,12 @@ def build_production_plan_prompt(
         "  - 程序会在渲染时自动应用 pattern_orientation 补偿，你的 rotation 值是在此基础上的增量。",
         "",
         "===== Step 2: 填充决策 =====",
-        "基于 Step 1 的部位识别结果和以下面料资产，为每个裁片制定填充计划。",
+        "基于 Step 1 的部位识别结果制定裁片结构、分层和主图 overlay 计划。纹理选择由后续程序按 2x2 裁格自动生成 4 套单纹理变体，不需要你挑选具体纹理。",
         "",
         "--- 可用面料资产 ---",
     ])
 
-    # 面料资产列表：压缩为 ID + role，省略 prompt（AI 会查看缩略图）
+    # 面料资产列表：只提供 ID + role，AI 不需要查看纹理缩略图或选择纹理。
     asset_lines = []
     for tex in texture_set.get("textures", []):
         if tex.get("approved", False) or tex.get("candidate", False):
@@ -234,7 +226,7 @@ def build_production_plan_prompt(
         "",
         "--- 填充规则 ---",
         "  " + "；".join(COMMERCIAL_FILL_RULES_ZH) + "。",
-        "  大身裁片只能使用 1 套主底纹家族；左右/前后/袖片必须协调，不得像不同看板硬拼。",
+        "  不要在不同纹理之间做择优选择；程序会对 2x2 裁出的每个纹理分别生成一套完整裁片。",
         "  蘑菇、动物、角色、花丛、完整场景等具象元素不得作为大面积满版 body texture，除非用户明确要求；它们只能作为 1 个 hero motif 或小面积 accent。",
         "  禁止半透明整张主题图贴片；motif overlay 必须是干净定位图案，只允许用于 1 个 hero 裁片。",
         "  纹理方向自主决定；可声明 intentional_asymmetry: true 保留有意不对称。",
@@ -244,7 +236,7 @@ def build_production_plan_prompt(
         "  Q2 三米测试：距离 3 米看，哪些纹理会糊、乱、花？大身 base 必须塌缩为受控色相。",
         "  Q3 挂架理由：和同价位 20 件上衣挂在一起，消费者为什么拿起它？",
         "  Q4 日常舒适：开会、吃饭、接孩子是否用力过猛？大身满版插画必须降级为低噪 base。",
-        "  可在 art_direction.notes 中简要说明这些判断如何影响资产选择。",
+        "  可在 art_direction.notes 中简要说明这些判断如何影响裁片层级和主图位置。",
         "",
         "--- Hero Motif 几何契约（硬约束）---",
         "  hero 只允许在 front_body/front_hero；宽度占前片 18%–42%，高度 18%–38%。",
@@ -320,7 +312,7 @@ def build_production_plan_prompt(
         "",
         "===== 重要声明 =====",
         "以上所有程序推断（裁片几何、部位候选、面料描述）均为参考建议，不是事实。",
-        "你必须结合纸样总览缩略图和面料 contact sheet 重新确认每个裁片的部位和填充方案。",
+        "你必须结合纸样总览缩略图确认每个裁片的部位和填充结构；不要要求查看纹理拼图，也不要把某一个纹理作为唯一结果。",
     ])
 
     return "\n".join(lines)
@@ -403,28 +395,6 @@ def main() -> int:
                 overview_path = str(cp.resolve())
                 break
 
-    # 收集面料资产缩略图路径（debug 用），Kimi 默认只看 contact sheet，避免 18 张图触发 413。
-    texture_thumbnails_debug = []
-    contact_items = []
-    base_dir = Path(args.texture_set).parent
-    for tex in texture_set.get("textures", []) + texture_set.get("motifs", []):
-        p = tex.get("path", "")
-        if p:
-            tp = Path(p) if Path(p).is_absolute() else base_dir / p
-            if tp.exists():
-                thumb = ensure_thumbnail(tp, max_size=192, provider="kimi")
-                texture_thumbnails_debug.append(str(thumb.resolve()))
-                asset_id = tex.get("texture_id") or tex.get("motif_id") or tex.get("role") or tp.stem
-                contact_items.append({"id": asset_id, "role": tex.get("role", ""), "path": str(tp.resolve())})
-    contact_sheet = make_contact_sheet(
-        contact_items,
-        out_dir / "texture_contact_sheet_kimi.jpg",
-        cell_size=176 if len(contact_items) > 12 else 192,
-        provider="kimi",
-        title="Kimi texture/motif asset contact sheet",
-    )
-    texture_kimi_images = [contact_sheet["sheet_path"]] if contact_sheet.get("sheet_path") else texture_thumbnails_debug[:6]
-
     overview_for_kimi = overview_path
     overview_preprocessed = False
     if overview_path:
@@ -437,12 +407,12 @@ def main() -> int:
 
     prompt_text = build_production_plan_prompt(
         pieces_payload, texture_set, brief, geometry_hints,
-        visual_elements, garment_map, overview_for_kimi, texture_kimi_images,
+        visual_elements, garment_map, overview_for_kimi,
     )
 
     prompt_path = out_dir / "ai_production_plan_prompt.txt"
     prompt_path.write_text(prompt_text, encoding="utf-8")
-    kimi_images = ([overview_for_kimi] if overview_for_kimi else []) + texture_kimi_images
+    kimi_images = [overview_for_kimi] if overview_for_kimi else []
     payload_budget = estimate_payload_budget(prompt_path, kimi_images)
 
     request_path = out_dir / "ai_production_plan_request.json"
@@ -457,15 +427,12 @@ def main() -> int:
         "piece_overview": overview_for_kimi,
         "piece_overview_original": overview_path,
         "piece_overview_preprocessed": overview_preprocessed,
-        "texture_contact_sheet": contact_sheet,
-        "texture_thumbnails_debug": texture_thumbnails_debug,
-        "texture_thumbnails": texture_kimi_images,
         "prompt_path": str(prompt_path.resolve()),
         "expected_output": str((out_dir / "ai_production_plan.json").resolve()),
         "expected_top_level": "garment_map + piece_fill_plan",
         "payload_budget": payload_budget,
         "kimi_images": kimi_images,
-        "kimi_input_note": "默认只传 piece_overview 和 texture_contact_sheet 的 Kimi 压缩图；不要传 texture_thumbnails_debug 中的单张原图/调试图。",
+        "kimi_input_note": "只传 piece_overview 的 Kimi 压缩图；不生成或传入纹理拼图，纹理变体由程序逐一渲染。",
     }
     request_path.write_text(json.dumps(request_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -474,7 +441,6 @@ def main() -> int:
         "AI生产规划提示词": str(prompt_path.resolve()),
         "纸样总览图": overview_path,
         "Kimi纸样总览图": overview_for_kimi,
-        "Kimi面料ContactSheet": contact_sheet.get("sheet_path", ""),
         "预期输出": request_summary["expected_output"],
         "Kimi请求体预算": payload_budget,
     }, ensure_ascii=False, indent=2))

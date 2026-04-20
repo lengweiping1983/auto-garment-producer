@@ -840,24 +840,42 @@ def write_single_texture_variant_set(texture_set: dict, texture_id: str, variant
 
 
 def force_fill_plan_to_single_texture(fill_plan: dict, texture_id: str) -> dict:
-    """Return a copy of fill_plan where every texture layer uses texture_id."""
+    """Return a copy of fill_plan where every non-motif rendered layer uses texture_id."""
     plan = copy.deepcopy(fill_plan)
     plan["plan_id"] = f"{plan.get('plan_id', 'piece_fill_plan')}_{texture_id}_single_texture"
     plan["variant_texture_id"] = texture_id
 
-    def _force_layer(layer):
+    def _force_render_layer(layer):
         if isinstance(layer, dict):
-            if layer.get("fill_type") == "texture" or "texture_id" in layer:
+            fill_type = layer.get("fill_type")
+            if fill_type != "motif" and (fill_type in {"texture", "solid"} or "texture_id" in layer or "solid_id" in layer):
                 layer["fill_type"] = "texture"
                 layer["texture_id"] = texture_id
+                layer.pop("solid_id", None)
             for value in layer.values():
-                _force_layer(value)
+                _force_render_layer(value)
         elif isinstance(layer, list):
             for item in layer:
-                _force_layer(item)
+                _force_render_layer(item)
 
     for piece in plan.get("pieces", []):
-        _force_layer(piece)
+        if piece.get("fill_type") != "motif" and (
+            piece.get("fill_type") in {"texture", "solid"} or "texture_id" in piece or "solid_id" in piece
+        ):
+            piece["fill_type"] = "texture"
+            piece["texture_id"] = texture_id
+            piece.pop("solid_id", None)
+        if not any(isinstance(piece.get(key), dict) for key in ("base", "overlay", "trim")):
+            if piece.get("fill_type") != "motif":
+                piece["fill_type"] = "texture"
+                piece["texture_id"] = texture_id
+                piece.pop("solid_id", None)
+        for key in ("base", "trim"):
+            if isinstance(piece.get(key), dict):
+                _force_render_layer(piece[key])
+        overlay = piece.get("overlay")
+        if isinstance(overlay, dict) and overlay.get("fill_type") != "motif":
+            _force_render_layer(overlay)
         piece["variant_texture_id"] = texture_id
     return plan
 
@@ -911,7 +929,6 @@ def render_texture_variants(
             "渲染目录": str(variant_rendered_dir.resolve()),
             "预览图": str((variant_rendered_dir / "preview.png").resolve()),
             "白底预览图": str((variant_rendered_dir / "preview_white.jpg").resolve()),
-            "联络单": str((variant_rendered_dir / "piece_contact_sheet.jpg").resolve()),
             "清单": str((variant_rendered_dir / "texture_fill_manifest.json").resolve()),
         })
 
@@ -1540,7 +1557,6 @@ def main() -> int:
         "渲染目录": str(rendered_dir.resolve()),
         "预览图": str((rendered_dir / "preview.png").resolve()),
         "白底预览图": str((rendered_dir / "preview_white.jpg").resolve()),
-        "联络单": str((rendered_dir / "piece_contact_sheet.jpg").resolve()),
         "清单": str((rendered_dir / "texture_fill_manifest.json").resolve()),
         "裁片模板变体": variant_summaries,
     }

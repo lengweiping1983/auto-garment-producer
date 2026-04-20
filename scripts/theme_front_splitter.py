@@ -150,6 +150,27 @@ def _crop_subject(img: Image.Image) -> Image.Image:
     return rgba.crop(bbox)
 
 
+def _crop_half_to_seam_alpha(half: Image.Image, seam_side: str) -> Image.Image:
+    """Trim transparent padding so the visible half touches the seam edge."""
+    rgba = half.convert("RGBA")
+    bbox = rgba.getchannel("A").getbbox()
+    if not bbox:
+        return rgba
+
+    pad = max(2, round(min(rgba.size) * 0.015))
+    top = max(0, bbox[1] - pad)
+    bottom = min(rgba.height, bbox[3] + pad)
+    if seam_side == "right":
+        left = max(0, bbox[0] - pad)
+        right = bbox[2]
+    else:
+        left = bbox[0]
+        right = min(rgba.width, bbox[2] + pad)
+    if right <= left or bottom <= top:
+        return rgba
+    return rgba.crop((left, top, right, bottom))
+
+
 def create_front_split_assets(theme_image: str | Path, out_dir: str | Path) -> dict:
     """Crop the primary subject and split it into left/right front motifs."""
     out_dir = Path(out_dir)
@@ -161,6 +182,8 @@ def create_front_split_assets(theme_image: str | Path, out_dir: str | Path) -> d
     overlap = min(8, max(2, round(subject.width * 0.01))) if subject.width > 4 else 0
     left = subject.crop((0, 0, min(subject.width, mid + overlap), subject.height))
     right = subject.crop((max(0, mid - overlap), 0, subject.width, subject.height))
+    left = _crop_half_to_seam_alpha(left, "right")
+    right = _crop_half_to_seam_alpha(right, "left")
     left_path = assets_dir / "theme_front_left.png"
     right_path = assets_dir / "theme_front_right.png"
     left.save(left_path)
