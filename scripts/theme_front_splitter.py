@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+from collections import deque
+
 from PIL import Image, ImageFilter, ImageStat
 
 
@@ -72,14 +74,44 @@ def _remove_false_transparency_background(img: Image.Image) -> Image.Image:
     alpha = Image.new("L", rgba.size, 255)
     alpha_px = alpha.load()
     threshold = 54
-    for y in range(rgba.height):
-        for x in range(rgba.width):
-            r, g, b, _ = src[x, y]
-            for bg in palette:
-                dist = abs(r - bg[0]) + abs(g - bg[1]) + abs(b - bg[2])
-                if dist <= threshold and _is_background_like((r, g, b)):
-                    alpha_px[x, y] = 0
-                    break
+    w, h = rgba.size
+
+    def is_removable_bg(x: int, y: int) -> bool:
+        r, g, b, _ = src[x, y]
+        if not _is_background_like((r, g, b)):
+            return False
+        return any(abs(r - bg[0]) + abs(g - bg[1]) + abs(b - bg[2]) <= threshold for bg in palette)
+
+    # Only remove fake transparency that is connected to the image edge. A
+    # global color erase can punch holes in white teeth, eye highlights, or
+    # cream product details because they resemble checkerboard background tiles.
+    queue: deque[int] = deque()
+    seen = bytearray(w * h)
+    for x in range(w):
+        queue.append(x)
+        queue.append((h - 1) * w + x)
+    for y in range(h):
+        queue.append(y * w)
+        queue.append(y * w + (w - 1))
+
+    while queue:
+        idx = queue.popleft()
+        if idx < 0 or idx >= len(seen) or seen[idx]:
+            continue
+        seen[idx] = 1
+        x = idx % w
+        y = idx // w
+        if not is_removable_bg(x, y):
+            continue
+        alpha_px[x, y] = 0
+        if x > 0:
+            queue.append(idx - 1)
+        if x + 1 < w:
+            queue.append(idx + 1)
+        if y > 0:
+            queue.append(idx - w)
+        if y + 1 < h:
+            queue.append(idx + w)
     alpha = alpha.filter(ImageFilter.GaussianBlur(0.45))
     rgba.putalpha(alpha)
     return rgba
