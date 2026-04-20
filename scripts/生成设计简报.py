@@ -125,6 +125,32 @@ def main() -> int:
     return 0
 
 
+def _enrich_hero_prompt_from_dominant_objects(visual_dict: dict, base_hero_prompt: str) -> str:
+    """Extract the most important S/A grade hero-suitable subject description and prepend it."""
+    dominant = visual_dict.get("dominant_objects", [])
+    candidates = []
+    for obj in dominant:
+        grade = obj.get("grade", "").upper()
+        usage = obj.get("suggested_usage", "")
+        if grade in ("S", "A") and usage == "hero_motif":
+            desc = obj.get("description", "").strip()
+            # Use canvas_ratio from geometry as importance score; fallback to grade priority
+            geo = obj.get("geometry", {})
+            ratio = geo.get("canvas_ratio", 0)
+            grade_score = 2 if grade == "S" else 1
+            if desc:
+                candidates.append((grade_score, ratio, desc))
+    if not candidates:
+        return base_hero_prompt
+    # Sort by grade (S before A), then by canvas_ratio (larger first)
+    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    # Take top 2 at most to avoid conflicting subjects
+    top_descriptions = [c[2] for c in candidates[:2]]
+    subject_detail = "; ".join(top_descriptions)
+    # Prepend the visual-fact paragraph so Neo AI sees "what to draw" first
+    return f"Subject visual facts from reference image: {subject_detail}. {base_hero_prompt}"
+
+
 def _generate_from_visual_elements(visual: dict, ve_path: Path, out_dir: Path, user_prompt: str, garment_type: str, season: str) -> dict:
     """基于 visual_elements.json 生成所有设计文件。"""
     palette = visual.get("palette", {})
@@ -133,6 +159,11 @@ def _generate_from_visual_elements(visual: dict, ve_path: Path, out_dir: Path, u
     motifs = visual.get("dominant_objects", []) + visual.get("supporting_elements", [])
     motif_labels = [m["name"] for m in motifs if "name" in m]
     style_id = f"{ve_path.stem.lower().replace(' ', '_')}_commercial_v1"
+
+    # Enrich hero_motif_1 with dominant_objects descriptions before passing down
+    raw_hero = prompts.get("hero_motif_1", "")
+    if raw_hero:
+        prompts["hero_motif_1"] = _enrich_hero_prompt_from_dominant_objects(visual, raw_hero)
 
     return _generate_outputs(
         style_id=style_id,
@@ -359,7 +390,7 @@ def _generate_outputs(
 
     # Independent hero motif must be generated as a transparent cutout.
     motif_guard = "isolated foreground motif only, transparent PNG cutout, real alpha background, no background, no checkerboard transparency preview, no fake transparency grid, no plain-color box, no filled rectangular background, no scenery, no semi-transparent full-image patch"
-    hero_source_guard = "preserve and recreate the primary subject from the user's reference image as much as possible, people, faces, characters, animals, products, icons, objects, or logos are allowed if they are the user's main image content, keep the recognizable silhouette, color identity, pose, proportions, and key visual details"
+    hero_source_guard = "preserve and recreate the primary subject from the user's reference image as much as possible, people, faces, characters, animals, products, icons, objects, or logos are allowed if they are the user's main image content, keep the recognizable silhouette, color identity, pose, proportions, and key visual details, complete uncropped subject, full head and hair visible, generous transparent margin above and around the subject"
     hero_guard = f"{hero_source_guard}, {motif_guard}, no garden, no meadow, no landscape, no environment, no foliage behind subject, no botanical backdrop, no painted wash behind subject, no rectangular composition, no full illustration scene, no vignette, no ground shadow"
     hero_motif_1_prompt = _force_transparent_motif_prompt(gp.get("hero_motif_1", gp.get("hero_motif", f"isolated foreground hero motif only, centered subject, transparent PNG cutout with real alpha background, {hero_source_guard}, empty transparent pixels around the subject, soft clean edges, balanced negative space, {medium} hand-painted placement print element, {hero_guard}, no text")), "hero_motif_1")
 
@@ -384,7 +415,7 @@ def _generate_outputs(
         elif texture_id == "hero_motif_1" and primary:
             bg = primary[0] if primary else "#ffffff"
             fg = accent[0] if accent else (secondary[0] if secondary else bg)
-            constraints.append(f"transparent alpha background only, preserve the user's main reference subject as much as possible, isolated foreground subject painted in {fg} tones while keeping recognizable source-image silhouette and key details, empty transparent pixels around the subject, soft fading edges, no checkerboard transparency preview, no fake transparency grid, no colored background box, no garden, no foliage behind subject, no botanical backdrop, no rectangular composition, no full illustration scene")
+            constraints.append(f"transparent alpha background only, preserve the user's main reference subject as much as possible, isolated foreground subject painted in {fg} tones while keeping recognizable source-image silhouette and key details, complete uncropped subject with full head and hair visible, empty transparent pixels above and around the subject, soft fading edges, no checkerboard transparency preview, no fake transparency grid, no colored background box, no garden, no foliage behind subject, no botanical backdrop, no rectangular composition, no full illustration scene")
 
         if constraints:
             return f"{prompt_text}, color constraint: {', '.join(constraints)}"

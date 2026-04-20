@@ -834,49 +834,89 @@ def write_single_texture_variant_set(texture_set: dict, texture_id: str, variant
         item["approved"] = True
         item["candidate"] = False
         item["role"] = item.get("role") or texture_id
+    # Single-texture previews are production template previews, not hero-placement
+    # mockups. Keep the whole template visually consistent with exactly one fabric.
+    variant_set["motifs"] = []
+    variant_set.pop("theme_front_split", None)
     path = variant_dir / "texture_set.json"
     path.write_text(json.dumps(variant_set, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 
 
 def force_fill_plan_to_single_texture(fill_plan: dict, texture_id: str) -> dict:
-    """Return a copy of fill_plan where every non-motif rendered layer uses texture_id."""
+    """Return a copy of fill_plan where every rendered layer uses one texture."""
     plan = copy.deepcopy(fill_plan)
     plan["plan_id"] = f"{plan.get('plan_id', 'piece_fill_plan')}_{texture_id}_single_texture"
     plan["variant_texture_id"] = texture_id
 
+    def _texture_layer(reason: str = "单纹理模板预览统一使用同一张图案纹理") -> dict:
+        return {
+            "fill_type": "texture",
+            "texture_id": texture_id,
+            "scale": 1.0,
+            "rotation": 0,
+            "offset_x": 0,
+            "offset_y": 0,
+            "mirror_x": False,
+            "mirror_y": False,
+            "reason": reason,
+        }
+
     def _force_render_layer(layer):
         if isinstance(layer, dict):
             fill_type = layer.get("fill_type")
-            if fill_type != "motif" and (fill_type in {"texture", "solid"} or "texture_id" in layer or "solid_id" in layer):
+            if fill_type == "motif":
+                return None
+            if fill_type in {"texture", "solid"} or "texture_id" in layer or "solid_id" in layer:
                 layer["fill_type"] = "texture"
                 layer["texture_id"] = texture_id
                 layer.pop("solid_id", None)
-            for value in layer.values():
-                _force_render_layer(value)
+            for key, value in list(layer.items()):
+                forced = _force_render_layer(value)
+                if forced is None and isinstance(value, dict):
+                    layer.pop(key, None)
+                elif forced is not value:
+                    layer[key] = forced
+            return layer
         elif isinstance(layer, list):
+            kept = []
             for item in layer:
-                _force_render_layer(item)
+                forced = _force_render_layer(item)
+                if forced is not None:
+                    kept.append(forced)
+            return kept
+        return layer
 
     for piece in plan.get("pieces", []):
-        if piece.get("fill_type") != "motif" and (
-            piece.get("fill_type") in {"texture", "solid"} or "texture_id" in piece or "solid_id" in piece
-        ):
+        if piece.get("fill_type") == "motif":
+            piece.update(_texture_layer("单纹理模板预览移除定位主图，统一使用当前图案纹理"))
+        elif piece.get("fill_type") in {"texture", "solid"} or "texture_id" in piece or "solid_id" in piece:
             piece["fill_type"] = "texture"
             piece["texture_id"] = texture_id
             piece.pop("solid_id", None)
         if not any(isinstance(piece.get(key), dict) for key in ("base", "overlay", "trim")):
-            if piece.get("fill_type") != "motif":
-                piece["fill_type"] = "texture"
-                piece["texture_id"] = texture_id
-                piece.pop("solid_id", None)
+            piece["fill_type"] = "texture"
+            piece["texture_id"] = texture_id
+            piece.pop("solid_id", None)
         for key in ("base", "trim"):
             if isinstance(piece.get(key), dict):
-                _force_render_layer(piece[key])
+                forced = _force_render_layer(piece[key])
+                if forced is None:
+                    if key == "base":
+                        piece[key] = _texture_layer()
+                    else:
+                        piece.pop(key, None)
+                else:
+                    piece[key] = forced
         overlay = piece.get("overlay")
-        if isinstance(overlay, dict) and overlay.get("fill_type") != "motif":
-            _force_render_layer(overlay)
+        if isinstance(overlay, dict):
+            forced_overlay = _force_render_layer(overlay)
+            if forced_overlay is None:
+                piece.pop("overlay", None)
+            else:
+                piece["overlay"] = forced_overlay
         piece["variant_texture_id"] = texture_id
+        piece["single_texture_preview_only"] = True
     return plan
 
 
@@ -932,32 +972,9 @@ def render_texture_variants(
             "清单": str((variant_rendered_dir / "texture_fill_manifest.json").resolve()),
         })
 
+        # Keep single-texture fill plan in root for potential downstream use
         if texture_id == "main":
             fill_plan_path.write_text(json.dumps(variant_fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
-            default_cmd = [
-                sys.executable,
-                str(SKILL_DIR / "scripts" / "渲染裁片.py"),
-                "--pieces", str(pieces_path),
-                "--texture-set", str(variant_texture_set_path),
-                "--fill-plan", str(fill_plan_path),
-                "--out", str(default_rendered_dir),
-            ]
-            run_step(default_cmd)
-
-    if "main" not in variant_ids:
-        first = variant_ids[0]
-        variant_fill_plan = force_fill_plan_to_single_texture(base_fill_plan, first)
-        fill_plan_path.write_text(json.dumps(variant_fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
-        first_texture_set_path = variants_root / first / "texture_set.json"
-        default_cmd = [
-            sys.executable,
-            str(SKILL_DIR / "scripts" / "渲染裁片.py"),
-            "--pieces", str(pieces_path),
-            "--texture-set", str(first_texture_set_path),
-            "--fill-plan", str(fill_plan_path),
-            "--out", str(default_rendered_dir),
-        ]
-        run_step(default_cmd)
 
     return summaries
 
@@ -1467,18 +1484,34 @@ def main() -> int:
         if args.collection_board:
             board_path = Path(args.collection_board).resolve()
             if getattr(args, "hero_prompt_file", ""):
-                hero_motif_path = generate_board(
-                    args,
-                    out_dir,
-                    prompt_file=args.hero_prompt_file,
-                    subdir="neo_hero_motif",
-                    negative_prompt=HERO_NEGATIVE_PROMPT,
-                ).resolve()
+                hero_dir = out_dir / "neo_hero_motif"
+                existing_hero = sorted(hero_dir.glob("collection_board_*.png")) + sorted(hero_dir.glob("collection_board_*.jpg"))
+                if existing_hero:
+                    hero_motif_path = existing_hero[-1].resolve()
+                    print(f"[资产复用] 已存在AI生成透明主图，跳过重新生成: {hero_motif_path}")
+                else:
+                    hero_motif_path = generate_board(
+                        args,
+                        out_dir,
+                        prompt_file=args.hero_prompt_file,
+                        subdir="neo_hero_motif",
+                        negative_prompt=HERO_NEGATIVE_PROMPT,
+                    ).resolve()
         else:
-            board_path, hero_motif_path = generate_texture_and_hero_assets(args, out_dir)
-            board_path = board_path.resolve()
-            if hero_motif_path:
-                hero_motif_path = hero_motif_path.resolve()
+            texture_dir = out_dir / "neo_texture_board"
+            hero_dir = out_dir / "neo_hero_motif"
+            existing_boards = sorted(texture_dir.glob("collection_board_*.png")) + sorted(texture_dir.glob("collection_board_*.jpg"))
+            existing_heroes = sorted(hero_dir.glob("collection_board_*.png")) + sorted(hero_dir.glob("collection_board_*.jpg"))
+            if existing_boards and existing_heroes:
+                board_path = existing_boards[-1].resolve()
+                hero_motif_path = existing_heroes[-1].resolve()
+                print(f"[资产复用] 已存在面料看板，跳过重新生成: {board_path}")
+                print(f"[资产复用] 已存在AI生成透明主图，跳过重新生成: {hero_motif_path}")
+            else:
+                board_path, hero_motif_path = generate_texture_and_hero_assets(args, out_dir)
+                board_path = board_path.resolve()
+                if hero_motif_path:
+                    hero_motif_path = hero_motif_path.resolve()
         if not board_path.exists():
             raise RuntimeError(f"面料看板未找到: {board_path}")
         print(f"使用面料看板: {board_path}")
@@ -1537,14 +1570,18 @@ def main() -> int:
         print(f"[自动] 检测到 AI 填充计划，自动使用: {auto_ai_plan}")
     run_step(plan_cmd)
 
-    rendered_dir = out_dir / "rendered"
     variant_summaries = render_texture_variants(
         out_dir=out_dir,
         texture_set_path=texture_set_path,
         fill_plan_path=out_dir / "piece_fill_plan.json",
         pieces_path=pieces_path,
-        default_rendered_dir=rendered_dir,
+        default_rendered_dir=out_dir / "rendered",
     )
+
+    # Default preview now points to variants/main/rendered (or first variant if main missing)
+    main_variant = next((s for s in variant_summaries if s["纹理ID"] == "main"), None)
+    default_summary = main_variant or (variant_summaries[0] if variant_summaries else None)
+    default_rendered_dir = Path(default_summary["渲染目录"]) if default_summary else out_dir / "rendered"
 
     summary = {
         "面料看板": str(board_path),
@@ -1554,10 +1591,10 @@ def main() -> int:
         "裁片清单": str(pieces_path.resolve()),
         "部位映射": str(garment_map_path.resolve()),
         "裁片填充计划": str((out_dir / "piece_fill_plan.json").resolve()),
-        "渲染目录": str(rendered_dir.resolve()),
-        "预览图": str((rendered_dir / "preview.png").resolve()),
-        "白底预览图": str((rendered_dir / "preview_white.jpg").resolve()),
-        "清单": str((rendered_dir / "texture_fill_manifest.json").resolve()),
+        "渲染目录": str(default_rendered_dir.resolve()),
+        "预览图": str((default_rendered_dir / "preview.png").resolve()),
+        "白底预览图": str((default_rendered_dir / "preview_white.jpg").resolve()),
+        "清单": str((default_rendered_dir / "texture_fill_manifest.json").resolve()),
         "裁片模板变体": variant_summaries,
     }
     write_json(out_dir / "automation_summary.json", summary)

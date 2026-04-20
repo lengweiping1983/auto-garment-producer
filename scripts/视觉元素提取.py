@@ -107,7 +107,7 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
             "secondary": "英文 coordinating seamless tileable visible repeat pattern prompt，必须有具体小元素/lattice/linework/leaves/dots/geometric repeat 结构，稳定密度，不得是 abstract wash / plain texture / paper grain only / gradient / empty background / tonal atmosphere only",
             "accent_light": "英文 small-scale accent repeat prompt",
             "accent_mid": "英文 soft geometric or organic lattice repeat prompt",
-            "hero_motif_1": "英文 isolated foreground hero motif only as transparent PNG cutout with real alpha background, preserve and recreate the primary subject from the user's reference image as much as possible, people/faces/characters/animals/products/icons/objects are allowed if they are the main content, keep its recognizable silhouette/colors/pose/key details, no background, no checkerboard transparency preview, no fake transparency grid, no garden, no foliage behind subject, no full illustration scene, no colored box"
+            "hero_motif_1": "英文 isolated foreground hero motif only as transparent PNG cutout with real alpha background, preserve and recreate the primary subject from the user's reference image as much as possible, people/faces/characters/animals/products/icons/objects are allowed if they are the main content, keep its recognizable silhouette/colors/pose/key details, complete uncropped subject with full head and hair visible, generous transparent margin above and around the subject, no background, no checkerboard transparency preview, no fake transparency grid, no garden, no foliage behind subject, no full illustration scene, no colored box"
         }
     }
     lines = [
@@ -124,7 +124,20 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "4. style: medium、brush_quality、mood、pattern_density、line_style、overall_impression。",
         "5. fabric_hints: 判断 has_nap；若 true，nap_direction 必填 vertical/horizontal。关键词含 corduroy/velvet/fleece/suede/plush/毛呢/法兰绒等。",
         "6. theme_to_piece_strategy: 把主题工程化拆成 base_atmosphere、hero_motif、accent_details、quiet_zones；明确哪些具象元素不得作为大身满版纹理。",
-        "7. generated_prompts: 只生成英文 main/secondary/accent_light/accent_mid/hero_motif_1 共5条提示词；前4条 texture 要 seamless tileable、low noise 且有明确 visible repeat 结构，必须包含具体小元素、植物、几何、线条、散点或格纹等可裁剪图案，不得是空泛底纹；hero_motif_1 必须尽可能包含并复现用户参考图中的主要内容/核心主体（人物、脸、角色、动物、商品、图标、物体都允许作为主图主体），保留可识别轮廓、色彩、姿态和关键细节，且必须是 isolated foreground、transparent PNG cutout、real alpha background、no background、no checkerboard transparency preview、no fake transparency grid、no colored box。",
+        "7. generated_prompts: 只生成英文 main/secondary/accent_light/accent_mid/hero_motif_1 共5条提示词；前4条 texture 要 seamless tileable、low noise 且有明确 visible repeat 结构，必须包含具体小元素、植物、几何、线条、散点或格纹等可裁剪图案，不得是空泛底纹；hero_motif_1 必须尽可能包含并复现用户参考图中的主要内容/核心主体（人物、脸、角色、动物、商品、图标、物体都允许作为主图主体），保留可识别轮廓、色彩、姿态和关键细节，必须完整不裁切，头部和头发完整可见，主体上方和四周保留透明留白，且必须是 isolated foreground、transparent PNG cutout、real alpha background、no background、no checkerboard transparency preview、no fake transparency grid、no colored box。",
+        "",
+        "===== hero_motif_1 主体描述必须覆盖的细节维度 =====",
+        "写 hero_motif_1 时，不能只用一句话概括。必须像视觉观察报告一样逐条写出以下维度，确保 Neo AI 能精确复刻而非凭想象替代：",
+        "- subject_identity: 主体身份（性别、年龄、种族/肤色倾向、人物类型）",
+        "- pose_action: 姿态与动作（站姿/坐姿/动态、朝向角度：正面/3/4侧/全侧、重心在哪条腿、四肢位置）",
+        "- expression: 表情（微笑/露齿笑/严肃/惊讶/自信/俏皮等、眼神方向）",
+        "- hair: 发型与发色（长度、卷度、颜色、刘海/偏分/盘发等具体发型）",
+        "- clothing: 服装（具体款式名称、颜色、材质质感、关键设计元素如领口/腰带/扣子/图案）",
+        "- props: 手持物品/道具（颜色、形状、材质、握持方式、具体朝向）",
+        "- accessories: 配饰（首饰、帽子、眼镜、腰带、鞋子等）",
+        "- composition: 画面占比与位置（占原图多少、在画面左侧/右侧/居中）",
+        "- art_style_details: 艺术风格特征（线条粗细与颜色、着色方式、阴影处理、边缘处理方式）",
+        "这些细节必须直接来自你对参考图的观察，不得编造；如果某个维度在图中不清晰，写 'not clearly visible' 即可。最终把这些观察写成一条连贯的英文描述句，放在 hero_motif_1 的最前面作为主体段，然后再接 transparent PNG cutout 等格式约束。",
         "",
         "===== 主题元素 S/A/B/C 分级规则 =====",
         "S级：完整动物、人脸/人像、文字、商标、完整建筑、完整场景、复杂叙事插画。绝不能进入 base texture，只能拒绝、简化为剪影，或作为很小的定位 motif。",
@@ -160,7 +173,8 @@ def build_vision_prompt_multi(theme_paths: list[Path], user_prompt: str, garment
         "- 每个主体/辅助元素要标注 source_image_refs，便于后续追溯来源",
         "- generated_prompts 用具体视觉词；避免 very/really/beautiful/nice/good/great/perfect 等空泛词",
         "- generated_prompts.main 和 generated_prompts.secondary 必须明确 concrete visible repeat pattern、small motif repeat、botanical/geometric/line/scattered repeat 等具体图案结构，不得写 abstract wash、plain texture、paper grain only、gradient、empty background、tonal atmosphere only",
-        "- generated_prompts.hero_motif_1 必须明确 preserve and recreate the primary subject from the user's reference image as much as possible，包含用户图片中的主要内容/核心主体，人物、脸、角色、动物、商品、图标、物体都允许作为透明主图主体，保留可识别轮廓、色彩、姿态和关键特征",
+        "- generated_prompts.hero_motif_1 必须明确 preserve and recreate the primary subject from the user's reference image as much as possible，包含用户图片中的主要内容/核心主体，人物、脸、角色、动物、商品、图标、物体都允许作为透明主图主体，保留可识别轮廓、色彩、姿态和关键特征，并要求 complete uncropped subject、full head and hair visible、generous transparent margin above and around the subject",
+        "- generated_prompts.hero_motif_1 的主体描述段不能只有一句话概括，必须覆盖：subject_identity、pose_action、expression、hair、clothing、props、accessories、composition、art_style_details 等维度，具体细节直接来自参考图观察，不得编造",
         "- generated_prompts.hero_motif_1 必须明确 isolated foreground motif only, transparent PNG cutout, real alpha background, no background, no checkerboard transparency preview, no fake transparency grid, no colored rectangle, no plain light box",
         "- generated_prompts.hero_motif_1 必须是前景主体 cutout，不得写 scene、garden、meadow、landscape、environment、foliage behind subject、botanical backdrop、painted wash、vignette、rectangular composition 或 full illustration scene",
         "- generated_prompts.main 必须是低密度 visible repeat pattern，淡底、可见但安静；不得写 abstract wash、plain color wash、plain texture、paper grain only、gradient、blurred background、empty texture 或 tonal atmosphere only",

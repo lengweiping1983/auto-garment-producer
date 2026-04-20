@@ -141,13 +141,23 @@ def _crop_subject(img: Image.Image) -> Image.Image:
         top = max(0, (h - side_h) // 2)
         bbox = (left, top, min(w, left + side_w), min(h, top + side_h))
     pad = max(8, round(min(w, h) * 0.04))
+    top_pad = max(pad, round(min(w, h) * 0.08))
+    bottom_pad = max(pad, round(min(w, h) * 0.05))
     bbox = (
         max(0, bbox[0] - pad),
-        max(0, bbox[1] - pad),
+        max(0, bbox[1] - top_pad),
         min(w, bbox[2] + pad),
-        min(h, bbox[3] + pad),
+        min(h, bbox[3] + bottom_pad),
     )
-    return rgba.crop(bbox)
+    cropped = rgba.crop(bbox)
+    # Leave transparent breathing room around the subject before splitting so
+    # hair/head pixels are not flush with the piece edge after placement.
+    margin_x = max(6, round(cropped.width * 0.035))
+    margin_top = max(12, round(cropped.height * 0.08))
+    margin_bottom = max(8, round(cropped.height * 0.04))
+    out = Image.new("RGBA", (cropped.width + margin_x * 2, cropped.height + margin_top + margin_bottom), (0, 0, 0, 0))
+    out.alpha_composite(cropped, (margin_x, margin_top))
+    return out
 
 
 def _crop_half_to_seam_alpha(half: Image.Image, seam_side: str) -> Image.Image:
@@ -158,8 +168,10 @@ def _crop_half_to_seam_alpha(half: Image.Image, seam_side: str) -> Image.Image:
         return rgba
 
     pad = max(2, round(min(rgba.size) * 0.015))
-    top = max(0, bbox[1] - pad)
-    bottom = min(rgba.height, bbox[3] + pad)
+    top_pad = max(pad, round(min(rgba.size) * 0.06))
+    bottom_pad = max(pad, round(min(rgba.size) * 0.035))
+    top = max(0, bbox[1] - top_pad)
+    bottom = min(rgba.height, bbox[3] + bottom_pad)
     if seam_side == "right":
         left = max(0, bbox[0] - pad)
         right = bbox[2]

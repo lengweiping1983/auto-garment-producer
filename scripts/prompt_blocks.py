@@ -33,7 +33,7 @@ PANEL_DEFAULTS_EN = {
     "secondary": "seamless tileable coordinating visible repeat pattern with concrete small motifs, lattice, linework, leaves, dots, or controlled geometric elements, stable repeat structure on light ground, same palette, no abstract wash, no plain texture, no paper grain only, no gradient, no empty background, no tonal atmosphere only, no scene, no text",
     "accent_light": "tiny scattered small-scale pattern on light ground, controlled density, no text",
     "accent_mid": "soft geometric or organic lattice on pale ground, same palette, seamless tileable texture, no text",
-    "hero_motif_1": "isolated foreground hero motif only, centered subject, transparent PNG cutout, real alpha background, preserve and recreate the primary subject from the user's reference image as much as possible, keep the recognizable silhouette, color identity, pose, proportions, and key visual details, empty transparent pixels around the subject, no background, no checkerboard transparency preview, no background art, no scenery, no garden, no foliage behind subject, no botanical backdrop, no painted wash, no rectangular composition, no full illustration scene, no vignette, no ground shadow, no text",
+    "hero_motif_1": "isolated foreground hero motif only, centered complete subject, transparent PNG cutout, real alpha background, preserve and recreate the primary subject from the user's reference image as much as possible, keep the recognizable silhouette, color identity, pose, proportions, and key visual details, full head and hair visible, uncropped subject, generous transparent margin above and around the subject, no background, no checkerboard transparency preview, no background art, no scenery, no garden, no foliage behind subject, no botanical backdrop, no painted wash, no rectangular composition, no full illustration scene, no vignette, no ground shadow, no text",
 }
 
 TEXTURE_2X2_POSITIONS_EN = [
@@ -84,12 +84,14 @@ def build_transparent_hero_prompt_en(hero_prompt: str, style: dict | None = None
     lines = [
         "Create one isolated foreground apparel placement graphic as a transparent PNG cutout with real alpha background.",
         f"Art direction: {compact_style_line(style)}",
+        # Place the detailed subject description FIRST so the generative model
+        # reads "what to draw" before the negative constraints.
+        prompt,
         "The subject must contain the primary subject from the user's reference image as much as possible, not a generic substitute.",
         "People, faces, characters, animals, products, icons, objects, or logos from the user's reference image are allowed as the hero subject when they are the main content.",
         "Preserve the recognizable silhouette, color identity, pose, proportions, and key visual details of the user's main image content while simplifying only enough for a clean apparel placement graphic.",
         "The subject must be centered, cleanly separated from the background, with soft but readable edges.",
-        prompt,
-        "Required output: real transparent alpha pixels around the subject, no background, no checkerboard transparency preview, no fake transparency grid, no plain light box, no colored background box, no filled rectangle, no scenery, no full illustration scene, no sticker sheet, no poster composition, no garment mockup, no model, no text, no logo, no watermark.",
+        "Required output: complete uncropped subject with full head and hair visible, real transparent alpha pixels with generous empty margin above and around the subject, no background, no checkerboard transparency preview, no fake transparency grid, no plain light box, no colored background box, no filled rectangle, no scenery, no full illustration scene, no sticker sheet, no poster composition, no garment mockup, no model, no text, no logo, no watermark.",
         "Leave balanced empty transparent pixels around the subject so it can be split vertically across left and right front garment pieces.",
     ]
     return "\n".join(lines)
