@@ -12,6 +12,7 @@
 Neo AI 负责创作 artwork。本脚本准备可用资产并以确定性方式渲染到裁片中。
 """
 import argparse
+import concurrent.futures
 import copy
 import datetime
 import hashlib
@@ -520,12 +521,23 @@ def write_single_texture_set(
     texture_paths: dict[str, Path],
     palette: dict | None = None,
     prompt_map: dict[str, str] | None = None,
+    texture_ids: list[str] | tuple[str, ...] | None = None,
+    require_all: bool = True,
 ) -> Path:
-    """Write texture_set.json directly from the three standalone Neo AI textures."""
+    """Write texture_set.json directly from standalone Neo AI textures."""
     prompt_map = prompt_map or {}
     palette = palette or {}
-    secondary_img = Image.open(texture_paths.get("secondary") or next(iter(texture_paths.values())))
-    accent_img = Image.open(texture_paths.get("accent_light") or next(iter(texture_paths.values())))
+    ordered_ids = list(texture_ids or DEFAULT_TEXTURE_IDS)
+    available_ids = [texture_id for texture_id in ordered_ids if texture_paths.get(texture_id)]
+    missing = [texture_id for texture_id in ordered_ids if texture_id not in available_ids]
+    if require_all and missing:
+        raise RuntimeError(f"缺少单纹理资产: {', '.join(missing)}")
+    if not available_ids:
+        raise RuntimeError("没有可写入 texture_set.json 的单纹理资产。")
+
+    fallback_path = texture_paths[available_ids[0]]
+    secondary_img = Image.open(texture_paths.get("secondary") or fallback_path)
+    accent_img = Image.open(texture_paths.get("accent_light") or fallback_path)
     quiet_solid = quiet_solid_from_image(accent_img, palette=palette, target_role="trim")
     moss_color = quiet_solid_from_image(secondary_img, palette=palette, target_role="secondary")
     warm_ivory = "#f3f1df"
@@ -540,10 +552,8 @@ def write_single_texture_set(
         warm_ivory = max(palette["primary"], key=_brightness)
 
     textures = []
-    for texture_id in DEFAULT_TEXTURE_IDS:
+    for texture_id in available_ids:
         path = texture_paths.get(texture_id)
-        if not path:
-            raise RuntimeError(f"缺少单纹理资产: {texture_id}")
         textures.append({
             "texture_id": texture_id,
             "path": str(path.resolve()),
@@ -559,6 +569,8 @@ def write_single_texture_set(
         "texture_set_id": f"{out_dir.name}_neo_ai_single_texture_set",
         "locked": False,
         "source_mode": "single_textures",
+        "partial_success": bool(missing),
+        "missing_textures": missing,
         "textures": textures,
         "motifs": [],
         "solids": [
@@ -600,11 +612,11 @@ def generate_texture_and_hero_assets(args: argparse.Namespace, out_dir: Path) ->
 
 
 def generate_single_textures_and_hero_assets(args: argparse.Namespace, out_dir: Path) -> tuple[dict[str, Path], Path | None]:
-    """串行调用 Neo AI：三张独立单纹理 + 独立透明主图。
+    """并行调用 Neo AI：三张独立单纹理 + 独立透明主图。
 
     Reference images are uploaded once, then reused for every generation job.
-    Keep the Neo AI submissions sequential so the image pipeline behaves like a
-    single worker queue instead of four simultaneous generation workers.
+    Each image generation still runs through the official Neo AI script, but the
+    subprocesses are submitted concurrently to reduce end-to-end waiting time.
     """
     prompt_files = getattr(args, "texture_prompt_files", {}) or {}
     if not prompt_files:
@@ -644,17 +656,323 @@ def generate_single_textures_and_hero_assets(args: argparse.Namespace, out_dir: 
     env = os.environ.copy()
     texture_paths = {}
     hero_path = None
-    for label, texture_id, work_dir, cmd in jobs:
-        print("运行:", " ".join(cmd))
+
+    def _run_generation_job(job: tuple[str, str, Path, list[str]]) -> tuple[str, str, Path]:
+        label, texture_id, work_dir, cmd = job
         run_step(cmd, env=env)
         generated = latest_collection_board(work_dir)
-        if texture_id == "hero_motif_1":
-            hero_path = generated.resolve()
-            print(f"[透明主图] {hero_path}")
-        else:
-            texture_paths[texture_id] = _copy_generated_image(generated, texture_root / f"{texture_id}.png").resolve()
-            print(f"[单纹理] {texture_id}: {texture_paths[texture_id]}")
+        return label, texture_id, generated
+
+    max_workers = max(1, int(getattr(args, "neo_workers", 4) or 4))
+    max_workers = min(max_workers, len(jobs))
+    print(f"[Neo AI] 并行生成 {len(jobs)} 个资产，workers={max_workers}")
+    failures = []
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {executor.submit(_run_generation_job, job): job for job in jobs}
+        for future in concurrent.futures.as_completed(future_map):
+            label, texture_id, _, _ = future_map[future]
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                failures.append((label, texture_id, exc))
+
+    if failures:
+        details = "; ".join(f"{label}({texture_id}): {exc}" for label, texture_id, exc in failures)
+        raise RuntimeError(f"Neo AI 并行生成失败: {details}")
+
+    by_texture_id = {texture_id: generated for _, texture_id, generated in results}
+    for texture_id in DEFAULT_TEXTURE_IDS:
+        generated = by_texture_id.get(texture_id)
+        if not generated:
+            raise RuntimeError(f"Neo AI 并行生成缺少输出: {texture_id}")
+        texture_paths[texture_id] = _copy_generated_image(generated, texture_root / f"{texture_id}.png").resolve()
+        print(f"[单纹理] {texture_id}: {texture_paths[texture_id]}")
+
+    generated_hero = by_texture_id.get("hero_motif_1")
+    if generated_hero:
+        hero_path = generated_hero.resolve()
+        print(f"[透明主图] {hero_path}")
     return texture_paths, hero_path
+
+
+def load_texture_prompt_map(out_dir: Path) -> dict[str, str]:
+    """Load texture prompts for manifests and per-channel texture_set files."""
+    prompt_map = {}
+    texture_prompts_path = out_dir / "texture_prompts.json"
+    if texture_prompts_path.exists():
+        try:
+            data = json.loads(texture_prompts_path.read_text(encoding="utf-8"))
+            prompt_map = {
+                item.get("texture_id", ""): item.get("prompt", "")
+                for item in data.get("prompts", [])
+                if item.get("texture_id") in DEFAULT_TEXTURE_IDS
+            }
+        except Exception:
+            prompt_map = {}
+    return prompt_map
+
+
+def process_single_texture_channel(
+    args: argparse.Namespace,
+    out_dir: Path,
+    texture_id: str,
+    texture_path: Path,
+    hero_motif_path: Path,
+    pieces_path: Path,
+    garment_map_path: Path,
+    palette: dict | None,
+    prompt_map: dict[str, str],
+    split_assets: dict,
+    template_assets: dict | None,
+) -> dict:
+    """Run the independent downstream channel for one generated texture."""
+    variant_dir = out_dir / "variants" / texture_id
+    variant_dir.mkdir(parents=True, exist_ok=True)
+    texture_set_path = write_single_texture_set(
+        variant_dir,
+        {texture_id: texture_path},
+        palette=palette,
+        prompt_map=prompt_map,
+        texture_ids=[texture_id],
+        require_all=True,
+    )
+    if inject_front_split_motifs and split_assets:
+        inject_front_split_motifs(texture_set_path, split_assets)
+
+    ai_piece_plan = variant_dir / "ai_piece_fill_plan.json"
+    production_source = Path(args.production_plan or out_dir / "ai_production_plan.json")
+    if production_source.exists():
+        apply_cmd = [
+            sys.executable,
+            str(SKILL_DIR / "scripts" / "应用生产规划.py"),
+            "--production-plan", str(production_source),
+            "--out", str(variant_dir),
+            "--pieces", str(pieces_path),
+        ]
+        if template_assets:
+            apply_cmd.extend(["--fixed-garment-map", str(garment_map_path)])
+        run_step(apply_cmd)
+
+    plan_cmd = [
+        sys.executable,
+        str(SKILL_DIR / "scripts" / "创建填充计划.py"),
+        "--pieces", str(pieces_path),
+        "--texture-set", str(texture_set_path),
+        "--garment-map", str(garment_map_path),
+        "--out", str(variant_dir),
+    ]
+    if args.brief:
+        plan_cmd.extend(["--brief", args.brief])
+    if args.visual_elements:
+        plan_cmd.extend(["--visual-elements", args.visual_elements])
+    if ai_piece_plan.exists():
+        plan_cmd.extend(["--ai-plan", str(ai_piece_plan)])
+    run_step(plan_cmd)
+
+    fill_plan_path = variant_dir / "piece_fill_plan.json"
+    variant_fill_plan = force_fill_plan_to_single_texture(load_json(fill_plan_path), texture_id)
+    fill_plan_path.write_text(json.dumps(variant_fill_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    rendered_dir = variant_dir / "rendered"
+    render_cmd = [
+        sys.executable,
+        str(SKILL_DIR / "scripts" / "渲染裁片.py"),
+        "--pieces", str(pieces_path),
+        "--texture-set", str(texture_set_path),
+        "--fill-plan", str(fill_plan_path),
+        "--out", str(rendered_dir),
+    ]
+    run_step(render_cmd)
+
+    return {
+        "status": "success",
+        "纹理ID": texture_id,
+        "纹理源图": str(texture_path.resolve()),
+        "AI生成透明主图": str(hero_motif_path.resolve()),
+        "面料组合": str(texture_set_path.resolve()),
+        "裁片填充计划": str(fill_plan_path.resolve()),
+        "渲染目录": str(rendered_dir.resolve()),
+        "预览图": str((rendered_dir / "preview.png").resolve()),
+        "白底预览图": str((rendered_dir / "preview_white.jpg").resolve()),
+        "清单": str((rendered_dir / "texture_fill_manifest.json").resolve()),
+    }
+
+
+def run_single_texture_channel_pipeline(
+    args: argparse.Namespace,
+    out_dir: Path,
+    pieces_path: Path,
+    garment_map_path: Path,
+    template_assets: dict | None,
+    palette: dict | None,
+    prompt_map: dict[str, str],
+) -> tuple[Path, Path, list[dict], dict]:
+    """Generate hero/textures and start each texture channel as soon as possible."""
+    prompt_files = getattr(args, "texture_prompt_files", {}) or {}
+    if not prompt_files:
+        prompt_file = getattr(args, "texture_prompt_file", "") or getattr(args, "prompt_file", "")
+        if prompt_file:
+            prompt_files = {texture_id: prompt_file for texture_id in DEFAULT_TEXTURE_IDS}
+    missing = [texture_id for texture_id in DEFAULT_TEXTURE_IDS if texture_id not in prompt_files]
+    if missing:
+        raise RuntimeError(f"缺少单纹理提示词文件: {', '.join(missing)}")
+    hero_prompt_file = getattr(args, "hero_prompt_file", "")
+    if not hero_prompt_file:
+        raise RuntimeError("三通道流水线需要透明主图提示词 hero_prompt_file。")
+
+    refs = _upload_reference_images_for_neo(args, out_dir)
+    texture_root = out_dir / "neo_textures"
+    hero_dir = out_dir / "neo_hero_motif"
+    texture_root.mkdir(parents=True, exist_ok=True)
+    hero_dir.mkdir(parents=True, exist_ok=True)
+
+    generation_jobs = []
+    for texture_id in DEFAULT_TEXTURE_IDS:
+        work_dir = texture_root / texture_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        generation_jobs.append((
+            f"单纹理 {texture_id}",
+            texture_id,
+            work_dir,
+            _neo_generation_cmd(args, work_dir, prompt_files[texture_id], reference_images=refs),
+        ))
+    generation_jobs.append((
+        "透明主图",
+        "hero_motif_1",
+        hero_dir,
+        _neo_generation_cmd(args, hero_dir, hero_prompt_file, negative_prompt=HERO_NEGATIVE_PROMPT, reference_images=refs),
+    ))
+
+    def _run_generation_job(job: tuple[str, str, Path, list[str]]) -> tuple[str, str, Path]:
+        label, texture_id, work_dir, cmd = job
+        run_step(cmd, env=os.environ.copy())
+        return label, texture_id, latest_collection_board(work_dir)
+
+    hero_motif_path: Path | None = None
+    split_assets: dict | None = None
+    ready_textures: dict[str, Path] = {}
+    scheduled_channels: set[str] = set()
+    variant_summaries: list[dict] = []
+    channel_futures: dict[concurrent.futures.Future, str] = {}
+    generation_failures: list[tuple[str, str, Exception]] = []
+
+    neo_workers = max(1, int(getattr(args, "neo_workers", 4) or 4))
+    neo_workers = min(neo_workers, len(generation_jobs))
+    pipeline_workers = max(1, int(getattr(args, "pipeline_workers", 3) or 3))
+    pipeline_workers = min(pipeline_workers, len(DEFAULT_TEXTURE_IDS))
+    print(f"[Neo AI] 并行生成 {len(generation_jobs)} 个资产，workers={neo_workers}")
+    print(f"[纹理通道] 并行后处理 workers={pipeline_workers}")
+
+    def _schedule_ready_channels(executor: concurrent.futures.Executor) -> None:
+        if not hero_motif_path or not split_assets:
+            return
+        for tid in DEFAULT_TEXTURE_IDS:
+            texture_path = ready_textures.get(tid)
+            if not texture_path or tid in scheduled_channels:
+                continue
+            scheduled_channels.add(tid)
+            future = executor.submit(
+                process_single_texture_channel,
+                args,
+                out_dir,
+                tid,
+                texture_path,
+                hero_motif_path,
+                pieces_path,
+                garment_map_path,
+                palette,
+                prompt_map,
+                split_assets,
+                template_assets,
+            )
+            channel_futures[future] = tid
+            print(f"[纹理通道] 已启动 {tid}: {texture_path}")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=neo_workers) as generation_executor, \
+            concurrent.futures.ThreadPoolExecutor(max_workers=pipeline_workers) as pipeline_executor:
+        future_map = {generation_executor.submit(_run_generation_job, job): job for job in generation_jobs}
+        for future in concurrent.futures.as_completed(future_map):
+            label, texture_id, _, _ = future_map[future]
+            try:
+                _, _, generated = future.result()
+                if texture_id == "hero_motif_1":
+                    hero_motif_path = generated.resolve()
+                    args.hero_motif_image = str(hero_motif_path)
+                    if not create_front_split_assets:
+                        raise RuntimeError("theme_front_splitter 不可用，无法生成主题前片切半资产。")
+                    split_assets = create_front_split_assets(hero_motif_path, out_dir)
+                    print(f"[透明主图] {hero_motif_path}")
+                    print(f"[主题前片] 已生成切半资产: {split_assets['left']}, {split_assets['right']}")
+                else:
+                    texture_path = _copy_generated_image(generated, texture_root / f"{texture_id}.png").resolve()
+                    ready_textures[texture_id] = texture_path
+                    print(f"[单纹理] {texture_id}: {texture_path}")
+                _schedule_ready_channels(pipeline_executor)
+            except Exception as exc:
+                generation_failures.append((label, texture_id, exc))
+                print(f"[警告] {label} 生成失败: {exc}", file=sys.stderr)
+
+        if not hero_motif_path:
+            details = "; ".join(f"{label}({texture_id}): {exc}" for label, texture_id, exc in generation_failures)
+            raise RuntimeError(f"透明主图生成失败，无法启动三通道流水线: {details}")
+        _schedule_ready_channels(pipeline_executor)
+
+        for future in concurrent.futures.as_completed(list(channel_futures)):
+            texture_id = channel_futures[future]
+            try:
+                variant_summaries.append(future.result())
+            except Exception as exc:
+                variant_summaries.append({
+                    "status": "failed",
+                    "纹理ID": texture_id,
+                    "纹理源图": str(ready_textures.get(texture_id, "")),
+                    "error": str(exc),
+                })
+                print(f"[警告] 纹理通道 {texture_id} 失败: {exc}", file=sys.stderr)
+
+    for label, texture_id, exc in generation_failures:
+        if texture_id != "hero_motif_1":
+            variant_summaries.append({
+                "status": "failed",
+                "纹理ID": texture_id,
+                "纹理源图": "",
+                "error": f"{label} 生成失败: {exc}",
+            })
+
+    success_summaries = [item for item in variant_summaries if item.get("status") == "success"]
+    if not success_summaries:
+        raise RuntimeError("三通道流水线没有成功生成任何纹理变体。")
+
+    success_paths = {item["纹理ID"]: Path(item["纹理源图"]) for item in success_summaries}
+    root_texture_set_path = write_single_texture_set(
+        out_dir,
+        success_paths,
+        palette=palette,
+        prompt_map=prompt_map,
+        texture_ids=list(DEFAULT_TEXTURE_IDS),
+        require_all=False,
+    )
+    if inject_front_split_motifs and split_assets:
+        inject_front_split_motifs(root_texture_set_path, split_assets)
+
+    ordered_summaries = []
+    by_id = {item.get("纹理ID"): item for item in variant_summaries}
+    for texture_id in DEFAULT_TEXTURE_IDS:
+        if texture_id in by_id:
+            ordered_summaries.append(by_id[texture_id])
+    ordered_summaries.extend(item for item in variant_summaries if item.get("纹理ID") not in DEFAULT_TEXTURE_IDS)
+
+    default_summary = next(
+        (item for item in ordered_summaries if item.get("status") == "success" and item.get("纹理ID") == "main"),
+        None,
+    ) or next(item for item in ordered_summaries if item.get("status") == "success")
+
+    root_plan = Path(default_summary["裁片填充计划"])
+    if root_plan.exists():
+        (out_dir / "piece_fill_plan.json").write_text(root_plan.read_text(encoding="utf-8"), encoding="utf-8")
+
+    return root_texture_set_path, hero_motif_path, ordered_summaries, default_summary
 
 
 def mirror_tile(image: Image.Image) -> Image.Image:
@@ -1308,6 +1626,8 @@ def main() -> int:
     parser.add_argument("--neo-model", default="gemini-3-pro-image-preview")
     parser.add_argument("--neo-size", default="2K", choices=["1K", "2K", "4K"])
     parser.add_argument("--num-images", default="1", choices=["1", "4"])
+    parser.add_argument("--neo-workers", type=int, default=4, help="Neo AI 图片生成并行数。默认 4，同时生成3张纹理和透明主图。")
+    parser.add_argument("--pipeline-workers", type=int, default=3, help="纹理后处理通道并行数。默认 3，同时处理 main/secondary/accent_light。")
     parser.add_argument("--garment-type", default="", help="服装类型（如'儿童外套套装'、'女装连衣裙'）。走主题图路径时必填，会写入设计简报并传给部位识别。")
     parser.add_argument("--template", default="", help="模板ID。未提供时按 garment_type 自动匹配。")
     parser.add_argument("--mode", default="standard", choices=["fast", "standard", "production"], help="运行模式。fast=快速流程，standard=默认流程，production=完整规划流程。")
@@ -1665,6 +1985,8 @@ def main() -> int:
     # ============================================================
     hero_motif_path = None
     board_path = None
+    pipeline_variant_summaries = None
+    pipeline_default_summary = None
     if args.texture_set:
         texture_set_path = Path(args.texture_set)
         if not texture_set_path.is_absolute():
@@ -1703,23 +2025,21 @@ def main() -> int:
                 hero_motif_path = existing_heroes[-1].resolve()
                 print(f"[资产复用] 已存在3张单纹理，跳过重新生成: {texture_root}")
                 print(f"[资产复用] 已存在AI生成透明主图，跳过重新生成: {hero_motif_path}")
+                if hero_motif_path:
+                    hero_motif_path = hero_motif_path.resolve()
+                prompt_map = load_texture_prompt_map(out_dir)
+                texture_set_path = write_single_texture_set(out_dir, texture_paths, palette=palette, prompt_map=prompt_map)
             else:
-                texture_paths, hero_motif_path = generate_single_textures_and_hero_assets(args, out_dir)
-            if hero_motif_path:
-                hero_motif_path = hero_motif_path.resolve()
-            prompt_map = {}
-            texture_prompts_path = out_dir / "texture_prompts.json"
-            if texture_prompts_path.exists():
-                try:
-                    data = json.loads(texture_prompts_path.read_text(encoding="utf-8"))
-                    prompt_map = {
-                        item.get("texture_id", ""): item.get("prompt", "")
-                        for item in data.get("prompts", [])
-                        if item.get("texture_id") in DEFAULT_TEXTURE_IDS
-                    }
-                except Exception:
-                    prompt_map = {}
-            texture_set_path = write_single_texture_set(out_dir, texture_paths, palette=palette, prompt_map=prompt_map)
+                prompt_map = load_texture_prompt_map(out_dir)
+                texture_set_path, hero_motif_path, pipeline_variant_summaries, pipeline_default_summary = run_single_texture_channel_pipeline(
+                    args=args,
+                    out_dir=out_dir,
+                    pieces_path=pieces_path,
+                    garment_map_path=garment_map_path,
+                    template_assets=template_assets,
+                    palette=palette,
+                    prompt_map=prompt_map,
+                )
         if args.collection_board:
             if not board_path or not board_path.exists():
                 raise RuntimeError(f"面料看板未找到: {board_path}")
@@ -1749,6 +2069,41 @@ def main() -> int:
     # ============================================================
     # Phase 3: 生产规划、填充计划与渲染
     # ============================================================
+    if pipeline_variant_summaries is not None and pipeline_default_summary is not None:
+        variant_summaries = pipeline_variant_summaries
+        default_summary = pipeline_default_summary
+        default_rendered_dir = Path(default_summary["渲染目录"])
+        build_production_context(
+            args,
+            out_dir,
+            pieces_path=pieces_path,
+            garment_map_path=garment_map_path,
+            template_assets=template_assets,
+        )
+
+        summary = {
+            "单纹理资产": str((out_dir / "neo_textures").resolve()),
+            "面料看板": "",
+            "AI生成透明主图": str(hero_motif_path) if hero_motif_path else "",
+            "面料组合": str(texture_set_path.resolve()),
+            "裁片清单": str(pieces_path.resolve()),
+            "部位映射": str(garment_map_path.resolve()),
+            "裁片填充计划": str((out_dir / "piece_fill_plan.json").resolve()),
+            "渲染目录": str(default_rendered_dir.resolve()),
+            "预览图": str((default_rendered_dir / "preview.png").resolve()),
+            "白底预览图": str((default_rendered_dir / "preview_white.jpg").resolve()),
+            "清单": str((default_rendered_dir / "texture_fill_manifest.json").resolve()),
+            "裁片模板变体": variant_summaries,
+        }
+        write_json(out_dir / "automation_summary.json", summary)
+        success_count = sum(1 for item in variant_summaries if item.get("status") == "success")
+        failed_count = sum(1 for item in variant_summaries if item.get("status") == "failed")
+        user_summary = {k: v for k, v in summary.items() if k != "裁片模板变体"}
+        fail_suffix = f"，{failed_count} 个通道失败，详见 automation_summary.json" if failed_count else ""
+        user_summary["裁片模板变体"] = f"已生成 {success_count} 套单纹理结果至 variants/ 目录，不在此处展示{fail_suffix}"
+        print(json.dumps(user_summary, ensure_ascii=False, indent=2))
+        return 0
+
     ensure_theme_front_split(args, out_dir, texture_set_path)
     build_production_context(
         args,
