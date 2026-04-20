@@ -975,6 +975,89 @@ def run_single_texture_channel_pipeline(
     return root_texture_set_path, hero_motif_path, ordered_summaries, default_summary
 
 
+def run_ready_single_texture_channel_pipeline(
+    args: argparse.Namespace,
+    out_dir: Path,
+    texture_paths: dict[str, Path],
+    hero_motif_path: Path,
+    pieces_path: Path,
+    garment_map_path: Path,
+    template_assets: dict | None,
+    palette: dict | None,
+    prompt_map: dict[str, str],
+) -> tuple[Path, Path, list[dict], dict]:
+    """Run per-texture downstream channels for already available assets."""
+    if not create_front_split_assets:
+        raise RuntimeError("theme_front_splitter 不可用，无法生成主题前片切半资产。")
+    args.hero_motif_image = str(hero_motif_path)
+    split_assets = create_front_split_assets(hero_motif_path, out_dir)
+    pipeline_workers = max(1, int(getattr(args, "pipeline_workers", 3) or 3))
+    pipeline_workers = min(pipeline_workers, len(DEFAULT_TEXTURE_IDS))
+    print(f"[纹理通道] 复用已生成资产，并行后处理 workers={pipeline_workers}")
+    print(f"[主题前片] 已生成切半资产: {split_assets['left']}, {split_assets['right']}")
+
+    variant_summaries = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=pipeline_workers) as executor:
+        future_map = {
+            executor.submit(
+                process_single_texture_channel,
+                args,
+                out_dir,
+                texture_id,
+                texture_paths[texture_id],
+                hero_motif_path,
+                pieces_path,
+                garment_map_path,
+                palette,
+                prompt_map,
+                split_assets,
+                template_assets,
+            ): texture_id
+            for texture_id in DEFAULT_TEXTURE_IDS
+            if texture_paths.get(texture_id)
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            texture_id = future_map[future]
+            try:
+                variant_summaries.append(future.result())
+            except Exception as exc:
+                variant_summaries.append({
+                    "status": "failed",
+                    "纹理ID": texture_id,
+                    "纹理源图": str(texture_paths.get(texture_id, "")),
+                    "error": str(exc),
+                })
+                print(f"[警告] 纹理通道 {texture_id} 失败: {exc}", file=sys.stderr)
+
+    success_summaries = [item for item in variant_summaries if item.get("status") == "success"]
+    if not success_summaries:
+        raise RuntimeError("三通道流水线没有成功生成任何纹理变体。")
+
+    root_texture_set_path = write_single_texture_set(
+        out_dir,
+        {item["纹理ID"]: Path(item["纹理源图"]) for item in success_summaries},
+        palette=palette,
+        prompt_map=prompt_map,
+        texture_ids=list(DEFAULT_TEXTURE_IDS),
+        require_all=False,
+    )
+    if inject_front_split_motifs:
+        inject_front_split_motifs(root_texture_set_path, split_assets)
+
+    by_id = {item.get("纹理ID"): item for item in variant_summaries}
+    ordered_summaries = [by_id[texture_id] for texture_id in DEFAULT_TEXTURE_IDS if texture_id in by_id]
+    default_summary = next(
+        (item for item in ordered_summaries if item.get("status") == "success" and item.get("纹理ID") == "main"),
+        None,
+    ) or next(item for item in ordered_summaries if item.get("status") == "success")
+
+    root_plan = Path(default_summary["裁片填充计划"])
+    if root_plan.exists():
+        (out_dir / "piece_fill_plan.json").write_text(root_plan.read_text(encoding="utf-8"), encoding="utf-8")
+
+    return root_texture_set_path, hero_motif_path, ordered_summaries, default_summary
+
+
 def mirror_tile(image: Image.Image) -> Image.Image:
     """镜像修复：将纹理裁剪修复为无缝图块。"""
     src = image.convert("RGBA")
@@ -2028,7 +2111,17 @@ def main() -> int:
                 if hero_motif_path:
                     hero_motif_path = hero_motif_path.resolve()
                 prompt_map = load_texture_prompt_map(out_dir)
-                texture_set_path = write_single_texture_set(out_dir, texture_paths, palette=palette, prompt_map=prompt_map)
+                texture_set_path, hero_motif_path, pipeline_variant_summaries, pipeline_default_summary = run_ready_single_texture_channel_pipeline(
+                    args=args,
+                    out_dir=out_dir,
+                    texture_paths=texture_paths,
+                    hero_motif_path=hero_motif_path,
+                    pieces_path=pieces_path,
+                    garment_map_path=garment_map_path,
+                    template_assets=template_assets,
+                    palette=palette,
+                    prompt_map=prompt_map,
+                )
             else:
                 prompt_map = load_texture_prompt_map(out_dir)
                 texture_set_path, hero_motif_path, pipeline_variant_summaries, pipeline_default_summary = run_single_texture_channel_pipeline(
